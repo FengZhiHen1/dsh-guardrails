@@ -95,7 +95,7 @@ if (!existsSync(LAUNCHER)) {
     step(`组合：${profile} 恰一行且解析自 dsh-guardrails`, rowCount === 1 && resolved, `行数=${rowCount}`)
   }
   step(
-    '组合：web 依赖为发布物形态（registry 范围或 tarball，非源码直挂）',
+    '组合：web 依赖为发布物形态（registry 范围、tarball 或 github: 钉 ref，非源码直挂）',
     releaseSpec === true,
     `spec=${webDep ?? '未找到'}`,
   )

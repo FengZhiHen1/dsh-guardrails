@@ -36,12 +36,12 @@ node .../bin.js --profile test --dump-config
 node .../bin.js --profile web --dump-config
 ```
 
-预期结果：test 与 web 的 dump 各出现 `# == dsh-guardrails` 层且恰一行 `id: guardrails / name: dsh-guardrails`，解析自 `dsh-guardrails` 包；web 依赖为发布物形态（当前 `file:` tarball 过渡，发布后切换 registry）。test 的 `node_modules/dsh-guardrails` 为符号链接指向仓库。
+预期结果：test 与 web 的 dump 各出现 `# == dsh-guardrails` 层且恰一行 `id: guardrails / name: dsh-guardrails`，解析自 `dsh-guardrails` 包；web 依赖为发布物形态（当前 `github:` 钉 ref，发布后切换 registry）。test 的 `node_modules/dsh-guardrails` 为符号链接指向仓库。
 
 ## 生效流程
 
 - test：编辑源码 → 重启 test profile（端口 3099）即加载（符号链接直挂，无需重装）。
-- web：当前以 `file:` tarball 过渡挂载（pnpm 装入 store 的只读快照）；改代码须先 `npm pack` 更新 `dist/` 产物并重装；发布后切换 `dsh plugin --profile web add <registry 版本>`。
+- web：当前以 `github:` 钉 ref 的 git 依赖挂载（源码仓库 `FengZhiHen1/dsh-guardrails`，pnpm 克隆进 store 的只读快照，commit 钉死）；源码更新须先 push 到该仓库再重新 add 新的 commit ref；发布后切换 `dsh plugin --profile web add <registry 版本>`。
 
 ## 测试体系
 
