@@ -1,0 +1,32 @@
+{
+  "name": "dsh-guardrails",
+  "version": "1.2.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FengZhiHen1/dsh-guardrails.git"
+  },
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check index.js && node --check lib/rules.js && node --check lib/path-check.js && node --check lib/command.js && node --check lib/destructive.js && node --test test/*.test.mjs",
+    "verify": "node verify/run-verify.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+# dsh-guardrails bundle layer — applied when a profile lists this package in
+# dsh.profile.bundles. Rows reference the package by name so Node module
+# resolution finds the installed code. Runtime defaults live at the plugin's
+# config boundary: the exported Schemastery `Config` schema validates the
+# row's config block before apply and fills defaults (all defense layers on,
+# DSR-006 verbose leaves). The row therefore carries no config; users override
+# by id in their own profile patch layer with the same id (see README).
+- insert:
+    - id: guardrails
+      name: dsh-guardrails
