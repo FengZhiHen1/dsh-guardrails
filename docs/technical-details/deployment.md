@@ -12,10 +12,11 @@
 
 `plugins/dsh-guardrails/`（仓库内唯一源码）：
 
-- `package.json`：`name: dsh-guardrails`，`dsh.bundle.patch: ./cordis.patch.yml`，`files: [index.js, cordis.patch.yml]`，`scripts.test: node --test test/`。
+- `package.json`：`name: dsh-guardrails`，`dsh.bundle.patch: ./cordis.patch.yml`，`dsh.client`（platform web，inject runtime/ui-settings），`exports["./client"]`，`files: [index.js, client.js, cordis.patch.yml]`，`scripts.test: node --test test/`。
 - `cordis.patch.yml`：随包分发的安装层，`insert` 一行 `{ id: guardrails, name: dsh-guardrails }`——**行不带 config**：默认值属于插件 config boundary（导出的 Schemastery `Config` schema 的 `.default()`，DSH 官方范式，见 DSR-006/rule-model.md 配置模型）；用户覆盖在该行基础上按 `id: guardrails` 合并。行 `name` 与包名一致供 Node 模块解析，行 `id` 是稳定身份供 profile 层覆盖。
-- `index.js`：官方插件形态——具名导出 `name` / `inject` / `Config`（Schemastery schema）/ `apply(ctx, config)`（0.1.1 范式，无 default export），注册 `ctx.tools.guard` 钩子。
-- `test/`（`*.test.mjs`）：规则矩阵、命令解析与生命周期测试。
+- `index.js`：官方插件形态——具名导出 `name` / `inject` / `Config`（Schemastery schema）/ `apply(ctx, config)`（0.1.1 范式，无 default export），注册 `ctx.tools.guard` 钩子；同时注册 `dsh-guardrails` settings 命名空间（行 config 为 base 层，用户设置覆盖并热生效，v1.3.0）。
+- `client.js`：浏览器半侧（`dsh.client` 声明，`exports["./client"]`）——DSH client 模块系统的惰性 CJS bundle，向 `settings.plugin.item` 注册配置卡片，与同名 settings 命名空间配对（官方"新增设置卡片"范式，v1.3.0）。
+- `test/`（`*.test.mjs`）：规则矩阵、命令解析、生命周期与 settings seam 测试。
 
 ## 部署红线（AGENTS.md 固化）
 

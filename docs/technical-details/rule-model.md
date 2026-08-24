@@ -50,6 +50,8 @@
 
 **配置入口（DSH 0.1.1 官方范式）**：插件导出 Schemastery `Config` schema（`@deepseek-ai/schemastery`），loader 在 `apply` 前验证行内 `config` 块并填充默认值（`cordis-tutorial §5`）——非法类型在加载期报 `ValidationError` 并挂载失败；默认值只属于 plugin config boundary（bundle 行不写 config）。未知键/未知子键（schema 对象对未知键透传）由 `evaluateRules` 拒绝。
 
+**设置页入口（v1.3.0，官方 settings 卡片范式）**：Host 半侧把插件行 config 作为 base 层注册同名 settings 命名空间（`dsh-guardrails`），用户设置文档（`settings.yaml` 分节）覆盖它并经 `scope.watch` 热生效；浏览器半侧 `client.js` 向 `settings.plugin.item` 按同名 key 注册卡片，与命名空间自动配对（设置 → 插件 → 插件配置）。settings 服务不可用时插件完全按行配置工作；provider 卸载回落 entry。
+
 防御层全量配置化：每个防御层一个可配叶子，缺省全开（关闭必须显式写 `false`）。类别键接受布尔（整类开/关）或对象（按操作/子族细分，子键缺省继承 `true`）；`evaluateRules` 统一归一化为下述扁平结构，判定层只消费叶子：
 
 | 类别 | 叶子 | 语义 |

@@ -7,11 +7,14 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import * as guardrails from '../index.js'
 
-function makeGuard(config = {}) {
+function makeGuard(config = {}, settings) {
   let handler
   const ctx = {
     get: () => undefined,
     effect: (fn) => fn(),
+    inject: (name, consumer) => {
+      if (name === 'settings' && settings !== undefined) consumer({ ...ctx, settings })
+    },
     tools: {
       guard: (h) => {
         handler = h

@@ -125,6 +125,7 @@ if (!existsSync(NPM_CLI)) {
       const installedRoot = join(installDir, 'node_modules', 'dsh-guardrails')
       const filesOk =
         existsSync(join(installedRoot, 'index.js')) &&
+        existsSync(join(installedRoot, 'client.js')) &&
         existsSync(join(installedRoot, 'lib', 'command.js')) &&
         existsSync(join(installedRoot, 'cordis.patch.yml'))
       const importRun = run(

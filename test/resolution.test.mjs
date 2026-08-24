@@ -17,6 +17,7 @@ function makeGuard(config = {}) {
   const ctx = {
     get: () => undefined,
     effect: (fn) => fn(),
+    inject: () => {},
     tools: {
       guard: (h) => {
         handler = h

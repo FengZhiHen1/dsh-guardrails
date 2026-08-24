@@ -17,6 +17,9 @@ function makeLifecycleCtx() {
       const result = fn()
       if (typeof result === 'function') disposers.push(result)
     },
+    inject: (name, consumer) => {
+      if (name === 'settings' && ctx.$$settings !== undefined) consumer({ ...ctx, settings: ctx.$$settings })
+    },
     tools: {
       guard: (handler) => {
         guards.push(handler)
