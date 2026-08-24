@@ -1,6 +1,21 @@
 # Changelog
 
-## 1.2.0（当前，未发布）
+## 1.3.0（当前，未发布）
+
+### 变更
+
+- **设置页配置入口（官方 settings 卡片范式）**：配置现在可出现在 设置 → 插件 → **插件配置**——
+  - Host 半侧注册 `dsh-guardrails` settings 命名空间：插件行 config 作为 **base 层**，用户设置文档覆盖它，**提交即热生效**（settings 服务卸载时回落行配置，无 settings 服务时完全按行配置工作）；
+  - 浏览器半侧新增 `client.js`（DSH client 模块系统的惰性 CJS bundle）：向 `settings.plugin.item` 按同名 key 注册卡片（每个防御层叶子开关 + 已覆盖标记/重置 + 写回 `settings.yaml`），与 Host 命名空间自动配对；
+  - `package.json`：`exports["./client"]`、`dsh.client`（platform web，inject runtime/ui-settings）、`files` 加入 `client.js`。
+- 版本 1.3.0。
+
+### 测试与验证
+
+- 新增 `test/settings.test.mjs`：命名空间注册与 base 层、用户覆盖热生效（含 v1 布尔形态归一化）、provider 卸载回落 entry、无 settings 服务兼容。
+- `verify` 冒烟断言加入 `client.js` 随包检查。
+
+## 1.2.0（未发布）
 
 ### 变更
 

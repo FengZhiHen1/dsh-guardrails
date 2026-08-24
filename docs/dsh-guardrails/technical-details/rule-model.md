@@ -1,0 +1,96 @@
+# dsh-guardrails 规则模型
+
+## 权威范围
+
+本文唯一拥有 `dsh-guardrails` 的敏感类别定义、操作类型矩阵、工具通道映射、名单结构与 fail 语义。命令文本分析机制归 `command-analysis.md`，部署归 `deployment.md`，需求与验收归 `requirements.md`。
+
+## 结论先行
+
+拦截模型是**敏感类别 × 操作类型**矩阵：内容访问（读/写/删）套全规则，元数据列举只套凭据目标，写系统区单独按写拦截。判定的三个语义：
+
+1. **凭据目标（R0）**：读、写、列举全拦——文件存在性本身是敏感信息（DSR-002 严格策略）。
+2. **内容敏感面（env / git）**：内容访问拦，列举放行。
+3. **系统区（W0）**：只拦写，读与列举放行（DSR-005）。
+
+> 变更注记（DSR-003 重访）：sessions 类别已移除——`.dsh` 目录（含 `sessions/` 会话历史）不再属于任何敏感类别，读/写/列举均放行；`.dsh` 下的凭据文件仍由 credentials 名单覆盖。
+
+## 敏感类别
+
+| 类别 | 语义 | 覆盖对象 | 操作约束 |
+|---|---|---|---|
+| credentials（R0） | 永久不可见 | 私钥与令牌文件名、私钥后缀、凭据目录段、相邻段组合、浏览器资料、Windows 凭据/DPAPI、用户与系统注册表 Hive、内存与转储文件 | 读/写/列全拦 |
+| env | 敏感环境文件 | `.env` 及 `.env.*`（安全后缀 example/sample/template/dist/default 除外） | 内容访问拦，列举放行 |
+| git | 仓库内部 | `.git` 目录（任意路径段） | 内容访问拦，列举放行 |
+| system（W0） | 系统区写禁 | `C:/Windows/**`、`C:/Program Files/**`、`C:/Program Files (x86)/**`、`C:/ProgramData/**`、`C:/Recovery/**`（绝对前缀）；用户启动目录、PowerShell Profile（用户名无关段组合）；Hosts/计划任务/证书目录由 `C:/Windows` 与 `C:/ProgramData` 前缀覆盖；EFI 分区无盘符不纳入 | 只拦写，读/列举放行 |
+| destructive | 破坏性命令 | 机器级、清空、管道删除、git 高危子命令、远程内容执行、磁盘/数据库工具、.NET 直接 API、绝对盘根删除 | 命令文本全规则 |
+
+`.dsh`（含 `sessions/` 会话历史）不是敏感类别：混合目录按文件级规则（DSR-003）在 2026 年重访后决定整体放行（见 DSR-003 重访注记），仅其下凭据文件名（`.credentials.yaml`、`.auteur-media-secret` 等）由 credentials 名单覆盖。
+
+## 操作类型与通道
+
+### 操作类型
+
+- **内容读**：read / read_image / grep 工具；命令文本中的内容读取类命令。
+- **内容写**：write / edit 工具；命令文本中的写/删类命令。
+- **元数据列举**：glob 工具；命令文本中的列举类命令（`Get-ChildItem` 等）。
+
+### 工具通道映射
+
+| 工具 | 操作类型 | 套用规则 |
+|---|---|---|
+| read / read_image / grep | 内容读 | env、git、credentials 全规则 |
+| write / edit | 内容写 | env、git、credentials、system 全规则 |
+| glob | 元数据列举 | 仅 credentials（存在性敏感） |
+
+### 命令文本通道
+
+见 `command-analysis.md`：列举模式（全部片段为元数据动词、无 `$()`、无重定向）只查 credentials；否则全规则（env / git / credentials 引用 + destructive 分析；system 写引用按写类命令判定）。
+
+## 配置模型（v2，DSR-006，v1.1.0 已实现；配置入口 v1.2.0 按官方范式）
+
+**配置入口（DSH 0.1.1 官方范式）**：插件导出 Schemastery `Config` schema（`@deepseek-ai/schemastery`），loader 在 `apply` 前验证行内 `config` 块并填充默认值（`cordis-tutorial §5`）——非法类型在加载期报 `ValidationError` 并挂载失败；默认值只属于 plugin config boundary（bundle 行不写 config）。未知键/未知子键（schema 对象对未知键透传）由 `evaluateRules` 拒绝。
+
+**设置页入口（v1.3.0，官方 settings 卡片范式）**：Host 半侧把插件行 config 作为 base 层注册同名 settings 命名空间（`dsh-guardrails`），用户设置文档（`settings.yaml` 分节）覆盖它并经 `scope.watch` 热生效；浏览器半侧 `client.js` 向 `settings.plugin.item` 按同名 key 注册卡片，与命名空间自动配对（设置 → 插件 → 插件配置）。settings 服务不可用时插件完全按行配置工作；provider 卸载回落 entry。
+
+防御层全量配置化：每个防御层一个可配叶子，缺省全开（关闭必须显式写 `false`）。类别键接受布尔（整类开/关）或对象（按操作/子族细分，子键缺省继承 `true`）；`evaluateRules` 统一归一化为下述扁平结构，判定层只消费叶子：
+
+| 类别 | 叶子 | 语义 |
+|---|---|---|
+| env | `read` / `modify` | `.env` 路径内容读 / 内容写（安全后缀与列举放行语义不变） |
+| git | `read` / `modify` | `.git` 内部内容读 / 内容写 |
+| credentials | `read` / `modify` / `list` | 凭据读 / 写 / 列举（R0 严格策略：存在性本身敏感） |
+| system | `write` | 系统区写（W0；读与列举本就放行，无对应叶子） |
+| destructive | `git` / `machine` / `eval` / `cli` / `bulk` / `target` | 六子族，分组见 `command-analysis.md` |
+| unverifiable | — | 动态 `$()` 目标 fail-safe（类别无关，独立顶层键） |
+
+- 工具通道与命令文本通道共享同一叶子：路径层按调用参数（`modifying` / `metadataOnly`）取叶子；命令文本层先按动词分类（`classifyVerb` → read / modify / list）再取对应叶子。
+- v1 五键布尔写法继续有效（等于对应类别全开/全关），归一化后落到各叶子。
+- 非法配置（未知键、非布尔、非对象、数组）挂载即失败，不静默降级。
+- 不提供：名单配置化（自定义敏感路径，DSR-004 维持）、档位预设与三态模式（DSR-006 决议）。
+
+## 名单结构
+
+名单在插件源码中硬编码（DSR-004），按匹配方式分四组：
+
+| 组 | 匹配方式 | 当前成员（基线） |
+|---|---|---|
+| 文件名 | 解析后路径的 basename 精确匹配（大小写不敏感） | `id_rsa`、`id_ed25519`、`id_ecdsa`、`id_dsa`、`id_ed25519_sk`、`id_ecdsa_sk`、`.npmrc`、`.pypirc`、`.netrc`、`.pgpass`、`.credentials.yaml`、`.auteur-media-secret` |
+| 后缀 | basename 以指定后缀结尾 | `.pem`、`.key`、`.p12`、`.pfx`、`.ppk` |
+| 目录段 | 路径任意段精确匹配 | `.ssh`、`.aws`、`.azure`、`.gnupg`、`.kube`、`.pki` |
+| 相邻段组合 | 连续段序列匹配 | `[.config, gcloud]`、`[.docker, config.json]` |
+
+范围 B（DSR-001，2026-08 已实现）新增：
+
+| 组 | 新增成员 |
+|---|---|
+| 文件名 | `.git-credentials`、`NTUSER.DAT`、`UsrClass.dat`、`pagefile.sys`、`hiberfil.sys`；Hive 事务日志（`ntuser.dat.LOG1` 等）按 basename 前缀匹配 |
+| 相邻段组合 | 浏览器资料（`Google\Chrome\User Data`、`Microsoft\Edge\User Data`、`Mozilla\Firefox\Profiles`）、Windows 凭据（`Microsoft\Credentials`、`Microsoft\Protect`）、系统 Hive（`System32\config\SAM`/`SECURITY`/`SYSTEM`） |
+| system 绝对前缀 | `C:/Windows/`、`C:/Program Files/`、`C:/Program Files (x86)/`、`C:/ProgramData/`、`C:/Recovery/`（段首精确匹配，`C:/Windows.old` 不命中） |
+| system 段组合 | 用户启动目录（`AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup`）、PowerShell Profile（`Documents\WindowsPowerShell`、`Documents\PowerShell`） |
+
+命令文本引用正则与名单同步维护（`CRED_TEXT_REFERENCE` 等），仅限静态文本匹配；动态路径（变量/通配符）不可解析，见 `command-analysis.md` 固有限制。system 写检测按写类动词/重定向/cd 链的静态目标解析（`lib/command.js` `assessSystemWrite`），不依赖文本正则。
+
+## fail 语义
+
+- **判定层 fail-closed**：命令无法被分类（含未知动词、`$()` 子表达式、重定向）时按全规则处理，不享受列举豁免；路径解析失败按不拦截处理（只影响覆盖，不影响安全判定）。
+- **钩子层 fail-open**：guard 钩子内部异常时记录 `[guardrails] internal error (fail-open)` 并放行，防止防护 bug 死锁会话。两层语义不可互换：判定保守保证不漏拦，钩子容错保证不阻断。

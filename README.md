@@ -56,7 +56,12 @@
 
 防御层全量配置化（DSR-006）：每个防御层都是独立开关，缺省全开（关闭必须显式写 `false`，子键缺省继承 `true`）。类别键接受布尔（= 整类开/关）或对象（= 按操作细分）。
 
-**配置入口按 DSH 官方范式（0.1.1）**：插件导出 Schemastery `Config` schema（依赖 `@deepseek-ai/schemastery`），loader 在 `apply` 前验证行的 `config` 块并填充默认值——默认值只属于 schema（bundle 行不写 config），非法类型在加载期报 `ValidationError` 并挂载失败；未知键/未知子键由 `evaluateRules` 兜底拒绝。profile 覆盖形态示例：
+**配置入口（DSH 官方范式）**：
+
+1. **设置页（推荐）**：设置 → 插件 → **插件配置** →「守卫」卡片——每个防御层叶子开关 + 重置。改动写入用户设置文档（`settings.yaml` 的 `dsh-guardrails` 分节），**提交即热生效**（后续判定立刻用新规则）。卡片随包分发（浏览器半侧 `client.js`，`dsh.client` 声明），与 Host 注册的同一命名空间自动配对（官方"新增设置卡片"范式）。
+2. **插件行 config（部署层）**：作为设置分节的 **base 层**，被用户设置覆盖；settings 服务不可用时插件完全按行配置工作。默认值只属于导出的 Schemastery `Config` schema（loader 在 `apply` 前验证并填充默认值；非法类型加载期报 `ValidationError` 挂载失败；未知键/未知子键由 `evaluateRules` 拒绝）。
+
+profile 覆盖形态示例（部署基线）：
 
 ```yaml
 - id: guardrails

@@ -1,6 +1,6 @@
 {
   "name": "dsh-guardrails",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -8,12 +8,21 @@
   },
   "type": "module",
   "main": "index.js",
+  "exports": {
+    ".": {
+      "default": "./index.js"
+    },
+    "./client": {
+      "default": "./client.js"
+    },
+    "./package.json": "./package.json"
+  },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --check index.js && node --check lib/rules.js && node --check lib/path-check.js && node --check lib/command.js && node --check lib/destructive.js && node --test test/*.test.mjs",
+    "check": "node --check index.js && node --check lib/rules.js && node --check lib/path-check.js && node --check lib/command.js && node --check lib/destructive.js && node --check client.js && node --test test/*.test.mjs",
     "verify": "node verify/run-verify.mjs"
   },
   "engines": {
@@ -21,12 +30,20 @@
   },
   "files": [
     "index.js",
+    "client.js",
     "lib/",
     "cordis.patch.yml"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   }
 }

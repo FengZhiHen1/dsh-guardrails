@@ -166,10 +166,40 @@ export const Config = z.object({
 export const name = 'dsh-guardrails'
 export const inject = ['tools']
 
-export function apply(ctx, config = {}) {
-  const rules = evaluateRules(config)
+/**
+ * Settings namespace this plugin owns — the official settings-seam pairing
+ * key: Host registers it, the browser card in `settings.plugin.item` is keyed
+ * by the same value, and the "插件配置" tab pairs the two (DSH cookbook
+ * "adding a settings card").
+ */
+export const SETTINGS_NS = 'dsh-guardrails'
 
-    const sandboxPolicy = ctx.get('sandboxPolicy')
+export function apply(ctx, config = {}) {
+  // The composition entry is the `base` of the settings section: the user
+  // document overrides it, and when no settings service mounts the plugin
+  // keeps working exactly as composed (official `installSettingsSection`
+  // semantics, replicated against the raw service so this package depends on
+  // nothing beyond schemastery).
+  const entryRules = evaluateRules(config)
+  let source = () => entryRules
+  let rules = source()
+  const rebuild = () => {
+    rules = evaluateRules(source())
+  }
+  ctx.inject('settings', (sctx) => {
+    const scope = sctx.settings.register(SETTINGS_NS, Config, { base: entryRules })
+    source = () => scope.get()
+    sctx.effect(() => () => {
+      // Settings provider detaching (or this fiber unloading): fall back to
+      // the composition entry and re-judge what the guard derived.
+      source = () => entryRules
+      rebuild()
+    })
+    rebuild()
+    scope.watch(() => rebuild())
+  })
+
+  const sandboxPolicy = ctx.get('sandboxPolicy')
     const workspaceRoot =
       sandboxPolicy && typeof sandboxPolicy.workspaceRoot === 'string'
         ? sandboxPolicy.workspaceRoot

@@ -1,0 +1,35 @@
+# DSR-001：范围边界——R0 文件系统补漏 + W0 系统区写禁
+
+## 上下文
+
+参考文档 `references/coding-agent-file-access-security-boundaries.md` 给出 R0（永久不可见）/ W0（永久不可写）/ P1（审批区）/ A2（自治）四级模型。guardrails 基线只覆盖了 R0 的一部分（私钥/云凭据/.env/.git/sessions）与破坏性命令，参考文档 R0 文件系统清单中还有多处未覆盖，W0 只覆盖了破坏性命令、未覆盖系统区写入。
+
+## 真实方向与评价
+
+- 方向 A：补齐 R0 文件系统漏项（`.git-credentials`、浏览器资料、Windows 凭据/DPAPI、`NTUSER.DAT`/`UsrClass.dat`、`pagefile.sys`/`hiberfil.sys`/内存转储、`SAM`/`SECURITY`/`SYSTEM` Hive）；W0 系统区写入交 DSH 文件沙箱，P1 交 DSH approval。
+- 方向 B：A + 把系统区写入（`C:\Windows` 等）也纳入硬阻断，guardrails 成为完整 W0 层。与 DSH 沙箱职责重叠，但沙箱只约束文件工具（write/edit），pwsh 命令在危险全权模式下不受限，guardrails 是唯一能拦"命令文本写系统区"的层。
+- 方向 C：只补 `.git-credentials`，其余记入重访。R0 覆盖面仍明显不足。
+
+评价：方向 B 的用户价值最高——系统区写禁正好补上"pwsh 命令写系统区"这一沙箱盲区；实现成本为路径前缀名单 + 写类命令文本判定，与既有规则同构。P1（AGENTS.md/CI/CD/IaC 等）三个方向都不拦：guardrails 是硬阻断器，拦了等于永不修改，与 P1"逐项审批"语义冲突，应交由 DSH approval。
+
+## 最终决定
+
+采用方向 B：R0 文件系统漏项全部补入 credentials 名单（读/写/列全拦）；新增 system 类别（W0），系统区只拦写、读与列举放行（DSR-005）；P1 审批区与非文件入口（环境变量/网络/进程内存等）明确非目标。
+
+## 直接后果
+
+- credentials 名单新增：文件名（`.git-credentials`、`NTUSER.DAT`、`UsrClass.dat`、`pagefile.sys`、`hiberfil.sys`）、目录段/组合（浏览器资料、`Microsoft\Credentials`、`Microsoft\Protect`、`System32\config\SAM` 等）。
+- 新增 `system` 配置键与系统区前缀名单；write/edit 与写类命令文本命中前缀即拦。
+- `reg`/`HKCU:` 注册表类命令、Linux/macOS 清单不纳入 v1。
+
+## 实现状态（2026-08）
+
+已落地：credentials 范围 B 名单、`system` 类别（绝对前缀 + 用户名无关段组合，只拦写）、
+写类命令文本/重定向/cd 链检测、配置键校验（未知键/非布尔值挂载即失败）、盘根删除拦截。
+实现清单以 `rule-model.md` 为准；EFI 分区（无盘符）与 PowerShell Profile 的
+`Documents` 本地化目录名未纳入 v1。
+
+## 重访条件
+
+- 需要覆盖注册表类命令文本或跨平台清单时。
+- DSH 文件沙箱若开始约束 pwsh 命令的系统区写入，`system` 类别与沙箱的职责划分需重新评估。
