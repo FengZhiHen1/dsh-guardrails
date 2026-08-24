@@ -186,7 +186,7 @@ export function apply(ctx, config = {}) {
   const rebuild = () => {
     rules = evaluateRules(source())
   }
-  ctx.inject('settings', (sctx) => {
+  ctx.inject(['settings'], (sctx) => {
     const scope = sctx.settings.register(SETTINGS_NS, Config, { base: entryRules })
     source = () => scope.get()
     sctx.effect(() => () => {

@@ -39,8 +39,11 @@ function makeHarness(settingsValue) {
       if (typeof result === 'function') disposers.push(result)
       return result
     },
+    // cordis 4.x inject() takes an array (or object) of dependency names;
+    // keep accepting the legacy bare-string form so the mock mirrors both.
     inject: (name, consumer) => {
-      if (name === 'settings') consumer({ ...ctx, settings })
+      const deps = Array.isArray(name) ? name : [name]
+      if (deps.includes('settings')) consumer({ ...ctx, settings })
     },
     tools: {
       guard: (h) => { handler = h },
