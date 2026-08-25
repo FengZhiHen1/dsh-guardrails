@@ -50,7 +50,7 @@
   指向本目录，得到 `link:` 依赖（node_modules 中是符号链接，源码改动
   **重启即生效**，无需重新安装）。插件行由 bundle 层提供，test 的用户层
   patch 不得再 insert 同一行（重复 id 会导致整个 profile 启动失败）。
-- **web（稳定）profile**：只吃发布物。当前形态为 **`github:` 钉 ref 的 git 依赖**：`dsh plugin --profile web add github:FengZhiHen1/dsh-guardrails#<commit>`（pnpm 克隆进 store 的只读快照，ref 钉死 commit——非分支/tag 漂移、不指向本地可写源码目录，符合 AGENTS.md 红线中"未发布插件可走 `github:` git 依赖"）。`npm publish` 发布后切换为 `dsh plugin --profile web add dsh-guardrails`（registry 版本）。每次源码更新需 push 到该仓库并重新 add 新的 commit ref。
+- **web（稳定）profile**：只吃发布物。当前形态为 **`github:` git 依赖**（manifest 未钉 ref，lockfile 的 resolution 钉 commit——钉 ref 非硬性要求；发布/挂载 web 前必须过 **test 实测门禁**，见 AGENTS.md「发布前置门禁」与 `verify/run-verify.mjs` 第 4 步启动冒烟）。`npm publish` 发布后切换为 `dsh plugin --profile web add dsh-guardrails`（registry 版本）。每次源码更新需 push 到该仓库，并（推荐）以新 commit ref 重新 `add` 以固定 lockfile 基线。
 
 ## 配置覆盖
 

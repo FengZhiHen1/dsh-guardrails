@@ -4,16 +4,19 @@
 //   3. composition assertions against the installed profiles
 //      (test and web: exactly one guardrails row resolving to dsh-guardrails;
 //       web dependency spec must be a release form, never a source link)
-//   4. clean-install smoke: npm pack → install the tarball into a temp dir →
+//   4. test-profile boot smoke (publish gate): boot the real test profile
+//      with the plugin mounted and assert it stays alive (no crash, no
+//      "did not activate" / load failures) before terminating it.
+//   5. clean-install smoke: npm pack → install the tarball into a temp dir →
 //      import and basic-apply the installed package (no source tree, no
 //      monorepo siblings).
-// The real-session smoke test stays manual: restart the test profile
+// The real-session behavior check stays manual: restart the test profile
 // afterwards and exercise actual interception behavior.
 //
 // Environment: DSH_HARNESS_ROOT (default E:/Project/Open_Source/deepseek-harness)
 // and DSH_HOME (default ~/.dsh). Run from the package root.
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,7 +27,13 @@ const ROOT = join(HERE, '..')
 // Glob form: `node --test <dir>` fails to resolve directories on Windows.
 const TESTS = join(ROOT, 'test', '*.test.mjs')
 const HARNESS = process.env.DSH_HARNESS_ROOT ?? 'E:/Project/Open_Source/deepseek-harness'
-const LAUNCHER = join(HARNESS, 'apps', 'cli', 'lib', 'bin.js')
+// 部署校验一律用全局 CLI（AGENTS.md 红线）：源码检出的 apps/cli/lib 可能
+// 过期（workspace 包的 lib 未随 src 重建——例如 credentials-local 曾为旧
+// 平面布局解析器），只有显式设置 DSH_HARNESS_ROOT 时才使用源码检出 launcher
+//（开发者自担构建新鲜度；参考用途：跑 DSH 自身 tests）。
+const LAUNCHER = process.env.DSH_HARNESS_ROOT
+  ? join(HARNESS, 'apps', 'cli', 'lib', 'bin.js')
+  : 'C:/nvm4w/nodejs/node_modules/@deepseek-ai/dsh/lib/bin.js'
 const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 // npm invoked as `node <npm-cli.js>`: `npm.cmd` cannot be spawned directly.
 const NPM_CLI = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
@@ -101,7 +110,57 @@ if (!existsSync(LAUNCHER)) {
   )
 }
 
-// 4. clean-install smoke: pack → install into a temp dir → import + apply.
+// 4. test-profile boot smoke (publish gate): the plugin must not crash a real
+// DSH boot. Boots the installed launcher against the test profile on an
+// ephemeral port (--port 0) without opening a browser; the process must stay
+// alive for the whole warm-up window and print no activation/load errors.
+const BOOT_SMOKE_WAIT_MS = 30_000
+const BOOT_ERROR_MARK = /did not activate|failed to load|duplicate loader entry id|fatal load failure|invalid config|host preparation failed|plugin tree failed to load/
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+async function bootSmoke() {
+  // SSH 变量非空 → web-runtime 跳过默认浏览器交接（--no-open 在
+  // `-profile` 透传形态下易被 launcher/commander 误解析，交给环境开关）。
+  const env = { ...process.env, DSH_HOME, SSH_CONNECTION: '1', SSH_TTY: '1' }
+  if (!existsSync(LAUNCHER)) return { ok: false, detail: `launcher 不存在：${LAUNCHER}（设置 DSH_HARNESS_ROOT）` }
+  const child = spawn(
+    process.execPath,
+    // 第一个 `--` 由 launcher 消耗（apps/cli/src/args.ts），`--port 0` 送达应用。
+    [LAUNCHER, '--profile', 'test', '--', '--port', '0'],
+    { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] },
+  )
+  let out = ''
+  let err = ''
+  child.stdout.on('data', (d) => { out += d })
+  child.stderr.on('data', (d) => { err += d })
+  let exited = null
+  child.on('exit', (code, signal) => { exited = { code, signal } })
+  await sleep(BOOT_SMOKE_WAIT_MS)
+  let terminatedByUs = false
+  if (exited === null) {
+    terminatedByUs = true
+    child.kill('SIGTERM')
+    await new Promise((resolve) => child.once('close', resolve))
+  }
+  const all = `${out}\n${err}`
+  const bad = BOOT_ERROR_MARK.test(all)
+  if (terminatedByUs) {
+    // 跑满了整个窗口才由我们终止：启动未崩溃。错误标记仍然门禁。
+    return {
+      ok: !bad,
+      detail: `test profile 启动存活 ≥${BOOT_SMOKE_WAIT_MS / 1000}s${bad ? '，但输出含错误标记' : ' 且无错误标记'}`,
+    }
+  }
+  return {
+    ok: false,
+    detail: `test profile 启动提前退出（code=${exited.code} signal=${exited.signal}）：${err.slice(0, 300)}`,
+  }
+}
+{
+  const smoke = await bootSmoke()
+  step('发布门禁：test profile 启动冒烟（无崩溃）', smoke.ok, smoke.detail)
+}
+
+// 5. clean-install smoke: pack → install into a temp dir → import + apply.
 if (!existsSync(NPM_CLI)) {
   step('发布：干净目录安装 + 导入冒烟', false, `npm CLI 不可用（${NPM_CLI}）`)
 } else {

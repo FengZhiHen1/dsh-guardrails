@@ -46,9 +46,10 @@
 // Distributed as a DSH bundle: package.json declares dsh.bundle.patch, the
 // install row ships in cordis.patch.yml, and profiles enable it by listing
 // this package in dsh.profile.bundles (via `dsh plugin --profile <name> add`).
-// The test profile mounts it from source; the web profile takes the packed
-// tarball until the package is published. Override the row config by id in a
-// profile's own cordis.patch.yml.
+// The test profile mounts it from source; the web profile takes it as a github
+// git dependency (lockfile-pinned) until the package is published. Both
+// profiles must pass the test smoke gate before any web/release install.
+// Override the row config by id in a profile's own cordis.patch.yml.
 
 import z from '@deepseek-ai/schemastery'
 import {
