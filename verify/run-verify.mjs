@@ -86,7 +86,7 @@ if (!existsSync(LAUNCHER)) {
   const releaseSpec = typeof webDep === 'string'
     && !webDep.startsWith('link:')
     && (webDep.startsWith('^') || webDep.startsWith('~') || /\.tgz$/.test(webDep)
-      || (webDep.startsWith('github:') && /#/.test(webDep)))
+      || /^github:/.test(webDep) || /^git\+https:\/\//.test(webDep))
   for (const profile of ['test', 'web']) {
     const dump = run([LAUNCHER, '--profile', profile, '--dump-config'], HARNESS, env)
     const out = `${dump.stdout ?? ''}\n${dump.stderr ?? ''}`
