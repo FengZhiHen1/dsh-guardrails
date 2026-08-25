@@ -92,8 +92,8 @@ window.__ModuleLoader__.load({
 		};
 
 		/** Card component: one per namespace, rendering the leaf toggles. */
-		function GuardCard({ hooks }) {
-			const snapshot = React.useSyncExternalStore(hooks.subscribe, hooks.getSnapshot);
+		function GuardCard({ scope }) {
+			const snapshot = React.useSyncExternalStore(scope.subscribe, scope.getSnapshot);
 			if (!snapshot || snapshot.status !== 'ready') {
 				return React.createElement('div', { style: style.note }, snapshot && snapshot.status === 'unavailable'
 					? '当前会话不提供设置服务，配置来自插件行（启动时生效）。'
@@ -102,8 +102,8 @@ window.__ModuleLoader__.load({
 			const value = normalized(snapshot.value);
 			const overridden = typeof snapshot.user === 'object' && snapshot.user !== null ? snapshot.user : {};
 			const writable = snapshot.writable === true;
-			const setField = (field, fieldValue) => { hooks.set(field, fieldValue).catch(() => {}); };
-			const clearField = (field) => { hooks.unset(field).catch(() => {}); };
+			const setField = (field, fieldValue) => { scope.set(field, fieldValue).catch(() => {}); };
+			const clearField = (field) => { scope.unset(field).catch(() => {}); };
 
 			const rows = Object.entries(CATEGORIES).map(([cat, keys]) => {
 				const rowValue = value[cat] || leafDefaults(keys);
@@ -180,17 +180,25 @@ window.__ModuleLoader__.load({
 
 		function apply(ctx) {
 			const scope = ctx.settingsScope.bind({ namespace: NS });
-			const hooks = {
-				getSnapshot: () => scope.getSnapshot(),
-				subscribe: (listener) => scope.subscribe(listener),
-				set: (field, value) => scope.set(field, value),
-				unset: (field) => scope.unset(field),
+			// The inject face is registered WITHOUT the reserved `hooks` key: the
+			// renderer consumes that compartment (each member becomes a use<Name>
+			// selector hook and `hooks` never reaches the component's props).
+			// A plain member passes through verbatim (the skill-manager card uses
+			// the same shape), and its object identity is kept so the uSES
+			// subscribe side stays referentially stable across renders.
+			const face = {
+				scope: {
+					getSnapshot: () => scope.getSnapshot(),
+					subscribe: (listener) => scope.subscribe(listener),
+					set: (field, value) => scope.set(field, value),
+					unset: (field) => scope.unset(field),
+				},
 			};
 			ctx.slots.inject('settings.plugin.item', function* () {
 				yield ctx.slots.register({
 					name: 'settings.plugin.item',
 					key: NS,
-					inject: () => ({ hooks }),
+					inject: () => face,
 				}, GuardCard);
 			});
 		}
