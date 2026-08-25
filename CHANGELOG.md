@@ -4,7 +4,9 @@
 
 ### 修复
 
+- **设置卡片渲染崩溃（slot 注入面协议踩保留键）**：`client.js` 原先按 `inject: () => ({ hooks })` 注册，DSH 渲染器把注入面中**保留键 `hooks`**（成员须为 `{ getSnapshot, subscribe }` 的 `HostObservable` 对）消费成 `use<成员名>` 选择器 hook，`hooks` 键本身不会出现在组件 props——`GuardCard({ hooks })` 解构得到 `undefined`，`hooks.subscribe` 抛 `TypeError`，keyed 条目被渲染器 `reportEntryError` 一次性 abdicate，「插件配置」页无痕（刷新重崩，无任何部署层报错）。改为与 skill-manager 同构的平铺面（`inject: () => face`，`face.scope` 一次性创建、引用稳定），组件按 `{ scope }` 消费。
 - **cordis 4.x 兼容：`ctx.inject()` 不再接受裸字符串依赖名**（dsh 内置 `@deepseek-ai/cordis@4.0.1` 的 `Inject` 只接受数组/对象，裸字符串会在 `Inject.resolve` 的 `Reflect.has` 上抛 `TypeError: Reflect.has called on non-object`，导致 profile 启动失败）。`apply()` 内的 settings 注入改为数组形式 `ctx.inject(['settings'], ...)`；`test/settings.test.mjs` 的 mock 同步按 cordis 4.x 语义接收数组/字符串两种形态。
+- **设置卡片外观对齐官方 PluginCard 几何**：卡片从"裸表单"（纯 div + 内联 style，无折叠壳）改为与官方同构的折叠卡片——`li > button.header（名称/描述/折叠箭头，`aria-expanded` + 本地 `useState` 展开/收起）> body（border-top + margin 0 16px）`；主题 token 全部使用 `--dsw-alias-*`（ui-theme），几何对齐 `PluginCard.module.css`；折叠箭头复用 `@deepseek-ai/dsh-client-ui-primitives` 的 `IconChevronDownOutline14`（缺失时降级为文本箭头，绝不让整卡渲染失败），`dsh.client.inject` 相应补 `@deepseek-ai/dsh-client-ui-primitives`（shell-seeded static UI library，无需 client entry）。写入仍为即时模型（无暂存表单，故无保存/放弃 footer）。
 
 ### 变更
 
