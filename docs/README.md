@@ -2,7 +2,7 @@
 
 ## 权威范围
 
-本文是 `docs/design/dsh-guardrails/` 的入口，唯一拥有本主题的目录组织、当前状态、阅读顺序与文档地图。需求事实归 `requirements.md`，技术机制归 `technical-details/`，选型理由归 `decisions/`。本文不重复定义任何需求或技术事实。
+本文是本仓库 `docs/` 的入口，唯一拥有本主题的目录组织、当前状态、阅读顺序与文档地图。需求事实归 `requirements.md`，技术机制归 `technical-details/`，选型理由归 `decisions/`。本文不重复定义任何需求或技术事实。
 
 ## 当前状态
 
