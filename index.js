@@ -34,7 +34,7 @@
 //   keys, non-boolean values, non-object category values) fail the mount
 //   with an actionable error instead of silently degrading.
 //
-// Module layout (see docs/design/dsh-guardrails/technical-details/engineering.md):
+// Module layout (see docs/technical-details/工程结构与测试体系.md):
 //   lib/rules.js        — denylist data + text-reference regexes + switches
 //   lib/path-check.js   — path normalization + checkPath + system-area test
 //   lib/command.js      — command lexing, verbs, listing mode, text refs,
