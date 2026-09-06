@@ -67,21 +67,30 @@ corrupt Zstandard session log: first frame is not exactly one header line
   （`doctor.rs:57-65` 供值、`:121-123` 比较），独立编号的核心库永不可能与它相等 ⇒ 必然升级为 Error。
   实测 dev/web-next 的 cosmokit 1.8.3 / schemastery 3.18.2 与其 CLI 树**逐项相同**。判读细则已写入
   `tools/dsh-launcher-patch/README.md` 验收实录（含"何时是真分叉、怎么自己比"）。
-- **但本插件确有缺陷**：`@deepseek-ai/schemastery` 挂在 `dependencies` ⇒ `dsh plugin add` 会在 profile 的
-  `node_modules/@deepseek-ai/` 落一份**私有副本**，与 CLI 树那份并存——两份 module-local `Symbol()` 不等，
-  该 profile 工具调用可**静默全灭**（加载期零报错）。今天副本版本恰好一致才没爆，下次 CLI 升代就真分叉。
-  已改判 `peerDependencies ^3.18.2` 并补 `devDependencies`（`src/adapter/host.js:10` 是装载期 import，
-  裸 node 单测须能解析；profile 侧靠自身 `autoInstallPeers: false` 不会装回）——子仓库 `60ba0b0`。
-  刷新 web-next 后该目录条目数 **0**，重启后弹窗消失、卡片仍在。
+- **本插件确有一处可清理项，但我当时把它判重了**：`@deepseek-ai/schemastery` 挂在 `dependencies` ⇒ 安装时在 profile 的
+  `node_modules/@deepseek-ai/` 落一份私有副本。**（2026-09-06 晚更正）** 本条原写"两份 module-local `Symbol()` 不等 ⇒
+  该 profile 工具调用可**静默全灭**"——该机理**不适用于 schemastery**：它的跨边界身份是 `Symbol.for("schemastery")` /
+  `Symbol.for("ValidationError")`（全局注册表 ⇒ 副本之间同一身份），实测私装 3.18.1 与安装树 3.18.2 并存数日、工具调用正常。
+  真正致命的是 `cordis` 与携带 service key 的 `@deepseek-ai/dsh-*`（实测 `@deepseek-ai/dsh-tools` lib 内 `const key = Symbol()`，
+  module-local ⇒ 版本相同也致命），而本插件对 `cordis`、`dsh-settings` **一直就是 peer**，从未触雷。
+  故 `60ba0b0`（改判 `peerDependencies ^3.18.2` + 补 `devDependencies`，因 `src/adapter/host.js:10` 是装载期 import）
+  的收益是**少一份冗余拷贝、消除未来漂移，属清理而非修 bug**。刷新 web-next 后该目录条目数 **0**、重启后弹窗消失、卡片仍在
+  ——现象不变，变的是对危险等级的归因。
 - **稳定 web profile 是"真分叉"那一例**（未处理，需用户指令）：`homes\stable-dev\profiles\web` 自 09-04 起
   每次启动弹 3 条同类 Error，其副本 cosmokit 1.8.2 / schemastery 3.18.1 **确实落后** rc.2 CLI 树的 1.8.3 / 3.18.2。
   来源是本插件旧装件 + `dsh-skill-manager`（带 `@deepseek-ai/dsh-storage-domain@0.1.0-rc.7`）；
   **两者源码现均已正确**（skill-manager 已是 peer `*` + devDep `0.1.2-rc.1`），故按现源码重装即清。
   但 web 是用户正在使用的稳定环境、刷新须过 test 实测门禁 ⇒ 未获指令不动。
-- 规则已收紧入知识库：`knowledge/04` §7（泛化为"任何 `@deepseek-ai/*` 核心包一律 peer"＋装载期 import 须配
-  devDeps）、`05` §7 失败表（新增"某 profile 工具调用全部死在 `.prepare`、加载期零报错"症状行）、
-  `21`/`22` 清单（含安装后复查"该目录应为空"）。**原口径只点名 `cordis` 与 `@deepseek-ai/dsh-*`，
-  `schemastery` 正落在缝里**——这就是当初漏掉它的原因，清单跑一遍也不会亮红。
+- 规则曾据此起草进知识库（`knowledge/04` §7 泛化为"任何 `@deepseek-ai/*` 核心包一律 peer，不得进 dependencies"、
+  `05` §7 失败表新增症状行、`21`/`22` 清单加复查项），**当晚被外部插件作者的反问证伪并收窄**（顶层 commit `1750285`）：
+  作者把 `dsh-settings` 移进 peer 却把 `schemastery` 留在 deps，不是漏修一半，而是精确地按身份机制分类——
+  DSH 一方 18 个包（`dsh-llm`、`dsh-tools`、全部 `dsh-tool-*`…）本来就把 schemastery 写在 `dependencies`。
+  现行口径：`cordis` 与携带 service key 的 `@deepseek-ai/dsh-*` **必须 peer**；`schemastery`/`cosmokit` 可 deps；
+  检测面由"该目录应为空"改为"**非空不等于故障**，须分类并逐项比版本"。过宽泛化的实际代价是给无害声明报假红、
+  并驱动人去给上游提不该提的 issue。
+- **教训（比结论更该留下）**：从一个观察（本插件有私装副本）跳到普适红线（所有核心包都危险）之前，先做两件
+  十分钟就能查实的事——**① 数一方包怎么写这份声明；② 打开该包 lib 看身份符号是 `Symbol()` 还是 `Symbol.for()`**。
+  两条都是硬证据，我当时一条都没做，只凭"看到副本在 profile 里"就推定了机理并写进基线。
 
 **解除记录**：同日已把本插件与 dsh-skill-manager 从 test profile 解除应用（测试归测试，常态挂载在 web-next）。
 
