@@ -4,6 +4,7 @@
 
 ### 修复
 
+- **核心包由 `dependencies` 改判 `peerDependencies`（消除 profile 私有副本）**：`@deepseek-ai/schemastery` 原挂在 `dependencies`，经 `dsh plugin add` 安装时会在 profile 的 `node_modules/@deepseek-ai/` 落一份**私有副本**（连带其依赖 `cosmokit`）。核心包应由 CLI 依赖树经 HOME 级 `profiles/node_modules` 共享回退层提供——该层是指向 CLI 树的软链，全代际只有一份物理副本；profile 内的私有副本正是启动器依赖自检（doctor）要防的「两代混装」温床：两份模块各自 mint 不相等的 module-local `Symbol()`，ToolRuntime 调度查不到，该 profile 全部工具调用死在 `.prepare`，且加载期零报错。当前副本恰好与 CLI 树同版本（schemastery 3.18.2 / cosmokit 1.8.3）所以未爆发，但 `^3.18.1` 的范围在下一次 CLI 升代时就会真分叉。同栈的 `dshmarket`、`deepseek-harness-background` 都以 peer 形态声明 schemastery，本插件是该 profile 内唯一异类。改后：`peerDependencies` 收 `@deepseek-ai/schemastery ^3.18.2`（范围写法对齐上游 `dsh-settings`），并新增 `devDependencies` 同项——`src/adapter/host.js` 在装载期 `import z from '@deepseek-ai/schemastery'`，裸 node 单测必须能解析它；profile 侧因自身 `autoInstallPeers: false` 不会把副本装回来。
 - **判定基准目录来源失效（DSR-007）**：旧实现读 `session.meta.cwd`，而 0.1.2-rc.1 的 `Session` 公开面只有 `header`（`meta` 仅是 `create()` 的输入选项）——读取链恒为 `undefined`，base 静默落到部署 fallback 根（DSH 进程启动目录），相对路径判定坐标系错误。改为与官方工具链同一身份：`sandboxPolicy.resolve({ session }).workspaceRoot`（规范化 `session.header.cwd`；agentless 回落部署根；无 sandbox-policy 服务降级为 `''`）。新增 `test/base-dir.test.mjs` 锁定调用形状与降级分支。
 - **设置写入静默吞异常**（质量地板 error）：浏览器半侧 `scope.set/unset` 的裸 `.catch(() => {})` 改为 `console.warn` 留痕——写入失败非致命（快照不动，用户可见未生效），但绝不无声。
 
@@ -12,7 +13,7 @@
 - **结构对齐 core/adapter 单包分层约定**（仓库 0.1.2-rc.1 知识库硬性约定）：`lib/` 四模块迁 `src/core/` 并拆出 `check-command.js`（pwsh 判定管线）与 `deny-messages.js`（文案 + leaf 门控）两个纯模块，core 共六模块（禁 `@deepseek-ai/*` import，仓库分层门禁从空转变为实质生效）；入口迁 `src/adapter/host.js`，包根 `index.js` 变为薄转发；浏览器半侧迁 `src/client/card.js`（`exports["./client"]` 直指，无构建管线不变）。
 - **settings 接线改官方 `installSection`**（0.1.2-rc.1 消费方首选 API）：删除手写 register/effect 回落逻辑；entry config 原样注册为 base 层（原为归一化叶子后注册——resolved 值语义不变，`describe` 的 base 显示形状随官方语义）。
 - **`assessDestructive` 按六子族拆分**（git/machine/eval/cli/bulk/target，与 DSR-006 配置叶子一一同构），主函数降为调度循环；`GuardCard` 拆子组件（Chevron/CardHeader/CategoryRow/UnverifiableRow）。
-- **包元数据对齐**：`peerDependencies` 新增 `@deepseek-ai/cordis ^4.0.2` 与 `@deepseek-ai/dsh-settings ^0.1.2-rc.1`（共享宿主安装树同一实例的元数据约定；纯 JS 无类型编译，不进 devDependencies）；`engines.node` 升 `^22.19.0 || >=24`（0.1.2-rc.1 基线）。
+- **包元数据对齐**：`peerDependencies` 新增 `@deepseek-ai/cordis ^4.0.2` 与 `@deepseek-ai/dsh-settings ^0.1.2-rc.1`（共享宿主安装树同一实例的元数据约定；二者均不在装载期 import，故无需 devDependencies——与 schemastery 不同，见上方「修复」）；`engines.node` 升 `^22.19.0 || >=24`（0.1.2-rc.1 基线）。
 - **设置卡片改统一保存模型（官方 PluginCard 暂存草稿语义，knowledge/15 §4.1）**：叶子开关不再即点即写——编辑进本地草稿，「保存」经单次 `scope.mutate()` 原子提交全部脏字段（一个 revision 围栏），「放弃」丢弃草稿；header 显示「未保存」pill，保存成功自动折叠，被拒保留草稿并显示 footer 诊断（对齐 skill-manager 生产范例）；行内「重置」保持即时语义（清除用户覆盖，非编辑操作）。
 - **卡片紧凑化**：类别行改为"标题 + 叶子复选框横排 + 行内重置"两行结构（原每叶子一行竖排），复选框用品牌色 token；标题去包名括号（「权限守护」）。
 - **verify 对齐部署现实**：组合断言与启动冒烟改用 `DSH_BIN` 指定的实例版本二进制（AGENTS.md 跨代红线；缺省回落遗留全局 CLI 时打印告警）；双 HOME 支持（`DSH_TEST_HOME`/`DSH_WEB_HOME`，web dump 用 `DSH_WEB_BIN`——web profile 属 stable-dev 实例，跨代各自用所属实例二进制）；tarball 冒烟断言更新为 `src/` 布局。
