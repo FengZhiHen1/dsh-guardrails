@@ -1,5 +1,5 @@
-// Command-text unit tests for lib/command.js: lexing, fragment unwrapping,
-// listing-mode detection, and content-sensitive reference detection.
+// Command-text unit tests for src/core/command.js: lexing, fragment
+// unwrapping, listing-mode detection, and content-sensitive reference detection.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -12,7 +12,7 @@ import {
   isListingOnly,
   tokenizePwsh,
   unwrapFragment,
-} from '../lib/command.js'
+} from '../src/core/command.js'
 import { LISTING_SAMPLES, NON_LISTING_SAMPLES } from './fixtures/command-samples.mjs'
 
 test('tokenizePwsh: words, quotes, backticks, separators, subexpressions', () => {

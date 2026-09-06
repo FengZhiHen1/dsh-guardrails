@@ -10,12 +10,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import * as guardrails from '../index.js'
-import { assessUnverifiable, resolveCommandLiterals } from '../lib/command.js'
+import { assessUnverifiable, resolveCommandLiterals } from '../src/core/command.js'
 
 function makeGuard(config = {}) {
   let handler
+  // Mirror the real ctx.sandboxPolicy shape (DSR-007): resolve() derives the
+  // workspace root from the calling session's immutable header.cwd.
+  const sandboxPolicy = {
+    resolve: ({ session } = {}) => ({ workspaceRoot: session?.header?.cwd ?? 'E:/FallbackRoot' }),
+  }
   const ctx = {
-    get: () => undefined,
+    get: (key) => (key === 'sandboxPolicy' ? sandboxPolicy : undefined),
     effect: (fn) => fn(),
     inject: () => {},
     tools: {
@@ -26,7 +31,7 @@ function makeGuard(config = {}) {
   }
   guardrails.apply(ctx, config)
   return (name, args, cwd = 'E:/Project/DSH_Plugins') =>
-    handler({ name, arguments: args, agent: { session: { meta: { cwd } } } })
+    handler({ name, arguments: args, agent: { session: { header: { cwd } } } })
 }
 
 const guard = makeGuard()

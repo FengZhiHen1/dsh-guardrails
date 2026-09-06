@@ -1,8 +1,8 @@
-// Destructive command analysis unit tests for lib/destructive.js.
+// Destructive command analysis unit tests for src/core/destructive.js.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { assessDestructive } from '../lib/destructive.js'
+import { assessDestructive } from '../src/core/destructive.js'
 
 const BASE = 'E:/Project/DSH_Plugins'
 const blocked = (command) => {

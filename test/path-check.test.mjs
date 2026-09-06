@@ -1,4 +1,4 @@
-// Path-level rule unit tests for lib/path-check.js.
+// Path-level rule unit tests for src/core/path-check.js.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -10,8 +10,8 @@ import {
   normCompare,
   resolvePath,
   segmentsOf,
-} from '../lib/path-check.js'
-import { evaluateRules } from '../lib/rules.js'
+} from '../src/core/path-check.js'
+import { evaluateRules } from '../src/core/rules.js'
 
 const RULES = evaluateRules({})
 const BASE = 'E:/Project/DSH_Plugins'

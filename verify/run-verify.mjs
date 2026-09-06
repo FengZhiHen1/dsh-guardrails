@@ -13,8 +13,15 @@
 // The real-session behavior check stays manual: restart the test profile
 // afterwards and exercise actual interception behavior.
 //
-// Environment: DSH_HARNESS_ROOT (default E:/Project/Open_Source/deepseek-harness)
-// and DSH_HOME (default ~/.dsh). Run from the package root.
+// Environment:
+//   DSH_BIN        — the instance version binary for deploy checks
+//                    (AGENTS.md: 部署校验必须用实例版本二进制; get it from
+//                    `dshl env --json` → instances[].version_bin). Falls back
+//                    to DSH_HARNESS_ROOT's source checkout CLI, then the old
+//                    global install (cross-generation risk — warns).
+//   DSH_TEST_HOME  — HOME of the test instance (boot smoke + test profile).
+//   DSH_WEB_HOME   — HOME hosting the stable web profile (dependency spec
+//                    assertion). Both default to DSH_HOME ?? ~/.dsh.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -27,14 +34,23 @@ const ROOT = join(HERE, '..')
 // Glob form: `node --test <dir>` fails to resolve directories on Windows.
 const TESTS = join(ROOT, 'test', '*.test.mjs')
 const HARNESS = process.env.DSH_HARNESS_ROOT ?? 'E:/Project/Open_Source/deepseek-harness'
-// 部署校验一律用全局 CLI（AGENTS.md 红线）：源码检出的 apps/cli/lib 可能
-// 过期（workspace 包的 lib 未随 src 重建——例如 credentials-local 曾为旧
-// 平面布局解析器），只有显式设置 DSH_HARNESS_ROOT 时才使用源码检出 launcher
-//（开发者自担构建新鲜度；参考用途：跑 DSH 自身 tests）。
-const LAUNCHER = process.env.DSH_HARNESS_ROOT
-  ? join(HARNESS, 'apps', 'cli', 'lib', 'bin.js')
-  : 'C:/nvm4w/nodejs/node_modules/@deepseek-ai/dsh/lib/bin.js'
+// 部署校验一律用实例版本二进制（AGENTS.md 红线 + dshl env 跨代告警）：
+// DSH_BIN 优先（dshl env --json → instances[].version_bin 现查）；源码检出
+// launcher 仅在显式设置 DSH_HARNESS_ROOT 时使用（开发者自担构建新鲜度）；
+// 最后的全局安装路径是 0.1.1 代际遗留，命中时打印告警。
+const LAUNCHER = process.env.DSH_BIN
+  ?? (process.env.DSH_HARNESS_ROOT
+    ? join(HARNESS, 'apps', 'cli', 'lib', 'bin.js')
+    : 'C:/nvm4w/nodejs/node_modules/@deepseek-ai/dsh/lib/bin.js')
+if (!process.env.DSH_BIN && !process.env.DSH_HARNESS_ROOT) {
+  console.warn('⚠ 未设置 DSH_BIN：组合断言/启动冒烟将使用遗留全局 CLI（跨代校验风险，以 dshl env --json 的 instances[].version_bin 为准）')
+}
 const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+const TEST_HOME = process.env.DSH_TEST_HOME ?? DSH_HOME
+const WEB_HOME = process.env.DSH_WEB_HOME ?? DSH_HOME
+// web profile 属 stable-dev 实例（可能与 DSH_BIN 不同代际）：dump 校验用它
+// 自己的实例二进制（dshl env --json → instances[].version_bin 现查）。
+const WEB_BIN = process.env.DSH_WEB_BIN ?? LAUNCHER
 // npm invoked as `node <npm-cli.js>`: `npm.cmd` cannot be spawned directly.
 const NPM_CLI = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
 
@@ -81,14 +97,14 @@ if (cov.status === 0) {
 
 // 3. composition assertions
 if (!existsSync(LAUNCHER)) {
-  step('组合断言', false, `launcher 不存在：${LAUNCHER}（设置 DSH_HARNESS_ROOT）`)
+  step('组合断言', false, `launcher 不存在：${LAUNCHER}（设置 DSH_BIN）`)
 } else {
-  const env = { ...process.env, DSH_HOME }
   // A stable profile must never mount source: the dependency spec must be a
   // release form (registry range or a tarball), never `link:`/`file:` into a
   // source directory, and the resolved node_modules entry must not be a
-  // junction/symlink back to source.
-  const webManifestPath = join(DSH_HOME, 'profiles', 'web', 'package.json')
+  // junction/symlink back to source. The stable web profile lives in the
+  // launcher-managed stable-dev HOME (DSH_WEB_HOME).
+  const webManifestPath = join(WEB_HOME, 'profiles', 'web', 'package.json')
   const webDep = existsSync(webManifestPath)
     ? JSON.parse(readFileSync(webManifestPath, 'utf8')).dependencies?.['dsh-guardrails']
     : undefined
@@ -96,8 +112,13 @@ if (!existsSync(LAUNCHER)) {
     && !webDep.startsWith('link:')
     && (webDep.startsWith('^') || webDep.startsWith('~') || /\.tgz$/.test(webDep)
       || /^github:/.test(webDep) || /^git\+https:\/\//.test(webDep))
-  for (const profile of ['test', 'web']) {
-    const dump = run([LAUNCHER, '--profile', profile, '--dump-config'], HARNESS, env)
+  for (const [profile, home, bin] of [['test', TEST_HOME, LAUNCHER], ['web', WEB_HOME, WEB_BIN]]) {
+    if (!existsSync(bin)) {
+      step(`组合：${profile} 恰一行且解析自 dsh-guardrails`, false, `二进制不存在：${bin}（设置 ${profile === 'web' ? 'DSH_WEB_BIN' : 'DSH_BIN'}）`)
+      continue
+    }
+    const env = { ...process.env, DSH_HOME: home }
+    const dump = run([bin, '--profile', profile, '--dump-config'], HARNESS, env)
     const out = `${dump.stdout ?? ''}\n${dump.stderr ?? ''}`
     const rowCount = (out.match(/id: guardrails/g) ?? []).length
     const resolved = /name: dsh-guardrails/.test(out)
@@ -120,8 +141,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 async function bootSmoke() {
   // SSH 变量非空 → web-runtime 跳过默认浏览器交接（--no-open 在
   // `-profile` 透传形态下易被 launcher/commander 误解析，交给环境开关）。
-  const env = { ...process.env, DSH_HOME, SSH_CONNECTION: '1', SSH_TTY: '1' }
-  if (!existsSync(LAUNCHER)) return { ok: false, detail: `launcher 不存在：${LAUNCHER}（设置 DSH_HARNESS_ROOT）` }
+  const env = { ...process.env, DSH_HOME: TEST_HOME, SSH_CONNECTION: '1', SSH_TTY: '1' }
+  if (!existsSync(LAUNCHER)) return { ok: false, detail: `launcher 不存在：${LAUNCHER}（设置 DSH_BIN）` }
   const child = spawn(
     process.execPath,
     // 第一个 `--` 由 launcher 消耗（apps/cli/src/args.ts），`--port 0` 送达应用。
@@ -184,8 +205,8 @@ if (!existsSync(NPM_CLI)) {
       const installedRoot = join(installDir, 'node_modules', 'dsh-guardrails')
       const filesOk =
         existsSync(join(installedRoot, 'index.js')) &&
-        existsSync(join(installedRoot, 'client.js')) &&
-        existsSync(join(installedRoot, 'lib', 'command.js')) &&
+        existsSync(join(installedRoot, 'src', 'client', 'card.js')) &&
+        existsSync(join(installedRoot, 'src', 'core', 'command.js')) &&
         existsSync(join(installedRoot, 'cordis.patch.yml'))
       const importRun = run(
         [

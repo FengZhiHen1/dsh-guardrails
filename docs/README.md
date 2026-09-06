@@ -8,8 +8,9 @@
 
 - 主题：`dsh-guardrails`（DSH 权限守护层，Host 插件，bundle 形态）。
 - 设计基线：2026-08-17 经用户逐项确认，见 [决策记录](decisions/)。
-- 实现状态：**已实现（v1.0.0 + v1.1.0 + v1.2.0）**——bundle 包形态（`dsh.bundle.patch` + 包内 `cordis.patch.yml`）、五类规则（env / git / credentials / destructive / system）、范围 B 增量（R0 补漏与 W0 系统区写拦截，DSR-001）、操作类型分级（列举 vs 内容访问）、配置校验、规则矩阵与生命周期测试 101 例全过（行覆盖 97.12%，门禁 ≥80%）；**防御层全量配置化（DSR-006，v1.1.0）**——叶子级可配（操作级叶子 + destructive 六子族 + `unverifiable` 键）；**配置入口按 DSH 官方范式（v1.2.0）**——导出 Schemastery `Config` schema，loader 在 `apply` 前验证/填默认值。`.dsh`（含会话历史）不敏感（DSR-003 重访注记）。
-- 工程化设计：2026-08-17 经用户确认，结构重构已随 v1.0.0 落地——`lib/` 四模块拆分 + 四层测试（单元/集成/组合/名单驱动）+ `verify` 全量脚本，见 [工程结构与测试体系.md](technical-details/工程结构与测试体系.md)。
+- 实现状态：**已实现（v1.0.0 + v1.1.0 + v1.2.0 + v1.3.0）**——bundle 包形态（`dsh.bundle.patch` + 包内 `cordis.patch.yml`）、五类规则（env / git / credentials / destructive / system）、范围 B 增量（R0 补漏与 W0 系统区写拦截，DSR-001）、操作类型分级（列举 vs 内容访问）、配置校验、规则矩阵与生命周期测试全过（行覆盖 ≥97%，门禁 ≥80%）；**防御层全量配置化（DSR-006，v1.1.0）**——叶子级可配（操作级叶子 + destructive 六子族 + `unverifiable` 键）；**配置入口按 DSH 官方范式（v1.2.0）**——导出 Schemastery `Config` schema，loader 在 `apply` 前验证/填默认值；**设置卡片入口（v1.3.0）**——官方 settings 卡片范式。`.dsh`（含会话历史）不敏感（DSR-003 重访注记）。
+- **0.1.2-rc.1 对齐重构（v1.4.0）**：core/adapter 单包分层（`src/core` 六模块 + `src/adapter/host.js` + `src/client/card.js`，分层门禁实质生效）、settings 改官方 `installSection` 接线、判定基准目录来源修正（DSR-007：`sandboxPolicy.resolve({ session })`）、`assessDestructive` 六子族拆分、质量地板 0 error。
+- 工程化设计：2026-08-17 经用户确认，结构重构已随 v1.0.0 落地；v1.4.0 按仓库 core/adapter 约定二次分层，见 [工程结构与测试体系.md](technical-details/工程结构与测试体系.md)。
 - 已实现设计（2026-08 定稿，v1.1.0 落地）：**防御层全量配置化**——类别键扩展为布尔/对象（操作级叶子 `read`/`modify`/`list`/`write`）、`destructive` 拆分六子族（git/machine/eval/cli/bulk/target）、新增 `unverifiable` 键，见 [DSR-006](decisions/DSR-006-防御层全量配置化.md) 与 [需求.md](需求.md) R-03。
 - 部署：test profile 源码直挂（`link:` 符号链接，重启生效）；web profile 当前以 `github:` 钉 ref 的 git 依赖（`FengZhiHen1/dsh-guardrails`）挂载——只读快照，非源码直挂（AGENTS.md 红线：web 只吃发布物），发布后切换 registry 版本。
 - `missing evidence`：符号链接/Junction 的真实路径解析行为（现状为纯段运算，不解析链接）；跨平台（Linux/macOS）敏感清单；`reg` 注册表类命令文本的覆盖范围。

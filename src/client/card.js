@@ -66,14 +66,6 @@ window.__ModuleLoader__.load({
 		};
 
 		const leafDefaults = (keys) => Object.fromEntries(keys.map((k) => [k, true]));
-		const DEFAULT_VALUE = {
-			env: leafDefaults(CATEGORIES.env),
-			git: leafDefaults(CATEGORIES.git),
-			credentials: leafDefaults(CATEGORIES.credentials),
-			system: leafDefaults(CATEGORIES.system),
-			destructive: leafDefaults(CATEGORIES.destructive),
-			unverifiable: true,
-		};
 		const RESET_ALL = {
 			env: null, git: null, credentials: null, system: null, destructive: null, unverifiable: null,
 		};
@@ -146,12 +138,9 @@ window.__ModuleLoader__.load({
 			note: { margin: '10px 0 0', fontSize: '12px', color: T.labelTertiary, lineHeight: 1.6 },
 		};
 
-		/** Card component: one per namespace, rendering the leaf toggles. */
-		function GuardCard({ scope }) {
-			const [open, setOpen] = React.useState(false);
-			const snapshot = React.useSyncExternalStore(scope.subscribe, scope.getSnapshot);
-
-			const chevron = ChevronIcon
+		/** Collapse chevron: the shell-seeded icon, or a text glyph when absent. */
+		function Chevron({ open }) {
+			return ChevronIcon
 				? h(ChevronIcon, {
 					style: {
 						flex: 'none',
@@ -161,22 +150,89 @@ window.__ModuleLoader__.load({
 					},
 				})
 				: h('span', { style: { flex: 'none', color: T.labelTertiary, fontSize: 12 } }, open ? '▾' : '▸');
-			const header = h('button', {
+		}
+
+		/** Card header: name, description, and the collapse chevron. */
+		function CardHeader({ open, onToggle }) {
+			return h('button', {
 				type: 'button',
 				'aria-expanded': open,
 				'aria-label': `${open ? '收起' : '展开'}: 权限守护（dsh-guardrails）`,
-				onClick: () => setOpen(!open),
+				onClick: onToggle,
 				style: headerStyle,
 			},
 				h('span', { style: headTextStyle },
 					h('span', { style: nameStyle }, '权限守护（dsh-guardrails）'),
 					h('span', { style: descriptionStyle }, 'AI 工具调用对敏感文件（.env/.git/凭据）、系统区写入与破坏性命令的拦截开关'),
 				),
-				chevron,
+				h(Chevron, { open }),
 			);
+		}
+
+		/** One category row: title, per-row reset, hint, and the leaf toggles. */
+		function CategoryRow({ cat, keys, value, overridden, writable, first, onToggleLeaf, onReset }) {
+			const toggles = keys.map((leaf) =>
+				h('label', { key: leaf, style: style.leaf },
+					h('input', {
+						type: 'checkbox',
+						disabled: !writable,
+						checked: value[leaf] === true,
+						onChange: (event) => onToggleLeaf(cat, value, leaf, event.target.checked),
+					}),
+					h('span', { style: style.leafLabel }, LEAF_LABEL[leaf] || leaf),
+				),
+			);
+			// Body already carries the card's top border; first row drops its own.
+			return h('div', { style: first ? { ...style.row, borderTop: 'none' } : style.row },
+				h('div', { style: style.head },
+					h('h4', { style: style.title }, CATEGORY_LABEL[cat] || cat),
+					h('button', {
+						type: 'button',
+						style: style.reset,
+						disabled: !writable || !overridden,
+						onClick: () => onReset(cat),
+					}, '重置'),
+				),
+				h('p', { style: style.hint }, CATEGORY_HINT[cat] || ''),
+				toggles,
+			);
+		}
+
+		/** The category-independent unverifiable fail-safe row. */
+		function UnverifiableRow({ value, overridden, writable, onSet, onReset }) {
+			return h('div', { style: style.row },
+				h('div', { style: style.head },
+					h('h4', { style: style.title }, '动态目标 fail-safe'),
+					h('button', {
+						type: 'button',
+						style: style.reset,
+						disabled: !writable || !overridden,
+						onClick: () => onReset('unverifiable'),
+					}, '重置'),
+				),
+				h('p', { style: style.hint }, '命令重建后仍含动态 $() 目标时的保守拦截（慎关：检测力下降）'),
+				h('label', { style: style.leaf },
+					h('input', {
+						type: 'checkbox',
+						disabled: !writable,
+						checked: value === true,
+						onChange: (event) => onSet('unverifiable', event.target.checked),
+					}),
+					h('span', { style: style.leafLabel }, '启用'),
+				),
+			);
+		}
+
+		/** Card component: one per namespace, rendering the leaf toggles. */
+		function GuardCard({ scope }) {
+			const [open, setOpen] = React.useState(false);
+			const snapshot = React.useSyncExternalStore(scope.subscribe, scope.getSnapshot);
+
+			const header = h(CardHeader, { open, onToggle: () => setOpen(!open) });
+			const shell = open ? { ...cardShell, ...cardShellOpen } : cardShell;
 
 			if (!snapshot || snapshot.status !== 'ready') {
-				return h('li', { style: open ? { ...cardShell, ...cardShellOpen } : cardShell },
+				return h('li', { style: shell },
 					header,
 					open ? h('div', { style: bodyStyle },
 						h('p', { style: { ...style.note, padding: '12px 0 0' } }, snapshot && snapshot.status === 'unavailable'
@@ -188,69 +244,47 @@ window.__ModuleLoader__.load({
 			const value = normalized(snapshot.value);
 			const overridden = typeof snapshot.user === 'object' && snapshot.user !== null ? snapshot.user : {};
 			const writable = snapshot.writable === true;
-			const setField = (field, fieldValue) => { scope.set(field, fieldValue).catch(() => {}); };
-			const clearField = (field) => { scope.unset(field).catch(() => {}); };
+			// Write failures (revision conflict, transport) are non-fatal — the
+			// snapshot simply does not move — but must never fail silently.
+			const setField = (field, fieldValue) => {
+				scope.set(field, fieldValue).catch((error) => {
+					console.warn('[guardrails] settings write failed:', error && error.message ? error.message : String(error));
+				});
+			};
+			const clearField = (field) => {
+				scope.unset(field).catch((error) => {
+					console.warn('[guardrails] settings reset failed:', error && error.message ? error.message : String(error));
+				});
+			};
+			const toggleLeaf = (cat, rowValue, leaf, checked) => {
+				setField(cat, { ...rowValue, [leaf]: checked });
+			};
 
-			const rows = Object.entries(CATEGORIES).map(([cat, keys], index) => {
-				const rowValue = value[cat] || leafDefaults(keys);
-				const isOverridden = overridden[cat] !== undefined;
-				const toggles = keys.map((leaf) =>
-					h('label', { key: leaf, style: style.leaf },
-						h('input', {
-							type: 'checkbox',
-							disabled: !writable,
-							checked: rowValue[leaf] === true,
-							onChange: (event) => {
-								const next = { ...rowValue, [leaf]: event.target.checked };
-								setField(cat, next);
-							},
-						}),
-						h('span', { style: style.leafLabel }, LEAF_LABEL[leaf] || leaf),
-					),
-				);
-				// Body already carries the card's top border; first row drops its own.
-				return h('div', { key: cat, style: index === 0 ? { ...style.row, borderTop: 'none' } : style.row },
-					h('div', { style: style.head },
-						h('h4', { style: style.title }, CATEGORY_LABEL[cat] || cat),
-						h('button', {
-							type: 'button',
-							style: style.reset,
-							disabled: !writable || !isOverridden,
-							onClick: () => clearField(cat),
-						}, '重置'),
-					),
-					h('p', { style: style.hint }, CATEGORY_HINT[cat] || ''),
-					toggles,
-				);
-			});
-
-			const unverifiableRow = h('label', { key: 'unverifiable', style: style.row },
-				h('div', { style: style.head },
-					h('h4', { style: style.title }, '动态目标 fail-safe'),
-					h('button', {
-						type: 'button',
-						style: style.reset,
-						disabled: !writable || overridden.unverifiable === undefined,
-						onClick: () => clearField('unverifiable'),
-					}, '重置'),
-				),
-				h('p', { style: style.hint }, '命令重建后仍含动态 $() 目标时的保守拦截（慎关：检测力下降）'),
-				h('label', { style: style.leaf },
-					h('input', {
-						type: 'checkbox',
-						disabled: !writable,
-						checked: value.unverifiable === true,
-						onChange: (event) => setField('unverifiable', event.target.checked),
-					}),
-					h('span', { style: style.leafLabel }, '启用'),
-				),
+			const rows = Object.entries(CATEGORIES).map(([cat, keys], index) =>
+				h(CategoryRow, {
+					key: cat,
+					cat,
+					keys,
+					value: value[cat] || leafDefaults(keys),
+					overridden: overridden[cat] !== undefined,
+					writable,
+					first: index === 0,
+					onToggleLeaf: toggleLeaf,
+					onReset: clearField,
+				}),
 			);
 
-			return h('li', { style: open ? { ...cardShell, ...cardShellOpen } : cardShell },
+			return h('li', { style: shell },
 				header,
 				open ? h('div', { style: bodyStyle },
 					rows,
-					unverifiableRow,
+					h(UnverifiableRow, {
+						value: value.unverifiable,
+						overridden: overridden.unverifiable !== undefined,
+						writable,
+						onSet: setField,
+						onReset: clearField,
+					}),
 					h('button', {
 						type: 'button',
 						style: style.resetAll,

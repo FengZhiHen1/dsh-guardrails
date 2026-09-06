@@ -40,10 +40,12 @@ function makeLifecycleCtx() {
 }
 
 const blocked = (r) => typeof r === 'string' && r.startsWith('[guardrails] Blocked')
+// No sandboxPolicy mock here (ctx.get returns undefined): the lifecycle suite
+// doubles as the service-absent degradation branch (base = '').
 const exec = (name, file_path) => ({
   name,
   arguments: { file_path },
-  agent: { session: { meta: { cwd: 'E:/p' } } },
+  agent: { session: { header: { cwd: 'E:/p' } } },
 })
 
 test('mount registers exactly one guard; dispose unregisters it', () => {

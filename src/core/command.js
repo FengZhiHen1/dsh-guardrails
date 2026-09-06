@@ -1,7 +1,10 @@
-// lib/command.js — PowerShell command-text lexing, verb classification,
-// listing-mode detection, sensitive text-reference detection, and system-area
-// (W0) write detection. Depends on lib/rules.js for the text-reference
-// regexes and lib/path-check.js for path resolution/system-area tests.
+// command — PowerShell command-text lexing, verb classification, listing-mode
+// detection, sensitive text-reference detection, and system-area (W0) write detection.
+//
+// Boundary: pure static analysis — nothing is executed, no fs is touched;
+// depends on core/rules.js (text-reference regexes) and core/path-check.js
+// (path resolution / system-area tests) only.
+// Reference: docs/technical-details/命令文本分析.md; DSR-002/005/006.
 
 import {
   ENV_REFERENCE,
@@ -10,10 +13,17 @@ import {
 } from './rules.js'
 import { isSystemAreaPath, resolvePath } from './path-check.js'
 
+/** Normalize a command word for matching: lowercase, hyphens stripped. */
 export const normalizeCommand = (word) => word.toLowerCase().replace(/-/g, '')
 
-// Lex a command string into word/sep tokens and $(...) subexpressions.
-// Pure static analysis: nothing is executed.
+/**
+ * Lex a command string into word/sep tokens and `$(...)` subexpressions.
+ * Quotes and backtick escapes are resolved into word content; separators are
+ * `;` newlines `|` `&` (incl. `&&`/`||` pairs).
+ *
+ * @returns `{ tokens, nested }` — tokens in order; nested holds each raw
+ *   `$(...)` body (paren-balanced, quote-aware).
+ */
 export function tokenizePwsh(command) {
   const tokens = []
   const nested = []
@@ -87,7 +97,12 @@ export function tokenizePwsh(command) {
   return { tokens, nested }
 }
 
-// Split tokens into fragments at separators, keeping the separator values.
+/**
+ * Split tokens into fragments at separators, keeping the separator values.
+ *
+ * @returns `{ fragments, seps }` — `fragments[i]` is the word list of command
+ *   i; `seps[i]` is the separator between fragments i and i+1.
+ */
 export function splitFragments(tokens) {
   const fragments = []
   const seps = []
@@ -107,7 +122,11 @@ export function splitFragments(tokens) {
   return { fragments, seps }
 }
 
-// Resolve the head command of a fragment, skipping $var, `&`, and `.` prefixes.
+/**
+ * Resolve the head command of a fragment, skipping `$var`, `&`, and `.` prefixes.
+ *
+ * @returns `{ cmd, args }` with `cmd` normalized, or `undefined` for an empty fragment.
+ */
 export function unwrapFragment(words) {
   let index = 0
   while (
@@ -136,17 +155,21 @@ export const METADATA_CMDS = new Set([
 // ---- shared command-state helpers (used by destructive analysis and the
 // system-area write check; the cd chain is simulated identically in both) ----
 
-// Characters that make a path unverifiable at static-analysis time.
+/** Characters that make a path unverifiable at static-analysis time. */
 export const DYNAMIC_PATTERN = /[$`*?]/
 
+/** cd-family commands that advance the simulated cwd state. */
 export const CD_CMDS = new Set(['cd', 'setlocation', 'sl', 'pushd'])
 
+/** First positional argument of a fragment (skipping `--`, `-flags`, `/flags`). */
 export const firstTarget = (words) =>
   words.find((w) => w !== '--' && !w.startsWith('-') && !/^\/[a-zA-Z]+$/.test(w))
 
-// Advance a { dir, known } cwd state through one cd-family command. Unknown
-// states (dynamic targets, ~, bare pushd, popd) keep `known: false` so
-// relative targets are evaluated against the fallback root instead.
+/**
+ * Advance a `{ dir, known }` cwd state through one cd-family command.
+ * Unknown states (dynamic targets, `~`, bare pushd, popd) keep `known: false`
+ * so relative targets are evaluated against the fallback root instead.
+ */
 export function applyCwdCommand(state, cmd, args) {
   if (cmd === 'popd') return { ...state, known: false }
   if (!CD_CMDS.has(cmd)) return state
@@ -160,9 +183,11 @@ export function applyCwdCommand(state, cmd, args) {
   return { dir: resolvePath(state.dir, target), known: true }
 }
 
-// A command is listing-only when every fragment's head command is a metadata
-// verb, with no $(...) subexpression and no redirect (in PowerShell `>` is
-// exclusively a redirect). Anything else keeps the full conservative rules.
+/**
+ * Whether a command is listing-only: every fragment's head is a metadata verb,
+ * with no `$(...)` subexpression and no redirect (in PowerShell `>` is
+ * exclusively a redirect). Anything else keeps the full conservative rules.
+ */
 export function isListingOnly(command) {
   if (command.includes('>')) return false
   const { tokens, nested } = tokenizePwsh(command)
@@ -175,6 +200,7 @@ export function isListingOnly(command) {
   })
 }
 
+/** Whether command text references a sensitive `.env` file (`.env.example` etc. pass). */
 export function commandReferencesSensitiveEnv(command) {
   for (const m of command.matchAll(ENV_REFERENCE)) {
     if (isSensitiveEnvName(m[1])) return true
@@ -182,29 +208,30 @@ export function commandReferencesSensitiveEnv(command) {
   return false
 }
 
-// Content-sensitive reference detection, in the original check order:
-// env → git. Returns the first matching category or null. Credentials are
-// intentionally separate: they are checked in every mode. `.dsh` (incl.
-// session history) is not a content-sensitive target (see DSR-003 revisit).
+/**
+ * Content-sensitive reference detection, in the original check order: env → git.
+ * Credentials are intentionally separate: they are checked in every mode.
+ * `.dsh` (incl. session history) is not a content-sensitive target (DSR-003 revisit).
+ *
+ * @returns the first matching category (`'env'` | `'git'`) or `null`.
+ */
 export function detectContentSensitiveRef(command) {
   if (commandReferencesSensitiveEnv(command)) return 'env'
   if (GIT_DIR_REFERENCE.test(command)) return 'git'
   return null
 }
 
-// ---------- literal reconstruction ----------
-// PowerShell evaluates $(...) subexpressions and interpolates variables
-// before a command runs, so a guard that only sees the raw text can be
-// bypassed by hiding a sensitive name inside an evaluable subexpression
-// (e.g. `.e$('nv')`) or a same-command variable (`$p='.env'; Get-Content $p`).
-// This scanner rewrites those constructs into their literal values so every
-// downstream check (text references, listing classification, destructive
-// analysis) sees the real command. Each pwsh tool call runs in a fresh
-// process (no state persists between calls), so resolving same-command
-// assignments fully closes variable indirection. Non-evaluable subexpressions
-// (variables, commands, mixed expressions) are kept verbatim; the caller's
-// assessUnverifiable gate then treats them conservatively on content/removal
-// verbs. `$env:NAME` and single-quoted spans are never touched.
+/**
+ * Rewrite statically evaluable PowerShell constructs into their literal values
+ * so every downstream check sees the real command. Handles `$(...)` splicing
+ * of pure quoted-literal concatenations (`$('nv')`), same-command `$name =
+ * 'literal'` assignments and their later uses, and interpolation inside
+ * double quotes. `$env:NAME` and single-quoted spans are never touched.
+ *
+ * why: each pwsh tool call runs in a fresh process, so resolving same-command
+ * assignments fully closes variable indirection; non-evaluable subexpressions
+ * are kept verbatim for the caller's {@link assessUnverifiable} gate.
+ */
 export function resolveCommandLiterals(command) {
   const n = command.length
   const vars = new Map()
@@ -427,12 +454,15 @@ export const CONTENT_VERBS = new Set([
   'setitem', 'si', 'newitem', 'ni',
 ])
 
-// Unverifiable-target gate: after literal reconstruction, any remaining
-// `$(...)` is a dynamically computed expression. When such an expression is
-// the command itself, or appears in an argument of a content/removal verb,
-// the target cannot be statically verified — block conservatively (the same
-// intent rephrased differently remains unverifiable). Returns { text } or
-// null. Category-independent: it is a fail-safe, not a per-category rule.
+/**
+ * Unverifiable-target gate (category-independent fail-safe): after literal
+ * reconstruction, any remaining `$(...)` is a dynamically computed expression.
+ * When such an expression is the command itself, or appears in an argument of
+ * a content/removal verb, the target cannot be statically verified — block
+ * conservatively (the same intent rephrased differently remains unverifiable).
+ *
+ * @returns `{ text }` describing the unverifiable construct, or `null`.
+ */
 export function assessUnverifiable(resolved) {
   const { tokens } = tokenizePwsh(resolved)
   const { fragments } = splitFragments(tokens)
@@ -460,6 +490,7 @@ export function assessUnverifiable(resolved) {
 // into a system prefix, with cd-chain simulation so
 // `cd C:\Windows; Set-Content x y` cannot hide the write.
 
+/** Write-class verbs whose positional targets are write candidates. */
 export const WRITE_VERBS = new Set([
   'setcontent', 'sc', 'addcontent', 'ac', 'clearcontent',
   'outfile', 'of',
@@ -489,8 +520,15 @@ function systemWriteCandidates(cmd, args) {
   return positional
 }
 
-// Returns { path } for the first static target that resolves into a system
-// area, or null. Dynamic targets are left to the unverifiable gate.
+/**
+ * Whether a command writes into a W0 system area: write-verb positional
+ * targets and redirect targets (`>`/`>>`/`2>`), resolved against a simulated
+ * cd chain starting at `rootBase`. Dynamic targets are left to the
+ * {@link assessUnverifiable} gate.
+ *
+ * @param rootBase - judgment base directory (resolved workspace root; DSR-007).
+ * @returns `{ path }` for the first static target inside a system area, or `null`.
+ */
 export function assessSystemWrite(rootBase, command) {
   const { tokens } = tokenizePwsh(command)
   const { fragments } = splitFragments(tokens)
@@ -524,9 +562,13 @@ export function assessSystemWrite(rootBase, command) {
 
 // ---- verb → operation class + command-level content class (DSR-006) ----
 
-// Classify a normalized command name by operation class: 'list' for metadata
-// verbs, 'modify' for write/delete verbs, 'read' for content-read verbs,
-// undefined for anything unknown (caller treats 'unknown' as fail-closed).
+/**
+ * Classify a normalized command name by operation class.
+ *
+ * @returns `'list'` for metadata verbs, `'modify'` for write/delete verbs,
+ *   `'read'` for content-read verbs, `undefined` for anything unknown (the
+ *   caller treats `'unknown'` as fail-closed).
+ */
 export function classifyVerb(cmd) {
   if (METADATA_CMDS.has(cmd)) return 'list'
   if (WRITE_VERBS.has(cmd)) return 'modify'
@@ -534,13 +576,13 @@ export function classifyVerb(cmd) {
   return undefined
 }
 
-// Operation class of a whole command, for op-level rule gating:
-// - a `>` (write-only redirect in PowerShell) or any modify-class verb
-//   demotes the whole command to 'modify';
-// - a `$(...)` subexpression or an unknown verb yields 'unknown'
-//   (fail-closed: full rules — same conservative rejection as isListingOnly);
-// - content-read verbs yield 'read';
-// - otherwise (all metadata) 'list'.
+/**
+ * Operation class of a whole command, for op-level rule gating.
+ * A `>` redirect or any modify-class verb → `'modify'`; a `$(...)`
+ * subexpression or an unknown verb → `'unknown'` (fail-closed: full rules,
+ * same conservative rejection as {@link isListingOnly}); content-read verbs
+ * → `'read'`; otherwise (all metadata) → `'list'`.
+ */
 export function assessContentClass(command) {
   const { tokens, nested } = tokenizePwsh(command)
   if (nested.length > 0) return 'unknown'

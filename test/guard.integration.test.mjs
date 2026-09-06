@@ -9,11 +9,17 @@ import * as guardrails from '../index.js'
 
 function makeGuard(config = {}, settings) {
   let handler
+  // Mirror the real ctx.sandboxPolicy shape (DSR-007): resolve() derives the
+  // workspace root from the calling session's immutable header.cwd.
+  const sandboxPolicy = {
+    resolve: ({ session } = {}) => ({ workspaceRoot: session?.header?.cwd ?? 'E:/FallbackRoot' }),
+  }
   const ctx = {
-    get: () => undefined,
+    get: (key) => (key === 'sandboxPolicy' ? sandboxPolicy : undefined),
     effect: (fn) => fn(),
     inject: (name, consumer) => {
-      if (name === 'settings' && settings !== undefined) consumer({ ...ctx, settings })
+      const deps = Array.isArray(name) ? name : [name]
+      if (deps.includes('settings') && settings !== undefined) consumer({ ...ctx, settings })
     },
     tools: {
       guard: (h) => {
@@ -23,7 +29,7 @@ function makeGuard(config = {}, settings) {
   }
   guardrails.apply(ctx, config)
   return (name, args, cwd = 'E:/Project/DSH_Plugins') =>
-    handler({ name, arguments: args, agent: { session: { meta: { cwd } } } })
+    handler({ name, arguments: args, agent: { session: { header: { cwd } } } })
 }
 
 const guard = makeGuard()

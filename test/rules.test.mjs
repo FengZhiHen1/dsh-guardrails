@@ -1,7 +1,8 @@
-// Denylist-driven unit tests: every entry of the data tables in lib/rules.js
-// gets an automatic positive case (path matches) through pathTargetsCredentials,
-// plus adjacent negative cases for env suffixes and text-reference regexes.
-// Adding a denylist entry only touches lib/rules.js — these tests cover it.
+// Denylist-driven unit tests: every entry of the data tables in
+// src/core/rules.js gets an automatic positive case (path matches) through
+// pathTargetsCredentials, plus adjacent negative cases for env suffixes and
+// text-reference regexes. Adding a denylist entry only touches
+// src/core/rules.js — these tests cover it.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -16,8 +17,8 @@ import {
   GIT_DIR_REFERENCE,
   evaluateRules,
   isSensitiveEnvName,
-} from '../lib/rules.js'
-import { pathTargetsCredentials } from '../lib/path-check.js'
+} from '../src/core/rules.js'
+import { pathTargetsCredentials } from '../src/core/path-check.js'
 
 test('denylist-driven: every CRED_BASENAMES entry matches anywhere', () => {
   for (const name of CRED_BASENAMES) {

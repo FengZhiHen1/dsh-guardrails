@@ -1,5 +1,8 @@
-// lib/path-check.js — path normalization and the path-level rule check.
-// Depends on lib/rules.js for denylist data and category switches.
+// path-check — path normalization and the path-level rule check.
+//
+// Boundary: pure synchronous helpers (no fs, no async); depends on
+// core/rules.js for denylist data and category switches only.
+// Reference: docs/technical-details/规则模型.md; DSR-005.
 
 import {
   CRED_BASENAME_PREFIXES,
@@ -12,12 +15,19 @@ import {
   isSensitiveEnvName,
 } from './rules.js'
 
-// ---------- pure path helpers (synchronous; no async fs) ----------
+/** Replace backslashes with forward slashes (Windows paths accept both). */
 export const slash = (p) => String(p).replace(/\\/g, '/')
-// Windows absolute paths may use either separator: C:/x or C:\x
+
+/** Whether a path is absolute (`C:/x`, `C:\x`, or POSIX `/x`). */
 export const isAbsolutePath = (p) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('/')
+
+/** Split into path segments, dropping empty and `.` components. */
 export const segmentsOf = (p) => slash(p).split('/').filter((s) => s.length > 0 && s !== '.')
 
+/**
+ * Resolve `target` against `base` lexically (no fs access).
+ * Absolute targets pass through (slash-normalized); `..` pops the stack.
+ */
 export function resolvePath(base, target) {
   if (isAbsolutePath(target)) return slash(target)
   const out = []
@@ -28,18 +38,26 @@ export function resolvePath(base, target) {
   return out.join('/')
 }
 
+/** Last segment of a path, or `''` for a segment-less input. */
 export const baseNameOf = (p) => {
   const segs = slash(p).split('/').filter(Boolean)
   return segs.length ? segs[segs.length - 1] : ''
 }
 
+/** Lowercase slash-normalized form for case-insensitive comparison. */
 export const normCompare = (p) => slash(p).toLowerCase()
 
-// ---------- category predicates (resolved-path level) ----------
+/** Whether a resolved path enters a `.git` directory at any depth. */
 export function entersGitDir(resolved) {
   return segmentsOf(resolved).includes('.git')
 }
 
+/**
+ * Whether a resolved path targets a credential file, directory, or combo.
+ * Matches basenames (incl. hive transaction-log prefixes), suffixes
+ * (.pem/.key/...), credential directory segments, and username-independent
+ * adjacent segment combos (browser profiles, Windows stores, system hives).
+ */
 export function pathTargetsCredentials(resolved) {
   const segs = segmentsOf(resolved)
   const lowerSegs = segs.map((s) => s.toLowerCase())
@@ -63,9 +81,11 @@ export function pathTargetsCredentials(resolved) {
   return false
 }
 
-// W0 system area: absolute prefixes (drive-letter specific; the rule model
-// targets the C: system drive) and username-independent segment combos for
-// startup folders and PowerShell profiles.
+/**
+ * Whether a resolved path is inside a W0 system area (DSR-001/DSR-005):
+ * absolute drive prefixes (the rule model targets the C: system drive) or
+ * username-independent segment combos for startup folders / PowerShell profiles.
+ */
 export function isSystemAreaPath(resolved) {
   const lower = slash(resolved).toLowerCase()
   if (SYSTEM_PREFIXES.some((p) => lower === p || lower.startsWith(p + '/'))) return true
@@ -78,13 +98,20 @@ export function isSystemAreaPath(resolved) {
   return false
 }
 
-// ---------- path-level check ----------
-// Returns null when allowed, or { category, modifying, raw } for the caller
-// (index.js) to render the deny message. metadataOnly: the call only
-// enumerates names (glob / listing commands); only pure credential targets
-// are sensitive at that level. `rules` carries the op-level leaves from
-// evaluateRules (DSR-006): each category gate reads its read/modify/list/write
-// leaf according to the operation of this call.
+/**
+ * Path-level rule check for the read/write/edit/read_image/grep/glob tools.
+ * `metadataOnly` marks name-enumerating calls (glob): only pure credential
+ * targets are sensitive at that level. Each category gate reads its
+ * read/modify/list leaf according to this call's operation (DSR-006 leaves).
+ *
+ * @param base - judgment base directory (resolved workspace root; DSR-007).
+ * @param raw - raw path argument from the tool call.
+ * @param modifying - whether the call mutates the target.
+ * @param metadataOnly - whether the call only enumerates names.
+ * @param rules - op-level leaves from {@link evaluateRules}.
+ * @returns `null` when allowed, else `{ category, modifying, raw }` for the
+ *   caller (adapter) to render the deny message.
+ */
 export function checkPath(base, raw, modifying, metadataOnly = false, rules) {
   if (typeof raw !== 'string' || raw.length === 0) return null
   const resolved = resolvePath(base, raw)

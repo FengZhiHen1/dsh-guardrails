@@ -1,6 +1,27 @@
 # Changelog
 
-## 1.3.0（当前，未发布）
+## 1.4.0（当前，未发布）
+
+### 修复
+
+- **判定基准目录来源失效（DSR-007）**：旧实现读 `session.meta.cwd`，而 0.1.2-rc.1 的 `Session` 公开面只有 `header`（`meta` 仅是 `create()` 的输入选项）——读取链恒为 `undefined`，base 静默落到部署 fallback 根（DSH 进程启动目录），相对路径判定坐标系错误。改为与官方工具链同一身份：`sandboxPolicy.resolve({ session }).workspaceRoot`（规范化 `session.header.cwd`；agentless 回落部署根；无 sandbox-policy 服务降级为 `''`）。新增 `test/base-dir.test.mjs` 锁定调用形状与降级分支。
+- **设置写入静默吞异常**（质量地板 error）：浏览器半侧 `scope.set/unset` 的裸 `.catch(() => {})` 改为 `console.warn` 留痕——写入失败非致命（快照不动，用户可见未生效），但绝不无声。
+
+### 变更
+
+- **结构对齐 core/adapter 单包分层约定**（仓库 0.1.2-rc.1 知识库硬性约定）：`lib/` 四模块迁 `src/core/` 并拆出 `check-command.js`（pwsh 判定管线）与 `deny-messages.js`（文案 + leaf 门控）两个纯模块，core 共六模块（禁 `@deepseek-ai/*` import，仓库分层门禁从空转变为实质生效）；入口迁 `src/adapter/host.js`，包根 `index.js` 变为薄转发；浏览器半侧迁 `src/client/card.js`（`exports["./client"]` 直指，无构建管线不变）。
+- **settings 接线改官方 `installSection`**（0.1.2-rc.1 消费方首选 API）：删除手写 register/effect 回落逻辑；entry config 原样注册为 base 层（原为归一化叶子后注册——resolved 值语义不变，`describe` 的 base 显示形状随官方语义）。
+- **`assessDestructive` 按六子族拆分**（git/machine/eval/cli/bulk/target，与 DSR-006 配置叶子一一同构），主函数降为调度循环；`GuardCard` 拆子组件（Chevron/CardHeader/CategoryRow/UnverifiableRow）。
+- **包元数据对齐**：`peerDependencies` 新增 `@deepseek-ai/cordis ^4.0.2` 与 `@deepseek-ai/dsh-settings ^0.1.2-rc.1`（共享宿主安装树同一实例的元数据约定；纯 JS 无类型编译，不进 devDependencies）；`engines.node` 升 `^22.19.0 || >=24`（0.1.2-rc.1 基线）。
+- **verify 对齐部署现实**：组合断言与启动冒烟改用 `DSH_BIN` 指定的实例版本二进制（AGENTS.md 跨代红线；缺省回落遗留全局 CLI 时打印告警）；双 HOME 支持（`DSH_TEST_HOME`/`DSH_WEB_HOME`，缺省回落 `DSH_HOME`）；tarball 冒烟断言更新为 `src/` 布局。
+- 全部公开符号 JSDoc 化（code-craft 注释标准）；质量地板 0 error（warning 仅余 client 卡片 UI 几何软指标）。
+
+### 测试与验证
+
+- 测试 105 → 110：新增 `test/base-dir.test.mjs`（5 例）；settings 测试按 `installSection` mock 语义重写；全部 mock 的 session 形状修正为 `header.cwd`（真实形状）。
+- 行覆盖 97.87%（门禁 ≥80%）。
+
+## 1.3.0（未发布）
 
 ### 修复
 

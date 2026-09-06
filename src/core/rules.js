@@ -1,16 +1,10 @@
-// lib/rules.js — sensitive-target denylist data, text-reference regexes, and
-// category switches. The single maintenance point for every denylist change;
-// must stay dependency-free (no imports from other lib modules).
+// rules — sensitive-target denylist data, text-reference regexes, category switches.
 //
-// Categories (see docs/technical-details/规则模型.md):
-//   env         — sensitive .env files (content access blocked, listing ok)
-//   git         — .git directory internals (content access blocked, listing ok)
-//   credentials — keys, cloud tokens, secret stores (read/write/list all blocked)
-//   system      — Windows system areas (write blocked, read/list ok — DSR-005)
-//   destructive — high-risk commands (command-text analysis only)
-// `.dsh` (incl. session history) is intentionally not a category: it is a
-// mixed directory with no sensitive-target semantics (see DSR-003 revisit).
+// Boundary: the single maintenance point for every denylist change; must stay
+// dependency-free (no imports from other core modules).
+// Reference: docs/technical-details/规则模型.md; DSR-001/003/004/006.
 
+/** Safe `.env.*` suffixes: non-secret variants that stay readable. */
 export const SAFE_ENV_SUFFIXES = new Set(['example', 'sample', 'template', 'dist', 'default'])
 
 // R0 credential targets (range B of DSR-001): private keys, package/registry
@@ -61,6 +55,11 @@ export const SYSTEM_COMBOS = [
   ['documents', 'powershell'],
 ]
 
+/**
+ * Whether a basename is a sensitive `.env` file.
+ * `.env` exactly → true; `.env.<suffix>` → true unless the suffix is a known
+ * non-secret variant ({@link SAFE_ENV_SUFFIXES}). Case-insensitive.
+ */
 export function isSensitiveEnvName(name) {
   const lower = name.toLowerCase()
   if (lower === '.env') return true
@@ -89,6 +88,7 @@ export const CRED_TEXT_REFERENCE = new RegExp(
   'i',
 )
 
+/** Every valid top-level config key, in README order. */
 export const RULE_KEYS = ['env', 'git', 'credentials', 'destructive', 'system', 'unverifiable']
 
 // Per-category leaf keys (DSR-006): operation-level granularity. A category
@@ -131,11 +131,15 @@ function evaluateCategory(value, leafKeys, category) {
   return Object.fromEntries(leafKeys.map((key) => [key, value[key] !== false]))
 }
 
-// Evaluate the per-row config into op-level leaves; every defense layer
-// defaults on. Invalid configs (unknown keys, non-boolean values, non-object
-// category values) fail the mount with an actionable error instead of
-// silently degrading (quality standard §7.2). v1 five-boolean categories
-// remain valid (equivalent to whole category on/off).
+/**
+ * Evaluate the per-row config into op-level leaves; every defense layer defaults on.
+ * v1 five-boolean categories remain valid (equivalent to whole category on/off).
+ *
+ * @param config - raw plugin-row config (or settings-resolved value).
+ * @returns `{ unverifiable, env, git, credentials, destructive, system }` leaf object.
+ * @throws {Error} on unknown keys, non-boolean leaves, or non-object category
+ *   values — the mount fails with an actionable error instead of silently degrading.
+ */
 export function evaluateRules(config = {}) {
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw new Error(
