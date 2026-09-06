@@ -104,6 +104,13 @@ profile 覆盖形态示例（部署基线）：
   只能走全规则。
 - 系统区前缀按 C: 系统盘建模；Linux/macOS 清单与注册表类命令
   （`reg`/`HKCU:`）不在 v1 范围（见 DSR-001）。
+- **DSH 自管理面不拦截**（DSR-008）：对 `$DSH_HOME` 配置面（`settings.yaml`、
+  `profiles/*/package.json`、`cordis.patch.yml`）、DSH 安装目录与会话日志的
+  读写一律放行——AI 协助修改 DSH 配置是预期用法。推论（显式接受的边界）：
+  `danger-full-access` 模式下 AI 可经 `settings.yaml` 调整本插件自身规则
+  （自我解除通道）；`workspace-write` 模式下该通道已由沙箱围栏关闭（工作区
+  外写被拒）。进程级保护仍在：按名杀 `dsh`/`node`/`pwsh` 等进程被
+  `destructive.machine` 拦截（按 PID 杀不在覆盖内）。
 - 判定层 fail-closed（无法分类的命令按全规则处理），钩子层 fail-open
   （guard 内部异常记录并放行，防止死锁会话）——两层语义不可互换。
 
