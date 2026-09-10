@@ -1,6 +1,22 @@
 # Changelog
 
-## 1.4.0（当前，未发布）
+## 1.5.0（当前，未发布）
+
+### 安全增强（DSR-009——2026-09-10 用户数据误删事故复盘入闸）
+
+- **`destructive.chain`（无门控链删）**：同一 pwsh 调用内 move/copy/rename（源消耗型 mutator）之后经**无错误门**分隔符（`;`/换行/裸`&`）接带爆炸半径标志（`-Recurse`/`-Force`/`-r`/`-f`、del/rd `/s`）的删除 → 硬阻断。事故形态 `Move-Item -LiteralPath "$in\*" …; Remove-Item "$in" -Recurse -Force` 的放大器：前句静默失败（非终止错误）时删除面对的是**从未被搬空的唯一副本目录**。`a && 删除`（`&&` 链直接门控）与 mutator 自带 `-EA Stop` 视为已设门放行；控制流级门（`try/catch`/`if ($?)`）不建模、按误伤方向拦。
+- **`destructive.misuse`（参数误用）**：① `-Literal*` 参数值含 `*`/`?`——`-LiteralPath` 不展开通配符，NTFS 不可能存在此类文件名，语句必败且非终止（事故引信），deny 消息直接教授 `-Path`/精确名两种正解；② removal/mutator 动词的通配解析目标（位置参数/`-Path`）含 `[ ]`——FileSystem provider 按单字符通配类解析（`x[1].md` 亦匹配 `x1.md`），会命中从未指名的文件；`-Include`/`-Exclude`/`-Filter` 值豁免。
+- **词法分隔符保真**：`tokenizePwsh` 的 `&&`/`||` 保留双字符原值（旧实现压扁为 `&`/`|`，"有无错误门"在词法层即丢失——chain 判定的前提）。连带修正：`||` 不再被 `eval`（管道进 shell）与 `bulk`（管道批删）误认为管道（`||` 本就不是管道）。
+- **显式接受的边界（无状态重申）**：跨回合（分离调用）的"删上一回合 move 落点"不判——会话级 move journal 方案经评估**否决**（状态生命周期/别名等价/误伤论证成本与单一收益不成比例，DSR-009 方向 B），由顶层 AGENTS.md 破坏性命令纪律规程补偿；approval 档维持 DSR-006 否决。
+- 配置叶子 6 → 8（`destructive: { …, chain, misuse }`，缺省开，独立可关）；设置卡片、Config schema、`evaluateRules` 随 `CATEGORY_LEAF_KEYS` 自动扩展。
+- README：拦截语义、配置示例、已知限制（无状态边界/脚本文件不可见/`[ ]` 的 Windows 语义）同步。
+
+### 测试与验证
+
+- 测试 110 → 115：misuse 正反例、chain 门控矩阵（`&&` 门/EA Stop 门/无门）、事故命令复演 + 双层独立 ablation、`&&`/`||` 词法保真；既有断言同步（rules/config 叶子表、command 分隔符用例）。
+- 行覆盖 97.91%（门禁 ≥80%）；`check` 全绿；tarball 干净安装 + 导入冒烟通过；web/web-next `--dump-config` 恰一行基线不变。test profile 启动冒烟按 AGENTS.md 红线留待用户经启动器执行（agent 不起进程）。
+
+## 1.4.0（未发布）
 
 ### 修复
 

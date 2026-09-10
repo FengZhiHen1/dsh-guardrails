@@ -99,7 +99,7 @@ export const CATEGORY_LEAF_KEYS = {
   git: ['read', 'modify'],
   credentials: ['read', 'modify', 'list'],
   system: ['write'],
-  destructive: ['git', 'machine', 'eval', 'cli', 'bulk', 'target'],
+  destructive: ['git', 'machine', 'eval', 'cli', 'bulk', 'target', 'chain', 'misuse'],
 }
 
 const CATEGORY_KEYS = ['env', 'git', 'credentials', 'destructive', 'system']

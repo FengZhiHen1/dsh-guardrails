@@ -53,7 +53,7 @@ window.__ModuleLoader__.load({
 			git: ['read', 'modify'],
 			credentials: ['read', 'modify', 'list'],
 			system: ['write'],
-			destructive: ['git', 'machine', 'eval', 'cli', 'bulk', 'target'],
+			destructive: ['git', 'machine', 'eval', 'cli', 'bulk', 'target', 'chain', 'misuse'],
 		};
 		const CATEGORY_LABEL = {
 			env: '.env 文件访问',
@@ -67,12 +67,13 @@ window.__ModuleLoader__.load({
 			git: '.git 目录内部的内容读/写',
 			credentials: '凭据文件/目录的读、写与列举',
 			system: 'Windows 系统区的写入（读与列举不受限）',
-			destructive: '按子族细分的高风险命令（机器级/git/CLI/批删/目标）',
+			destructive: '按子族细分的高风险命令（机器级/git/CLI/批删/目标/链删/参数误用）',
 		};
 		const LEAF_LABEL = {
 			read: '读', modify: '写', list: '列举', write: '写入',
 			git: 'git 高危', machine: '机器级', eval: '不可信执行',
 			cli: '数据 CLI', bulk: '管道批删', target: '删除目标',
+			chain: '无门控链删', misuse: '参数误用',
 		};
 		// All six top-level fields in fixed order (save-op assembly + equality).
 		const FIELDS = ['env', 'git', 'credentials', 'system', 'destructive', 'unverifiable'];

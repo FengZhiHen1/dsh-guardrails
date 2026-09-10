@@ -29,7 +29,7 @@
 - 重建后仍含动态 `$()` 的命令：若命令本身或**内容/删除类动词**（`Get-Content`/`Set-Content`/`Remove-Item`/`Copy-Item`/`Out-File`/`New-Item` 等）的参数由动态表达式构成，目标无法静态验证，一律保守拦截（与类别开关无关的 fail-safe 层，受 `unverifiable` 键控制，缺省开）。
 - 工具层：`read`/`grep`/`write`/`edit` 是内容访问（全规则）；`glob` 只列举（仅凭据目标拦截）。
 - **系统区写检测**（W0）：写类动词（`Set-Content`/`Remove-Item`/`New-Item`/`Copy-Item`/`Move-Item`/`Out-File` 等）的静态目标、重定向目标（`>`/`>>`/`2>`）命中系统区前缀即拦；带 cd 链模拟（`cd C:\Windows; Set-Content x y` 同样被拦）。读与列举始终放行（DSR-005）。
-- 破坏性分析（`rm -rf`、`Get-ChildItem | Remove-Item`——含中间夹过滤/格式化动词或 `%`/`ForEach-Object` 脚本块的管道、`git reset --hard`、机器级命令、**绝对盘根删除**（`Remove-Item C:\`/`D:\`/`/` 及 `C:\*` 通配形态）等）逐子族受 `destructive` 配置控制（缺省全开，DSR-006）；其中删除目标分析（盘根/工作区根）属 `target` 子族，关闭对应拦截即放行。
+- 破坏性分析（`rm -rf`、`Get-ChildItem | Remove-Item`——含中间夹过滤/格式化动词或 `%`/`ForEach-Object` 脚本块的管道、`git reset --hard`、机器级命令、**绝对盘根删除**（`Remove-Item C:\`/`D:\`/`/` 及 `C:\*` 通配形态）、**无门控链删**（同调用内 move/copy/rename 之后经 `;`/换行/裸`&` 接带 `-Recurse`/`-Force`/`-r`/`-f`/`/s` 的删除；`&&` 或 `-ErrorAction Stop` 视为错误门）、**参数误用**（`-LiteralPath` 等携带 `*`/`?`——必败且静默；removal/mutator 的通配解析目标携带 `[ ]`——会命中未指名文件）等）逐子族受 `destructive` 配置控制（八子族缺省全开，DSR-006/009）；其中删除目标分析（盘根/工作区根）属 `target` 子族，关闭对应拦截即放行。
 - 混合目录说明：`.dsh`（含 `sessions/` 会话历史、skills/attachments/profiles 等）不是敏感类别，读/写/列举均放行（见 DSR-003 重访注记）；`.dsh` 下的凭据文件（`.credentials.yaml`、`.auteur-media-secret`）仍按凭据名单拦截。
 
 ## 包形态（DSH 官方 Bundle 范式）
@@ -78,6 +78,8 @@ profile 覆盖形态示例（部署基线）：
       cli: true      # docker prune / terraform / kubectl / aws s3 rm / dropdb ...
       bulk: true     # Get-ChildItem | Remove-Item 管道批删
       target: true   # 盘根/工作区根/动态 cd 删除目标分析（绝对破坏层，慎关）
+      chain: true    # 无错误门的"移动/复制 → 递归强删"同调用串联（DSR-009）
+      misuse: true   # -Literal* 带通配符 / [ ] 通配字符类命中删除与搬移动词（DSR-009）
     unverifiable: true  # 动态 $() 目标 fail-safe（慎关：检测力下降）
 
 # 例：test 环境放松——只对 CLI 数据破坏器降级：
@@ -111,6 +113,14 @@ profile 覆盖形态示例（部署基线）：
   （自我解除通道）；`workspace-write` 模式下该通道已由沙箱围栏关闭（工作区
   外写被拒）。进程级保护仍在：按名杀 `dsh`/`node`/`pwsh` 等进程被
   `destructive.machine` 拦截（按 PID 杀不在覆盖内）。
+- **链删/误用规则的无状态边界（DSR-009，显式接受的缺口）**：`chain` 只判**同一命令调用内**的
+  "移动/复制 → 无门控 → 递归强删"串联；move 与删除分属**两次调用**时（即使相隔只有一个回合）
+  判定层没有任何上下文，唯一副本删除不拦——跨调用状态方案已评估并否决（见 DSR-009），该缺口由
+  顶层仓库 AGENTS.md 的"破坏性命令纪律"规程补偿，**勿依赖本插件兜底**。控制流级错误门
+  （`try/catch`、`if ($?)`、`$ErrorActionPreference`）不识别，此类串联按误伤方向拦。
+- 先写脚本文件（`.ps1`）再执行、`-EncodedCommand` 等形态对文本层不可见：静态守卫防 AI 的
+  意外，不防对抗性绕道（定义性边界）。
+- `[ ]` 通配字符类判定按 Windows FileSystem provider 语义建模（与 C-05 运行环境假设一致）。
 - 判定层 fail-closed（无法分类的命令按全规则处理），钩子层 fail-open
   （guard 内部异常记录并放行，防止死锁会话）——两层语义不可互换。
 

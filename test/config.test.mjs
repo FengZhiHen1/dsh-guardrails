@@ -24,7 +24,7 @@ test('Config schema: object form fills missing leaves with true', () => {
   const out = Config({ env: { read: false }, destructive: { cli: false } })
   assert.deepEqual(out.env, { read: false, modify: true })
   assert.deepEqual(out.destructive, {
-    git: true, machine: true, eval: true, cli: false, bulk: true, target: true,
+    git: true, machine: true, eval: true, cli: false, bulk: true, target: true, chain: true, misuse: true,
   })
   assert.equal(out.unverifiable, true)
   assert.equal(out.credentials, true) // untouched categories stay boolean

@@ -26,9 +26,9 @@ test('tokenizePwsh: words, quotes, backticks, separators, subexpressions', () =>
   assert.deepEqual(seps, [';', '|'])
 })
 
-test('tokenizePwsh: && and || merge into one separator', () => {
+test('tokenizePwsh: && and || keep their two-char values (error-gate fidelity)', () => {
   const { tokens } = tokenizePwsh('a && b || c')
-  assert.deepEqual(tokens.filter((t) => t.kind === 'sep').map((t) => t.value), ['&', '|'])
+  assert.deepEqual(tokens.filter((t) => t.kind === 'sep').map((t) => t.value), ['&&', '||'])
 })
 
 test('unwrapFragment: skips $var / & / . prefixes, normalizes dashes', () => {

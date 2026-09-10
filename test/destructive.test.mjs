@@ -143,6 +143,7 @@ test('.NET direct data APIs are blocked', () => {
 test('sub-family flags: each leaf gates only its own family (DSR-006)', () => {
   const sub = (overrides) => ({
     git: true, machine: true, eval: true, cli: true, bulk: true, target: true,
+    chain: true, misuse: true,
     ...overrides,
   })
   // git off: git high-risk allowed, machine protection stays
@@ -171,6 +172,18 @@ test('sub-family flags: each leaf gates only its own family (DSR-006)', () => {
   assert.equal(assessDestructive(BASE, 'rm -rf .', sub({ target: false })), null)
   assert.equal(assessDestructive(BASE, 'Remove-Item C:\\ -Recurse -Force', sub({ target: false })), null)
   assert.notEqual(assessDestructive(BASE, 'git reset --hard', sub({ target: false })), null)
+  // chain off: ungated move-then-delete allowed, misuse still fires (DSR-009)
+  assert.equal(assessDestructive(BASE, 'Move-Item a b; rm c -Recurse', sub({ chain: false })), null)
+  assert.notEqual(
+    assessDestructive(BASE, "Move-Item -LiteralPath 'a*' b; rm c -Recurse", sub({ chain: false })),
+    null,
+  )
+  // misuse off: bracket targets allowed, chain still catches the ungated shape
+  assert.equal(assessDestructive(BASE, 'Remove-Item x[1].md -Recurse', sub({ misuse: false })), null)
+  assert.notEqual(
+    assessDestructive(BASE, 'Move-Item a b; rm c -Recurse', sub({ misuse: false })),
+    null,
+  )
 })
 
 test('harmless commands stay allowed', () => {
@@ -186,4 +199,68 @@ test('harmless commands stay allowed', () => {
   ]) {
     assert.equal(allowed(cmd), true, cmd)
   }
+})
+
+// ---- DSR-009: chain + misuse sub-families (2026-09-10 deletion incident) ----
+
+test('misuse: -Literal* with a wildcard value can never resolve (DSR-009)', () => {
+  assert.equal(blocked('Move-Item -LiteralPath "E:\\data\\inbox\\*" -Destination E:\\data\\library'), true)
+  assert.equal(blocked('Remove-Item -LiteralPath C:\\x?y -Recurse'), true)
+  assert.equal(blocked('Get-ChildItem -LiteralPath "a*"'), true)
+  assert.equal(blocked('Move-Item -LiteralPath:a* b -Destination c'), true) // inline colon form
+  assert.equal(allowed('Move-Item -LiteralPath "E:\\data\\inbox\\note.md" -Destination E:\\data\\library'), true)
+  assert.equal(allowed('Move-Item -Path "E:\\data\\inbox\\*" -Destination E:\\data\\library'), true)
+})
+
+test('misuse: [ ] in a wildcard-parsed target hits unintended files (DSR-009)', () => {
+  assert.equal(blocked('Remove-Item "notes[1].md" -Recurse'), true)
+  assert.equal(blocked('Copy-Item "a[b].txt" dst'), true)
+  assert.equal(blocked('Move-Item src -Destination "out[x]"'), true)
+  assert.equal(allowed('Remove-Item -LiteralPath "notes[1].md"'), true)
+  assert.equal(allowed('Remove-Item notes.md'), true)
+  assert.equal(allowed('Get-ChildItem "x[1]"'), true) // list verbs out of scope
+  assert.equal(allowed('Get-ChildItem a -Include "*.bak[x]" -Recurse'), true) // wildcard-legit param value
+  assert.equal(allowed('Remove-Item src -Filter "a[b]*"'), true) // -Filter value legit; no blast misread
+})
+
+test('chain: blast-radius deletion after an ungated move/copy in one call (DSR-009)', () => {
+  assert.equal(blocked('Move-Item a b; Remove-Item c -Recurse -Force'), true)
+  assert.equal(blocked('Copy-Item x y\nRemove-Item y -Force'), true) // newline separator, ungated
+  assert.equal(blocked('Move-Item a b && Write-Host done; Remove-Item z -Recurse'), true) // && gates Write-Host, not the removal
+  assert.equal(blocked('Move-Item a b; Remove-Item c -rf'), true)
+  assert.equal(blocked('Copy-Item a b; del /s /q c'), true) // Windows flag /s is recursion
+  assert.equal(allowed('Move-Item a b && Remove-Item src -Recurse'), true) // fully gated
+  assert.equal(allowed('Move-Item a b -EA Stop; Remove-Item src -Recurse'), true) // explicit gate
+  assert.equal(allowed('Move-Item a b -ErrorAction:Stop; Remove-Item src -Recurse'), true) // inline gate
+  assert.equal(allowed('Set-Content a x; Remove-Item b -Recurse'), true) // not a mutator verb
+  assert.equal(allowed('Remove-Item b -Recurse; Move-Item a x'), true) // removal precedes any mutator
+  assert.equal(allowed('Move-Item a b; Remove-Item c'), true) // no blast-radius flags
+})
+
+test('incident replay: the 2026-09-10 move-then-forced-delete shape is blocked', () => {
+  const incident =
+    "$in = 'E:/Project/Demo/1-保研准备/inbox'; " +
+    'Move-Item -LiteralPath "$in/*" -Destination E:/Project/Demo/library/行政/保研; ' +
+    'Remove-Item -LiteralPath "$in" -Recurse -Force; ' +
+    'Get-ChildItem -Recurse E:/Project/Demo/library/行政/保研 | Measure-Object Length -Sum'
+  const hit = assessDestructive(BASE, incident)
+  assert.notEqual(hit, null)
+  assert.match(hit.text, /-Literal/) // the fuse is reported first
+  // misuse off → the chain layer still catches it
+  assert.notEqual(
+    assessDestructive(BASE, incident, {
+      git: true, machine: true, eval: true, cli: true, bulk: true, target: true,
+      chain: true, misuse: false,
+    }),
+    null,
+  )
+  // both off → the plain-directory deletion passes (ablation: the two new
+  // layers are exactly what closes this hole; documented DSR-009 boundary)
+  assert.equal(
+    assessDestructive(BASE, incident, {
+      git: true, machine: true, eval: true, cli: true, bulk: true, target: true,
+      chain: false, misuse: false,
+    }),
+    null,
+  )
 })

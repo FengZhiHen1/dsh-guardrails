@@ -2,9 +2,9 @@
 //
 // Boundary: pure static analysis over command fragments (nothing executed);
 // depends on core/command.js (lexing/fragments) and core/path-check.js (path
-// helpers for cd-chain simulation) only. The six sub-family functions mirror
-// the `destructive` config leaves one-to-one (git/machine/eval/cli/bulk/target).
-// Reference: docs/technical-details/命令文本分析.md; DSR-002/006.
+// helpers for cd-chain simulation) only. The eight sub-family functions mirror
+// the `destructive` config leaves one-to-one (git/machine/eval/cli/bulk/target/
+// chain/misuse). Reference: docs/technical-details/命令文本分析.md; DSR-002/006/009.
 
 import {
   CD_CMDS,
@@ -18,6 +18,20 @@ import {
 import { normCompare, resolvePath, segmentsOf } from './path-check.js'
 
 const REMOVAL_CMDS = new Set(['removeitem', 'rm', 'ri', 'rmdir', 'del', 'erase', 'rd'])
+// Source-consuming mutators: after one runs, the destination holds the only
+// copy of whatever moved (and the source may be an emptied shell). These are
+// the statements whose silent failure changes the world a later chained
+// removal faces (DSR-009).
+const MUTATION_CMDS = new Set([
+  'moveitem', 'mi', 'move', 'copyitem', 'cp', 'copy', 'renameitem', 'rni', 'ren',
+])
+// Verbs whose path arguments go through the FileSystem provider's wildcard
+// interpretation on mismatched use: removal + mutators (DSR-009 misuse).
+const GLOB_SENSITIVE_CMDS = new Set([...REMOVAL_CMDS, ...MUTATION_CMDS])
+// Parameters whose values are legitimately wildcard patterns — bracket or star
+// occurrences there are intent, not misuse. (`-Path` is deliberately absent:
+// its value goes through wildcard interpretation, which is exactly the risk.)
+const WILDCARD_PARAMS = new Set(['include', 'exclude', 'filter'])
 const LIST_CMDS = new Set(['getchilditem', 'gci', 'ls', 'dir'])
 const WINDOWS_FLAG_CMDS = new Set(['rd', 'del', 'erase'])
 const DISK_TOOLS = new Set(['fdisk', 'parted', 'wipefs', 'format', 'diskpart'])
@@ -58,6 +72,8 @@ const DEFAULT_SUB = {
   cli: true,
   bulk: true,
   target: true,
+  chain: true,
+  misuse: true,
 }
 
 /**
@@ -246,12 +262,115 @@ function assessRemovalTargets(cmd, args, cwdState, rootBase) {
   return null
 }
 
+/** Whether a fragment carries `-EA/-ErrorAction Stop` (inline colon form included). */
+function hasErrorActionStop(words) {
+  for (let i = 0; i < words.length; i += 1) {
+    if (!words[i].startsWith('-')) continue
+    const norm = normalizeCommand(words[i])
+    if (norm === 'ea' || norm === 'erroraction')
+      return normalizeCommand(words[i + 1] ?? '') === 'stop'
+    if (norm === 'ea:stop' || norm === 'erroraction:stop') return true
+  }
+  return false
+}
+
+/** Whether a removal fragment carries blast-radius flags (-Recurse/-Force/-r/-f, del/rd /s /q). */
+function hasBlastFlags(cmd, args) {
+  for (const a of args) {
+    const norm = normalizeCommand(a)
+    if (norm === 'recurse' || norm === 'force') return true
+    // Short-flag clusters only (-r / -f / -rf …): long -Word params must not
+    // leak their inner letters into the character check (e.g. -Filter).
+    if (/^-[a-z]{1,3}$/i.test(a) && /[rf]/i.test(a.slice(1))) return true
+    if (WINDOWS_FLAG_CMDS.has(cmd) && /^\/[sq]/i.test(a)) return true
+  }
+  return false
+}
+
+/**
+ * misuse sub-family: parameter-semantics bugs that either guarantee a silent
+ * failure or silently widen the matched file set (DSR-009).
+ *
+ * (a) `-Literal*` with a wildcard value: -LiteralPath never expands `*`/`?`,
+ * and no NTFS file name can contain them — the step can never resolve, it
+ * fails as a non-terminating error, and anything chained after it runs
+ * against an unchanged source.
+ * (b) `[ ]` in a target of a removal/mutator verb: the FileSystem provider
+ * parses brackets as a single-character wildcard class (`x[1].md` also matches
+ * `x1.md`), so the command can hit files the author never named.
+ *
+ * @returns `{ text }` or `null`.
+ */
+function assessParameterMisuse(cmd, args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const word = args[i]
+    if (!word.startsWith('-')) continue
+    const norm = normalizeCommand(word)
+    if (!norm.startsWith('literal')) continue
+    const colon = norm.indexOf(':')
+    const value = colon >= 0 ? norm.slice(colon + 1) : (args[i + 1] ?? '')
+    if (/[?*]/.test(value)) {
+      return {
+        text: 'the -Literal* parameter takes verbatim names and never expands wildcards, so this target can never resolve — the step fails silently while chained later steps run against the unchanged source; use -Path to expand wildcards, or -LiteralPath with the exact name',
+      }
+    }
+  }
+  if (!GLOB_SENSITIVE_CMDS.has(cmd)) return null
+  for (let i = 0; i < args.length; i += 1) {
+    const word = args[i]
+    if (!word.startsWith('-')) {
+      if (/\[.*\]/.test(word)) {
+        return {
+          text: '[ ] in a wildcard-parsed target is a PowerShell character class, not a literal (x[1].md also matches x1.md), so this can hit files never named — reference bracketed names with -LiteralPath instead',
+        }
+      }
+      continue
+    }
+    const norm = normalizeCommand(word)
+    // Skip the value of wildcard-legitimate parameters (-Include/-Exclude/
+    // -Filter) and of -Literal* (verbatim by definition); -Path deliberately
+    // keeps its value checked — wildcard parsing there is the risk itself.
+    // Inline `-Filter:x[y]` values need no skip: the whole token starts with
+    // a dash, so it is never a positional candidate.
+    if (WILDCARD_PARAMS.has(norm) || norm.startsWith('literal')) i += 1
+  }
+  return null
+}
+
+/**
+ * chain sub-family (DSR-009): a blast-radius removal (recursion/force flags)
+ * executed in the same call after an earlier move/copy/rename whose outcome
+ * the removal is not error-gated on. Walk-back over `&&` finds the largest
+ * suffix of fragments guaranteed to have succeeded before the removal; any
+ * mutator before that boundary (without `-ErrorAction Stop`) has unknown
+ * status — if it failed silently, the removal faces files that never moved,
+ * i.e. the only copy. Cross-call chaining is out of reach by the same static
+ * boundary (documented accepted gap).
+ *
+ * @returns `{ text }` or `null`.
+ */
+function assessUngatedDeleteChain(cmd, args, f, fragments, seps) {
+  if (!REMOVAL_CMDS.has(cmd) || f === 0) return null
+  if (!hasBlastFlags(cmd, args)) return null
+  let s = f
+  while (s > 0 && seps[s - 1] === '&&') s -= 1
+  for (let i = 0; i < s; i += 1) {
+    const invocation = unwrapFragment(fragments[i])
+    if (!invocation || !MUTATION_CMDS.has(invocation.cmd)) continue
+    if (hasErrorActionStop(fragments[i])) continue
+    return {
+      text: 'a recursive/forced deletion is chained after a move/copy with no error gate — if the earlier step fails silently, the deletion runs against files that never left this location (the only copy); run the move, verify it landed in a separate step, then issue the deletion as its own command — or gate the earlier step with -ErrorAction Stop',
+    }
+  }
+  return null
+}
+
 /**
  * High-risk destructive command analysis (PowerShell dialect, static).
  * Here-strings are blanked first; fragments run through the enabled
- * sub-families in a fixed order (git → machine → eval → bulk → cli → target),
- * then `$(...)` subexpressions recurse (subshell snapshot semantics), and the
- * eval whole-text patterns close the pass.
+ * sub-families in a fixed order (git → machine → eval → bulk → cli → target →
+ * misuse → chain), then `$(...)` subexpressions recurse (subshell snapshot
+ * semantics), and the eval whole-text patterns close the pass.
  *
  * @param rootBase - judgment base directory (resolved workspace root; DSR-007).
  * @param command - raw command text (already literal-reconstructed by the caller).
@@ -282,7 +401,9 @@ export function assessDestructive(rootBase, command, sub = DEFAULT_SUB) {
       (sub.eval && assessEvalCommand(cmd, f, seps)) ||
       (sub.bulk && assessBulkDelete(cmd, fragments, f, seps)) ||
       (sub.cli && assessCliCommand(cmd, lowerArgs, joined)) ||
-      (sub.target && assessRemovalTargets(cmd, args, cwdState, rootBase))
+      (sub.target && assessRemovalTargets(cmd, args, cwdState, rootBase)) ||
+      (sub.misuse && assessParameterMisuse(cmd, args)) ||
+      (sub.chain && assessUngatedDeleteChain(cmd, args, f, fragments, seps))
     if (hit) return hit
   }
 

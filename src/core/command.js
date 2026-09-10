@@ -80,8 +80,15 @@ export function tokenizePwsh(command) {
     }
     if (c === ';' || c === '\n' || c === '\r' || c === '|' || c === '&') {
       flush()
-      if ((c === '&' && command[i + 1] === '&') || (c === '|' && command[i + 1] === '|')) i += 1
-      tokens.push({ kind: 'sep', value: c })
+      // Separator fidelity: `&&` / `||` keep their two-char value — the
+      // error-gate distinction between `a && b` (b runs only if a succeeded)
+      // and `a ; b` / `a || b` (b runs regardless) is judgment input for the
+      // chain sub-family and must not be collapsed. `|` alone stays the pipe
+      // family; `||` is a short-circuit separator, not a pipe.
+      let value = c
+      if (c === '&' && command[i + 1] === '&') { value = '&&'; i += 1 }
+      else if (c === '|' && command[i + 1] === '|') { value = '||'; i += 1 }
+      tokens.push({ kind: 'sep', value })
       i += 1
       continue
     }

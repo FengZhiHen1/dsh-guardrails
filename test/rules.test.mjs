@@ -129,7 +129,7 @@ test('evaluateRules: all categories default on (normalized leaves)', () => {
     env: { read: true, modify: true },
     git: { read: true, modify: true },
     credentials: { read: true, modify: true, list: true },
-    destructive: { git: true, machine: true, eval: true, cli: true, bulk: true, target: true },
+    destructive: { git: true, machine: true, eval: true, cli: true, bulk: true, target: true, chain: true, misuse: true },
     system: { write: true },
     unverifiable: true,
   })
@@ -140,7 +140,7 @@ test('evaluateRules: v1 boolean categories remain valid (whole category on/off)'
   assert.deepEqual(evaluateRules({ env: false }).git, { read: true, modify: true })
   assert.deepEqual(evaluateRules({ credentials: false }).credentials, { read: false, modify: false, list: false })
   assert.deepEqual(evaluateRules({ destructive: false }).destructive, {
-    git: false, machine: false, eval: false, cli: false, bulk: false, target: false,
+    git: false, machine: false, eval: false, cli: false, bulk: false, target: false, chain: false, misuse: false,
   })
   assert.deepEqual(evaluateRules({ system: false }).system, { write: false })
   assert.equal(evaluateRules({ unverifiable: false }).unverifiable, false)
@@ -155,7 +155,7 @@ test('evaluateRules: object form toggles leaves independently, absent leaves def
   assert.deepEqual(r.env, { read: false, modify: true })
   assert.deepEqual(r.credentials, { read: true, modify: true, list: false })
   assert.deepEqual(r.destructive, {
-    git: true, machine: true, eval: true, cli: false, bulk: true, target: true,
+    git: true, machine: true, eval: true, cli: false, bulk: true, target: true, chain: true, misuse: true,
   })
 })
 

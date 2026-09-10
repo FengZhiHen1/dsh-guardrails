@@ -187,3 +187,18 @@ test('unverifiable fail-safe gate is toggleable (default on)', () => {
   assert.equal(allowed(lax('pwsh', { command: 'Get-Content $($x)' })), true)
   assert.equal(blocked(guard('pwsh', { command: 'Get-Content $($x)' })), true)
 })
+
+test('DSR-009: incident replay blocked end-to-end; ablation of chain+misuse opens it again', () => {
+  const incident =
+    "$in = 'E:/Project/Demo/1-保研准备/inbox'; " +
+    'Move-Item -LiteralPath "$in/*" -Destination E:/Project/Demo/library/行政/保研; ' +
+    'Remove-Item -LiteralPath "$in" -Recurse -Force; ' +
+    'Get-ChildItem -Recurse E:/Project/Demo/library/行政/保研 | Measure-Object Length -Sum'
+  assert.equal(blocked(pwsh(incident)), true)
+  // single-layer removals keep the other layer (independent gating)
+  assert.equal(blocked(makeGuard({ destructive: { misuse: false } })('pwsh', { command: incident })), true)
+  assert.equal(blocked(makeGuard({ destructive: { chain: false } })('pwsh', { command: incident })), true)
+  // both new layers off → the resolved plain-directory deletion passes
+  const loose = makeGuard({ destructive: { chain: false, misuse: false } })
+  assert.equal(allowed(loose('pwsh', { command: incident })), true)
+})
