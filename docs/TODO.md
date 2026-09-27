@@ -1,18 +1,27 @@
 # TODO
 
-## 待用户执行：v1.6.0（0.1.7-rc.2 适配）的 test 实测门禁（2026-09-27）
+## v1.6.0（0.1.7-rc.2 适配）的 test 实测门禁 —— **已通过**（2026-09-27，`test` 实例）
 
-按 AGENTS.md 红线，**agent 不得起实例**，以下三条必须由用户在启动器侧执行并回填结果：
+用户授权后，由 agent 经 `dshl instances restart test --profile test`（正规通道，非手工 spawn）在 `test` 实例（运行时 `0.1.7-rc.2`，pid 12152，`--profile test`）执行。挂载形态 `link:E:\Project\DSH_Plugins\plugins\dsh-guardrails`——**test 专属，web 仍只吃发布包 / `github:` git 依赖**。两插件均为只读型（不写配置目录及其派生现场），适用 AGENTS.md 隔离红线的只读例外，故未跑 `skill-manager-baseline.mjs gate`。
 
-1. **升级顺序先行**：先把 `stable-dev`（web）实例升到 `0.1.7-rc.2`，**再**挂载/更新 v1.6.0。反向操作会让插件整行不加载（`Config` import 期调 `.volatile()`，旧版 schemastery 3.18.2 无此方法 → `TypeError`），硬拦截静默失效。
-2. **test 实测**（`ds-harness-remote` 之外的 test profile）：
-   - `dsh --profile test` 启动成功：无崩溃、无 `N entries did not activate`，**且无 `dsh: disabling profile plugin guardrails: …`**（peer 门禁的静默禁用——本代最高危失败面）；
-   - 功能冒烟：`read .env` 被拦、`pwsh 'rm -rf .'` 被拦（守卫本体的核心路径）。
-3. **UI 冒烟必查 DevTools Console**（本轮唯一无法由单测覆盖的部分）：侧栏「插件」→ dsh-guardrails → 组件行 `guardrails` →「配置」→ 卡片出现、八子族开关可切换、保存后刷新仍生效；console **不得出现** `slot entry crashed in 'plugins.row.config'`（该路径崩溃会让 keyed 条目**一次性 abdicate**：页面无痕、部署层无报错、刷新重崩）。
+| 门禁项 | 结果 | 取证 |
+| --- | --- | --- |
+| ① `--dump-config` 复查 | ✅ | 184 行、**重复 id 为 0**；`guardrails` 行在，来源 `# == dsh-guardrails` |
+| ② 无 `N entries did not activate` | ✅ | 该轮 stderr 段为空（仅 stdout 一行 `dsh web: …`）。判据强度：`inactiveEntries` 遍历**整棵** loader 树，任何未达 `FIBER_ACTIVE` 的启用行都经无条件 `process.stderr.write` 报出（`app-boot/src/index.ts:827-861`、`:938`、`:434`），而 stderr 确被采集（同一日志文件内有旧轮崩溃堆栈为证）⇒ 其缺席即"两行都达 ACTIVE" |
+| ③ 无 `startup failed: … did not activate` | ✅ | 日志无此文本；且全盘无 `logs/startup-*.log` ⇒ 未走 `StartupError` 路径 |
+| ④ 无 peer 门禁静默禁用 | ✅ | 无 `dsh: disabling profile plugin …`（同为无条件 stderr，`compatibility-preflight.ts:82`） |
+| ⑤ 功能冒烟（守卫本体） | ✅ | 实例内真实回合：`tool/call` 发 `pwsh` 读 `…\.git\config` → `tool/result` **`isError: true`**，正文为 `[guardrails] Blocked: this shell command references the .git directory…`；实例日志同步落 `[guardrails] denied pwsh: …` |
+| ⑥ UI 冒烟（浏览器） | ✅ | **用户回报**「确认通过，能看到插件，并可以进行配置」（本项非机器取证） |
 
-未通过前不得发布 / 挂载 web（AGENTS.md 发布前置门禁）。
+**顺带取得的机器取证（强于"声明存在"）**：对运行中实例请求 `POST /api/settings/describe`，返回 `ns: "guardrails"`、`autoGenerate: false`，且表单 schema 恰含六字段 `env, git, credentials, system, destructive, unverifiable`。该接口送出的正是 `volatileForm(schema)` 且**丢弃非 volatile 字段**（`settings/src/index.ts:308-309`；`schema.ts:37-47`）⇒ 六字段齐现即"六字段全部 volatile"的断言；`describe()` 自身按 `fiber.state === ACTIVE` 过滤，构成对行激活的独立正面确认。客户端半区：`__DSH_BOOT__`（65 条）含 `dsh-guardrails` 且 bundle URL 已解析，实际下发 bundle 含 `plugins.row.config` / `dsh-guardrails#guardrails` / `hooks: { guardrailForm }`，剥注释后旧 API 标记全为 0；已部署 `ui-plugin-manager` 确实声明 `plugins.row.config`（"slot 仍被声明"判据对**已部署代际**成立）。
 
-### 本轮已完成的可自动化部分（agent 侧实测）
+**⑥ 未逐项回报的两项**（若日后发现问题须回到本条）：DevTools console 是否出现 `slot entry crashed in 'plugins.row.config'`；「保存后刷新仍生效」。
+
+### 仍未完成：升级顺序（web 挂载前置）
+
+⚠️ 本插件**仍不得**挂载到 `0.1.2-rc.1` 实例：`Config` 在 import 期调 `.volatile()`，旧版 schemastery 3.18.2 无此方法 ⇒ `TypeError` ⇒ 整行不加载、硬拦截静默失效。故 `stable-dev`（web，运行时仍 `0.1.2-rc.1`）的升级必须**先于** v1.6.0 的挂载/更新。
+
+### 适配期 agent 侧可自动化验证（门禁执行前，2026-09-27）
 
 - 单测 130 例全绿（行覆盖 98.08%，门禁 ≥80%）；分层门禁通过；`node --check` 全绿。
 - `.volatile()` + `union` + `.default()` 组合在**运行时携带的 schemastery 3.18.4** 上实跑 12 项断言全通过（含 `toJSON` 往返保留 volatile 标记与 union 成员、`isVolatilePath` 对 `env` 与 `env.read` 均判真）。
@@ -22,9 +31,9 @@
 
 ### 已知未覆盖 / 残留风险
 
-- **`plugins.row.config` 的端到端渲染**只有静态契约测试 + 源码阅读支撑，真实浏览器渲染待第 3 条门禁确认。
-- 0.1.2-rc.1 部署树中 `@deepseek-ai/dsh-client-ui-primitives` **无独立包目录**，但客户端 bundle 对其 `require` 且旧版卡片当时工作——**机制未定案**（探测受 pnpm 目录名截断与超时限制）。因已选单轨 0.1.7 适配，本轮不阻塞；若日后回看旧代问题需重新取证。
-- `dsh.client.inject` 里 `@deepseek-ai/dsh-client-ui-plugin-manager` 是**信息性**声明（不决定激活顺序，指向不存在的包也只是静默跳过）；已按新基线的真实包名更正。
+- ~~**`plugins.row.config` 的端到端渲染**只有静态契约测试 + 源码阅读支撑~~ → **2026-09-27 已由用户浏览器确认**（第 ⑥ 条门禁：插件可见、可配置）。
+- ~~0.1.2-rc.1 部署树中 `@deepseek-ai/dsh-client-ui-primitives` **无独立包目录**，但客户端 bundle 对其 `require` 且旧版卡片当时工作——机制未定案~~ → **2026-09-27 结案：它是 shell 预置的平台模块（platform seed），不是 client 条目。** `@deepseek-ai/dsh-client-ui-primitives` 是 `PLATFORM_MODULES` 九项之一（`react`/`react/jsx-runtime`/`react-dom`/`react-dom/client`、`@deepseek-ai/cordis`、`dsh-client-store`、`dsh-client-ui-slots`、`dsh-client-ui-primitives`、`dsh-client-ui-dockkit`；`packages/client/web/src/platform.ts:8-14`），由 shell 静态 import 后写入冻结模块表（`seed.ts:16,35`）⇒ client bundle 直接 `require` 由 static table 应答，**既不需要独立包目录、也不需要它有自己的 client entry**——原先两个看似矛盾的观察同时得解。**跨代核对**：`git grep` 于 tag `dsh-v0.1.2-rc.1` 的 `packages/client/web/src/platform.ts:12` 与 `seed.ts:16,35` 和 `dsh-v0.1.7-rc.2` **同形**，故旧代"无目录却能 require"本就非异常。知识库 `client/15` 的「UI 原语」行早已记明该机制（"shell-seeded static UI library…**无需它有自己的 client entry**"），本条此前未据此下结论，才留下"机制未定案"。⇒ 探测受限不再是缺口。
+- `dsh.client.inject` 是**信息性**声明（只构成"工厂先到"的排序边，不决定 cordis 激活顺序）：`packages/client/modules/src/client/system.ts:268-271` 对**解析不到的边静默跳过**（`if (dependency !== undefined)`），故列 `ui-primitives` 这类平台模块无害——官方 `@deepseek-ai/dsh-client-ui-jobs` 的 `dsh.client.inject` 同样列了它。已按新基线的真实包名更正。
 - `docs/TODO.md` 下方 2026-09-06 起的「稳定 web profile 是真分叉」条目仍未处理（`homes\stable-dev\profiles\web` 的 cosmokit 1.8.2 / schemastery 3.18.1 落后）；升级该实例时一并重装可清。
 
 ## 已定位：git 依赖安装后 client 行消失 = web-next 启动中途致命失败的后遗症（2026-09-06 晚排查）
