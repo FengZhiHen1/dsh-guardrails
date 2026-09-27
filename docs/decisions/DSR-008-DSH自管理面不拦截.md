@@ -10,13 +10,13 @@
   |---|---|---|
   | 按名杀 dsh/node/pwsh 等进程 | 拦 | `destructive.machine` 的 `KILL_TARGET_PATTERN` |
   | 按 PID 杀进程 | 不拦 | 模式只匹配进程名 |
-  | 读写 `$DSH_HOME` 配置面（settings.yaml、profiles 的 package.json、cordis.patch.yml） | 不拦 | 不在任何名单 |
+  | 读写 `$DSH_HOME` 配置面（本 profile 的 `cordis.patch.yml`、profiles 的 package.json；遗留 `settings.yaml`） | 不拦 | 不在任何名单 |
   | 读写 DSH 安装目录 | 不拦 | 同上 |
   | 读写会话日志（.dsh） | 不拦 | DSR-003 重访（混合目录无敏感语义） |
   | `$DSH_HOME` 下凭据文件（.credentials.yaml 等） | 拦 | credentials 名单按 basename 命中 |
 - 由此暴露一个推论：**自我解除通道**——`danger-full-access` 模式下沙箱不拦
-  任何写，AI 可写 `settings.yaml` 的 `dsh-guardrails` 分节关闭本插件规则，
-  或写 profile patch 停用插件行；与拒绝消息"另一通道也被拦"的措辞存在出入。
+  任何写，AI 可写本 profile 的 `cordis.patch.yml`（v0.1.7 起设置页的持久化目标）
+  关闭本插件规则，或写 profile patch 停用插件行；与拒绝消息"另一通道也被拦"的措辞存在出入。
   （`workspace-write` 模式下该通道已由沙箱围栏关闭：工作区外写一律
   `FS_SANDBOX_DENIED`。）
 

@@ -136,7 +136,20 @@ if (!existsSync(LAUNCHER)) {
 // ephemeral port (--port 0) without opening a browser; the process must stay
 // alive for the whole warm-up window and print no activation/load errors.
 const BOOT_SMOKE_WAIT_MS = 30_000
-const BOOT_ERROR_MARK = /did not activate|failed to load|duplicate loader entry id|fatal load failure|invalid config|host preparation failed|plugin tree failed to load/
+// Failure signatures for the CURRENT baseline (0.1.7-rc.2). Two entries of the
+// old list no longer exist and are kept only as harmless historical markers:
+//   - `duplicate loader entry id` was removed by an upstream revert
+//     (e07f41d5fd): a duplicate id is now silently resolved last-wins, so boot
+//     CANNOT fail on it and no boot-time gate for it exists. Row conflicts must
+//     be reviewed by hand (knowledge `must-read/05` §6.1).
+// The two added marks are the baseline's own silent/quiet failure modes:
+//   - `disabling profile plugin` / `skipping profile bundle`: the peer-version
+//     gate disables a row (or skips a whole bundle) that does not satisfy the
+//     running DSH version. The instance boots normally and only one stderr line
+//     appears — the highest-risk "silent mute".
+//   - `startup failed: N required plugin[s] did not activate`: fatal (exit 1),
+//     as opposed to the non-fatal `N entries did not activate` warning.
+const BOOT_ERROR_MARK = /did not activate|failed to load|duplicate loader entry id|fatal load failure|invalid config|host preparation failed|plugin tree failed to load|disabling profile plugin|skipping profile bundle|startup failed/
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 async function bootSmoke() {
   // SSH 变量非空 → web-runtime 跳过默认浏览器交接（--no-open 在

@@ -38,8 +38,9 @@
   `index.js`（薄转发）、`src/`（core/adapter/client 三层）与
   `cordis.patch.yml`；
 - `cordis.patch.yml` 是随包分发的安装层：`insert` 一行
-  `{ id: guardrails, name: dsh-guardrails, config: {...} }`，行名与包名一致，
-  供 Node 模块解析；
+  `{ id: guardrails, name: dsh-guardrails }`，行名与包名一致，
+  供 Node 模块解析；行 `id` 同时就是该插件的 **settings 命名空间**
+  （v0.1.7 起命名空间 = loader 条目 id）；
 - profile 通过 `dsh plugin --profile <name> add <包>` 安装：pnpm 写入依赖，
   CLI 自动把声明了 `dsh.bundle` 的包追加进 `dsh.profile.bundles`。
 
@@ -50,7 +51,7 @@
 - **test（试验）profile**：允许源码直挂。`dsh plugin --profile test add`
   指向本目录，得到 `link:` 依赖（node_modules 中是符号链接，源码改动
   **重启即生效**，无需重新安装）。插件行由 bundle 层提供，test 的用户层
-  patch 不得再 insert 同一行（重复 id 会导致整个 profile 启动失败）。
+  patch 不得再 insert 同一行。
 - **web（稳定）profile**：只吃发布物。当前形态为 **`github:` git 依赖**（manifest 未钉 ref，lockfile 的 resolution 钉 commit——钉 ref 非硬性要求；发布/挂载 web 前必须过 **test 实测门禁**，见 AGENTS.md「发布前置门禁」与 `verify/run-verify.mjs` 第 4 步启动冒烟）。`npm publish` 发布后切换为 `dsh plugin --profile web add dsh-guardrails`（registry 版本）。每次源码更新需 push 到该仓库，并（推荐）以新 commit ref 重新 `add` 以固定 lockfile 基线。
 
 ## 配置覆盖
@@ -59,8 +60,10 @@
 
 **配置入口（DSH 官方范式）**：
 
-1. **设置页（推荐）**：设置 → 插件 → **插件配置** →「权限守护」卡片——每个防御层叶子开关 + 重置。修改在卡片内**本地暂存**，点「保存」统一写入用户设置文档（`settings.yaml` 的 `dsh-guardrails` 分节，单次原子 mutation）并立即生效于后续判定；「重置」清除对应项的用户覆盖、回落插件行默认。卡片随包分发（浏览器半侧 `src/client/card.js`，`dsh.client` 声明），与 Host 注册的同一命名空间自动配对（官方"新增设置卡片"范式；表单语义对齐官方 PluginCard 暂存草稿模型，Host 半侧经官方 `installSection` 接线，v1.4.0 起）。
-2. **插件行 config（部署层）**：作为设置分节的 **base 层**，被用户设置覆盖；settings 服务不可用时插件完全按行配置工作。默认值只属于导出的 Schemastery `Config` schema（loader 在 `apply` 前验证并填充默认值；非法类型加载期报 `ValidationError` 挂载失败；未知键/未知子键由 `evaluateRules` 拒绝）。
+1. **插件页（推荐）**：侧栏「插件」→ 找到 **dsh-guardrails** → 展开其组件行 `guardrails` → 点「配置」——每个防御层叶子开关 + 重置。修改在页面内**本地暂存**，点「保存」统一写入**本 profile 的 `cordis.patch.yml`**（单次原子 mutation）并立即生效于后续判定；「重置」清除对应项的用户覆盖、回落插件行默认。卡片随包分发（浏览器半侧 `src/client/card.js`，`dsh.client` 声明），经 `ctx.configForms` 读 Host 提供的 `guardrails` 命名空间（v0.1.7 模型：命名空间 = loader 条目 id；配置真相 = 该条的 Cordis `Config`，六个字段全部 `.volatile()`，保存即提交进运行中的 fiber——无重挂载、无 `onChange`）。
+2. **插件行 config（部署层）**：作为设置分节的 **base 层**，被设置页写入覆盖；settings 服务不可用时插件完全按行配置工作。默认值只属于导出的 Schemastery `Config` schema（loader 在 `apply` 前验证并填充默认值；非法类型加载期报 `ValidationError` 挂载失败；未知键/未知子键由 `evaluateRules` 拒绝）。
+
+> ⚠️ **基线要求（硬性）**：本插件（v1.6.0 起）适配 **DSH `0.1.7-rc.2` 及以后**。在 `0.1.2-rc.1` 等旧运行时上，**插件整行不会加载**——`Config` 在 import 期即调用 `.volatile()`，而旧版携带的 schemastery 3.18.2 没有该方法（实测抛 `TypeError: s.volatile is not a function`），**硬拦截随之失效**。⇒ **升级顺序：先把实例升到 `0.1.7-rc.2`，再挂载/更新本插件**；反向操作会静默失去守护。
 
 profile 覆盖形态示例（部署基线）：
 
@@ -91,7 +94,9 @@ profile 覆盖形态示例（部署基线）：
 - 非法配置（未知键、非布尔、非对象）挂载即失败，不会静默降级。
 - 关闭任意一个防御层前，请先阅读上方"已知限制与边界"中对应条目的风险标注；`destructive.target` 与 `unverifiable` 关闭后对应拦截**完全放行**。
 - v1 五键布尔写法依然有效（等价于对应类别全开/全关）。
-- 若要改某 profile 的配置，在**该 profile 自己的 `cordis.patch.yml`** 里按 `id: guardrails` 做 id-targeted override，而不要再次 insert 同一行；重复 insert 会导致整个 profile 启动失败（`duplicate loader entry id`）。
+- 若要改某 profile 的配置，在**该 profile 自己的 `cordis.patch.yml`** 里按 `id: guardrails` 做 id-targeted override，而不要再次 insert 同一行。
+  - ⚠️ **重复 insert 不再报错**：旧基线会以 `duplicate loader entry id` 让整个 profile 启动失败，但该守卫**已被上游 revert 删除**（`dsh-v0.1.7-rc.2` 起），重复 id 改为**静默后者胜出**——排查冲突不能再指望报错，只能人工核对各层行清单。`--dump-config` 层两代都不做重复 id 判别。
+- ⚠️ 设置页保存的**优先级低于** home 级 `cordis.patch.yml` 与命令行 overlay：会被遮蔽的写入在持久化前即被拒绝（不落盘，也不静默丢弃）。
 
 ## 已知限制与边界
 
@@ -106,11 +111,12 @@ profile 覆盖形态示例（部署基线）：
   只能走全规则。
 - 系统区前缀按 C: 系统盘建模；Linux/macOS 清单与注册表类命令
   （`reg`/`HKCU:`）不在 v1 范围（见 DSR-001）。
-- **DSH 自管理面不拦截**（DSR-008）：对 `$DSH_HOME` 配置面（`settings.yaml`、
-  `profiles/*/package.json`、`cordis.patch.yml`）、DSH 安装目录与会话日志的
-  读写一律放行——AI 协助修改 DSH 配置是预期用法。推论（显式接受的边界）：
-  `danger-full-access` 模式下 AI 可经 `settings.yaml` 调整本插件自身规则
-  （自我解除通道）；`workspace-write` 模式下该通道已由沙箱围栏关闭（工作区
+- **DSH 自管理面不拦截**（DSR-008）：对 `$DSH_HOME` 配置面（本 profile 的
+  `cordis.patch.yml`、`profiles/*/package.json`、遗留 `settings.yaml`）、DSH
+  安装目录与会话日志的读写一律放行——AI 协助修改 DSH 配置是预期用法。推论
+  （显式接受的边界）：`danger-full-access` 模式下 AI 可经该 profile 的
+  `cordis.patch.yml` 调整本插件自身规则（自我解除通道；v0.1.7 起设置页的写入
+  也落在该文件）；`workspace-write` 模式下该通道已由沙箱围栏关闭（工作区
   外写被拒）。进程级保护仍在：按名杀 `dsh`/`node`/`pwsh` 等进程被
   `destructive.machine` 拦截（按 PID 杀不在覆盖内）。
 - **链删/误用规则的无状态边界（DSR-009，显式接受的缺口）**：`chain` 只判**同一命令调用内**的
@@ -128,7 +134,9 @@ profile 覆盖形态示例（部署基线）：
 
 - **合法操作被拦**：拒绝消息会说明命中的类别与替代方案。属保守取舍（见"已知限制与边界"）时，可让用户手动执行该操作，或在 profile 自己的 `cordis.patch.yml` 中按 `id: guardrails` 关闭对应规则（`env: false` 等），重启 profile 生效。
 - **profile 启动失败，报 `unknown config key` / `must be a boolean`**：插件行的 `config` 有非法键或非法值；按错误信息修正 profile 的 patch 层。
-- **重复行启动失败（`duplicate loader entry id`）**：bundle 层已 insert 了 `guardrails` 行，用户 patch 层又 insert 了一次；删除用户层的重复行，改用 id-targeted override。
+- **同一 `guardrails` 行被 insert 两次**：bundle 层已 insert，用户 patch 层又 insert 了一次。⚠️ **不会报错**：旧基线的 `duplicate loader entry id` 守卫已被上游删除（`dsh-v0.1.7-rc.2` 起），现为**后者静默胜出**——只能人工核对各层行清单（`--dump-config` 也不做重复 id 判别）；正确做法是删除用户层的重复行、改用 id-targeted override。
+- **插件页里看不到配置卡片**：① 该 profile 的运行时是否 ≥ `0.1.7-rc.2`（旧运行时无 `configForms`，卡片不会出现）；② `--dump-config` 里 `guardrails` 行是否真的激活（行被 peer 门禁改成 `disabled: true` 时不加载，启动日志只有一行 `dsh: disabling profile plugin …`）；③ 行是否被改名（命名空间 = 条目 id，改名即脱钩）。
+- **保存被拒绝**：设置页写入的优先级**低于** home 级 `cordis.patch.yml` 与命令行 overlay；会被遮蔽的写入在持久化前被拒绝（草稿会保留在页面上）。另：只有 `.volatile()` 字段可写，非 volatile 路径的写入直接抛 `Config field "x" is not volatile`。
 - **guard 内部异常**：控制台出现 `[guardrails] internal error (fail-open)`——插件判定层出错但已放行（防死锁），收集错误信息反馈修复。
 
 ## 测试

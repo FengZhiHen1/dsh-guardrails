@@ -1,6 +1,36 @@
 # Changelog
 
-## 1.5.0（当前，未发布）
+## 1.6.0（当前，未发布）
+
+### 破坏性变更：适配 DSH `0.1.7-rc.2`（新基线 settings / client 模型换代）
+
+> 用户决策：**执行方案 B（单轨适配 0.1.7-rc.2）**，放弃对 `0.1.2-rc.1` 及更早运行时的兼容（web 稳定实例随后升级）。判定依据均为本机机械取证，非文档字面引用。
+
+- **Host settings 接线整体重写**（旧 API 在新基线**零命中**）：`ctx.settings.installSection(...)` 已从 `dsh-settings` 删除（0.1.7-rc.2 只有 `SettingsForms`）。改为 v0.1.7 官方模型——六个 Config 字段全部加 `.volatile()`，`apply` 内 `ctx.inject(['settings'], sctx => sctx.effect(() => sctx.settings.configure({ auto: false }, ctx.fiber)))` 声明自绘页面策略，guard 在**每次判定时**经 `readConfig()` 读 `ref.get()` 活值。⇒ 设置页保存即提交进运行中的 fiber：**无重挂载、无 `onChange` 回调、无 base-layer 注册**。旧模型里"用户设置文档覆盖 base 层 / provider 卸载回落 entry"的语义随之消失（volatile 引用是唯一真相）。
+- **Client 接线整体重写**：`ctx.settingsScope.bind({...})` 与 `settings.plugin.item` 在新基线**零命中**（后者已由 `plugins.*` 七件套取代）。改为 `ctx.configForms.get(NS)` 读写 + `ctx.configForms.whileServed([NS], …)` 按需挂载，注册槽位为 **`plugins.row.config`**（key = `dsh-guardrails#guardrails`，行页面由此多出「配置」控件）。反应性改走保留舱 `hooks`（每个成员成为 `use<Name>` selector hook），因为页面传入的 `form` prop 是一次性 `{state, mutate}` 快照，不含 `subscribe`。
+- **settings 命名空间改名**：v0.1.7 起命名空间 = **loader 条目 id**，故 `SETTINGS_NS` 由插件自选的 `dsh-guardrails` 改为 **`guardrails`**（与 `cordis.patch.yml` 的行 id 一致）。在 profile 里给该行改名会移动命名空间并使卡片脱钩。
+- **图标名迁移**：新 `ui-primitives` 的 190 个图标导出取消了尺寸后缀（旧 75 个全部消失），`IconChevronDownOutline14` → **`IconChevronDownOutlineRegular`**（尺寸改走 `size` prop）。旧名在现代码中 `undefined`，卡片的 typeof 守卫会静默退化为文本箭头。
+- **`dsh.client.inject` 修正**：移除 `@deepseek-ai/dsh-client-runtime`（**两代部署树中均不存在**——1.x 遗留名，已改名 `dsh-client-modules`），加入真实依赖 `...-ui-plugin-manager`。
+- **peer 范围抬到目标运行时**：`cordis ^4.0.4` / `dsh-settings ^0.1.7-rc.2` / `schemastery ^3.18.4`。0.1.7-rc.2 新增 **peer 版本不兼容门禁**：`@deepseek-ai/dsh*` peer 不满足运行中版本时**整行被自动置 `disabled: true`、插件根本不加载**，实例照常启动、只在 stderr 留一行（最高危的静默变哑）。判定语义为 `semver.satisfies(rt, range, { includePrerelease: true })`。
+- **devDependencies 的 schemastery 同步抬到 `^3.18.4`**：`.volatile()` 在 3.18.2 **不存在**（实测 0 命中；3.18.4 为 28 处），旧版会让 `Config` 在 import 期直接抛错。
+
+### ⚠️ 部署顺序是硬性的（实测复核）
+
+在 `0.1.2-rc.1` 等旧运行时上，本版本**整行不加载**（`Config` 在 import 期调用 `.volatile()` → `TypeError: s.volatile is not a function`，已实跑复现），**不是"只少了配置页"**——旧实例上的硬拦截会静默失效。⇒ **先把实例升到 `0.1.7-rc.2`，再挂载/更新本版本**。
+
+### 文档更正（旧表述在新基线反向失真）
+
+- 删除 README / 需求 R-12 / 部署.md 中「重复 insert 导致整个 profile 启动失败（`duplicate loader entry id`）」的表述——该守卫**已被上游 revert 删除**（`dsh-v0.1.7-rc.2` 源码 0 命中，提交 `e07f41d5fd`），重复 id 改为**静默后者胜出**；`--dump-config` 层两代都不做重复 id 判别，核对只能人工按层级进行。
+- README / 规则模型 / DSR-008 中 `settings.yaml` 相关表述更新为「本 profile 的 `cordis.patch.yml`」（`settings-file` 提供方与 `settings.yaml` 已删除，遗留文件由 settings 服务导入后改名为 `settings.yaml.imported`）。
+- 新增「版本基线」节，写明**不兼容 0.1.2-rc.1 及更早运行时**，以及该结论的三条机械证据。
+
+### 测试与验证
+
+- 测试 115 → 120：`config.test.mjs` 重写为 volatile 契约（默认值经 `ref.get()` 断言、**六字段全部 volatile** 的显式断言、非法值仍挂载失败）；`settings.test.mjs` 重写为 v0.1.7 模型（`configure` 页面策略、提交后即时生效、提交一字段不扰动其他字段、无 settings 服务按行配置、非 volatile 手写配置仍可判定）。
+- 行覆盖 98.08%（门禁 ≥80%）；分层门禁通过（core 6 文件）；`node --check` 全绿；tarball 干净安装 + 导入冒烟通过（实测 `SETTINGS_NS === 'guardrails'` 且六字段均为 volatile 引用）。
+- ⚠️ **test 实测门禁未完成**：`--dump-config` 组合断言与 test profile 启动冒烟需起实例，按 AGENTS.md 红线由用户经启动器执行（agent 不起进程）。**UI 卡片冒烟必须查 DevTools Console**（新增槽位 `plugins.row.config` 的渲染契约无法由单测覆盖）。
+
+## 1.5.0（已发布）
 
 ### 安全增强（DSR-009——2026-09-10 用户数据误删事故复盘入闸）
 

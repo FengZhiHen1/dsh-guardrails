@@ -1,5 +1,32 @@
 # TODO
 
+## 待用户执行：v1.6.0（0.1.7-rc.2 适配）的 test 实测门禁（2026-09-27）
+
+按 AGENTS.md 红线，**agent 不得起实例**，以下三条必须由用户在启动器侧执行并回填结果：
+
+1. **升级顺序先行**：先把 `stable-dev`（web）实例升到 `0.1.7-rc.2`，**再**挂载/更新 v1.6.0。反向操作会让插件整行不加载（`Config` import 期调 `.volatile()`，旧版 schemastery 3.18.2 无此方法 → `TypeError`），硬拦截静默失效。
+2. **test 实测**（`ds-harness-remote` 之外的 test profile）：
+   - `dsh --profile test` 启动成功：无崩溃、无 `N entries did not activate`，**且无 `dsh: disabling profile plugin guardrails: …`**（peer 门禁的静默禁用——本代最高危失败面）；
+   - 功能冒烟：`read .env` 被拦、`pwsh 'rm -rf .'` 被拦（守卫本体的核心路径）。
+3. **UI 冒烟必查 DevTools Console**（本轮唯一无法由单测覆盖的部分）：侧栏「插件」→ dsh-guardrails → 组件行 `guardrails` →「配置」→ 卡片出现、八子族开关可切换、保存后刷新仍生效；console **不得出现** `slot entry crashed in 'plugins.row.config'`（该路径崩溃会让 keyed 条目**一次性 abdicate**：页面无痕、部署层无报错、刷新重崩）。
+
+未通过前不得发布 / 挂载 web（AGENTS.md 发布前置门禁）。
+
+### 本轮已完成的可自动化部分（agent 侧实测）
+
+- 单测 130 例全绿（行覆盖 98.08%，门禁 ≥80%）；分层门禁通过；`node --check` 全绿。
+- `.volatile()` + `union` + `.default()` 组合在**运行时携带的 schemastery 3.18.4** 上实跑 12 项断言全通过（含 `toJSON` 往返保留 volatile 标记与 union 成员、`isVolatilePath` 对 `env` 与 `env.read` 均判真）。
+- 新 `test/client-wiring.test.mjs`（10 例）驱动真实 bundle，覆盖原先的渲染契约盲区，并**经 ablation 验证检测力**：把槽位名与命名空间回退到旧值后，其中 4 例精确失败、6 例无关项仍通过。
+- tarball 干净安装 + 导入冒烟通过（实测 `SETTINGS_NS === 'guardrails'` 且六字段均为 volatile 引用）。
+- peer 范围按 DSH 门禁语义（`includePrerelease: true`）复刻验证：`@deepseek-ai/dsh-settings ^0.1.7-rc.2` 对 `0.1.7-rc.2` **PASS**。
+
+### 已知未覆盖 / 残留风险
+
+- **`plugins.row.config` 的端到端渲染**只有静态契约测试 + 源码阅读支撑，真实浏览器渲染待第 3 条门禁确认。
+- 0.1.2-rc.1 部署树中 `@deepseek-ai/dsh-client-ui-primitives` **无独立包目录**，但客户端 bundle 对其 `require` 且旧版卡片当时工作——**机制未定案**（探测受 pnpm 目录名截断与超时限制）。因已选单轨 0.1.7 适配，本轮不阻塞；若日后回看旧代问题需重新取证。
+- `dsh.client.inject` 里 `@deepseek-ai/dsh-client-ui-plugin-manager` 是**信息性**声明（不决定激活顺序，指向不存在的包也只是静默跳过）；已按新基线的真实包名更正。
+- `docs/TODO.md` 下方 2026-09-06 起的「稳定 web profile 是真分叉」条目仍未处理（`homes\stable-dev\profiles\web` 的 cosmokit 1.8.2 / schemastery 3.18.1 落后）；升级该实例时一并重装可清。
+
 ## 已定位：git 依赖安装后 client 行消失 = web-next 启动中途致命失败的后遗症（2026-09-06 晚排查）
 
 **现象**：web-next profile（dev 实例，0.1.2-rc.1）以 `github:` 依赖安装本插件后，浏览器端 client 行缺席——

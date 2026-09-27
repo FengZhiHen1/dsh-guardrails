@@ -1,35 +1,51 @@
-/* dsh-guardrails — browser half (settings card).
+/* dsh-guardrails — browser half (plugin configuration page).
  *
  * Lazy-CJS bundle format of the DSH client module system (packages/client/
  * modules): script execution only registers the factory via
  * `window.__ModuleLoader__.load`; the module body (this card's React
  * component) materializes when the loader imports this package's `/client`.
- * The "插件配置" tab declares the keyed `settings.plugin.item` slot; the card
- * below is registered under its own namespace key — the same value the Host
- * half registers through the settings service (`dsh-guardrails`) — and the
- * tab pairs the two without knowing what the namespace means.
  *
- * The card renders its own chrome and form (cross-plugin value imports are
- * rejected by the bundle-purity gate, so the official PluginCard shell is
- * unavailable): it reads the bound settings scope's snapshot (resolved value /
- * base / user layers, revision, writability) and writes fields through the
- * scope, whose revision fencing is owned by the DSH settings surface.
+ * v0.1.7 wiring (knowledge `client/15` §4.1, `host/07` §1-§3):
+ *   - `settings.plugin.item` and `ctx.settingsScope` NO LONGER EXIST (source
+ *     grep: both are zero-hit on the current baseline). The Plugins page owns
+ *     the configuration slots: `plugins.item` (OFFICIAL settings pages only),
+ *     `plugins.bundle.config` (keyed by package name) and `plugins.row.config`
+ *     (keyed by `<package name>#<row id>`).
+ *   - This bundle's configuration belongs to its loader ROW (`id: guardrails`
+ *     in cordis.patch.yml), so it registers into `plugins.row.config` under
+ *     `dsh-guardrails#guardrails`; that row then gains a 「配置」 control.
+ *   - Reads/writes go through `ctx.configForms.get(ns)`. A settings namespace
+ *     IS the loader entry id, so NS is `guardrails` — NOT the package name
+ *     `dsh-guardrails` (which was the old, plugin-chosen namespace).
+ *   - Registration is kept alive only while the Host serves that namespace
+ *     (`configForms.whileServed`), so a deployment without the row shows no
+ *     trace of this page.
  *
- * Form semantics follow the official PluginCard staged-draft model
- * (knowledge/15 §4.1, production parity: dsh-skill-manager card.jsx): edits
- * land in a local draft; one 保存 commits every dirty field in a single
- * scope.mutate() (atomic, one revision fence); 放弃 discards the draft;
- * a dirty header pill marks unsaved state; a successful save collapses the
- * card, a rejected write keeps the draft plus the footer diagnostic. Per-row
- * 重置 stays immediate (clears the user override, not an edit).
+ * The card renders its own chrome and form: cross-plugin value imports are
+ * rejected by the bundle-purity gate, and the compact leaf-toggle grid this
+ * plugin needs has no official boolean field primitive (the shared settings
+ * fields are text/secret inputs). It reads the config form's snapshot
+ * (resolved value / base / user layers, revision, writability) and writes
+ * through the form, whose revision fencing is owned by the DSH settings
+ * surface.
  *
- * Card chrome follows the official PluginCard geometry (knowledge/15 §4.1):
- * li > button.header (名称/描述/折叠箭头) > body (border-top + margin 0 16px)
- * > footer (border-top, 放弃/保存), tokens via --dsw-alias-*, chevron from
- * @deepseek-ai/dsh-client-ui-primitives (the shell-seeded static UI library;
- * icon guarded so a missing icon never fails the card). Interactive states
- * replicate PluginCard.module.css in inline-style form: disabled = opacity
- * .4 + default cursor, discard hover deepens, focus = brand outline.
+ * Form semantics follow the official staged-draft model: edits land in a local
+ * draft; one 保存 commits every dirty field in a single form.mutate() (atomic,
+ * one revision fence); 放弃 discards the draft; a dirty header pill marks
+ * unsaved state; a successful save collapses the card, a rejected write keeps
+ * the draft plus the footer diagnostic. Per-row 重置 stays immediate (clears
+ * the user override, not an edit).
+ *
+ * Card chrome follows the official settings-page geometry (knowledge `client/15`
+ * §4.1): div > button.header (标题/摘要/折叠箭头) > body (border-top + margin
+ * 0 16px) > footer (border-top, 放弃/保存), tokens via --dsw-alias-*, chevron
+ * from @deepseek-ai/dsh-client-ui-primitives (the shell-seeded static UI
+ * library; icon guarded so a missing icon never fails the card). The shell is a
+ * div — the page renders a row's configuration inside its own <section>, so the
+ * old list-shaped <li> (which belonged to the removed settings slot) is wrong.
+ * Interactive states replicate the official chrome in inline-style form:
+ * disabled = opacity .4 + default cursor, discard hover deepens, focus = brand
+ * outline.
  */
 window.__ModuleLoader__.load({
 	id: 'dsh-guardrails',
@@ -41,13 +57,22 @@ window.__ModuleLoader__.load({
 		const { useState } = React;
 		const h = React.createElement;
 		// Static UI library seeded by the shell; guard the icon so a missing
-		// glyph degrades to a text chevron instead of failing the card.
+		// glyph degrades to a text chevron instead of failing the card. The
+		// v0.1.7 icon set dropped the size-suffixed names (Outline14/Outline16
+		// -> OutlineRegular/OutlineMedium, 190 exports), so the old
+		// `IconChevronDownOutline14` is undefined here and the glyph below is
+		// the live name; the size travels as a prop now.
 		const primitives = require('@deepseek-ai/dsh-client-ui-primitives');
-		const ChevronIcon = typeof primitives.IconChevronDownOutline14 === 'function'
-			? primitives.IconChevronDownOutline14
+		const ChevronIcon = typeof primitives.IconChevronDownOutlineRegular === 'function'
+			? primitives.IconChevronDownOutlineRegular
 			: null;
 
-		const NS = 'dsh-guardrails';
+		// Settings namespace = the loader entry id of this bundle's row
+		// (`id: guardrails` in cordis.patch.yml), NOT the package name: v0.1.7
+		// dropped the plugin-chosen namespace in favour of the entry id.
+		const NS = 'guardrails';
+		// `plugins.row.config` is keyed by `<package name>#<row id>`.
+		const ROW_KEY = 'dsh-guardrails#guardrails';
 		const CATEGORIES = {
 			env: ['read', 'modify'],
 			git: ['read', 'modify'],
@@ -100,7 +125,8 @@ window.__ModuleLoader__.load({
 		const equalValue = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 		// DSH 原生主题 token（--dsw-alias-*，ui-theme 定义）— 几何对齐
-		// PluginCard.module.css（knowledge/15 §4.1）。
+		// 插件页设置分区的 token 体系（knowledge/15 §4.1；旧的 PluginCard
+		// 几何随该文件删除失效）。
 		const T = {
 			bgLayer2: 'var(--dsw-alias-bg-layer-2)',
 			bgLayer3: 'var(--dsw-alias-bg-layer-3)',
@@ -114,9 +140,8 @@ window.__ModuleLoader__.load({
 			labelDimmed: 'var(--dsw-alias-label-dimmed)',
 		};
 
-		// Card chrome geometry (PluginCard.module.css parity).
+		// Card chrome geometry (the official Plugins-page settings section).
 		const cardShell = {
-			listStyle: 'none',
 			border: `1px solid ${T.borderL2}`,
 			borderRadius: 12,
 			background: T.bgLayer3,
@@ -183,18 +208,23 @@ window.__ModuleLoader__.load({
 				: h('span', { style: { flex: 'none', color: T.labelTertiary, fontSize: 12 } }, open ? '▾' : '▸');
 		}
 
-		/** Card header: name, description, the unsaved pill, and the chevron. */
+		/**
+		 * Card header: a collapse bar, the unsaved pill, and the chevron.
+		 *
+		 * The page already draws the row's own title and description above this
+		 * body, so the header carries neither — it only labels the disclosure.
+		 */
 		function CardHeader({ open, dirty, onToggle }) {
 			return h('button', {
 				type: 'button',
 				'aria-expanded': open,
-				'aria-label': `${open ? '收起' : '展开'}: 权限守护`,
+				'aria-label': `${open ? '收起' : '展开'}: 权限守护规则`,
 				onClick: onToggle,
 				style: headerStyle,
 			},
 				h('span', { style: headTextStyle },
-					h('span', { style: nameStyle }, '权限守护'),
-					h('span', { style: descriptionStyle }, 'AI 工具调用对敏感文件（.env/.git/凭据）、系统区写入与破坏性命令的拦截开关'),
+					h('span', { style: nameStyle }, '规则开关'),
+					h('span', { style: descriptionStyle }, '按类别与操作细分；全部默认开启'),
 				),
 				dirty ? h('span', { style: dirtyPillStyle }, '未保存') : null,
 				h(Chevron, { open }),
@@ -318,8 +348,16 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		/** Card component: one per namespace, staging the leaf toggles into one save. */
-		function GuardCard({ scope }) {
+		/**
+		 * Card component: one per namespace, staging the leaf toggles into one save.
+		 *
+		 * Owner contract of `plugins.row.config` (knowledge `client/15` §4.1;
+		 * slot-contract.ts): the page asks for `view: 'summary'` for the row's
+		 * one-liner and `view: 'page'` for the body under the row's own title,
+		 * and renders the body inside a <section> — hence a div shell, never the
+		 * old <li> (that belonged to the removed list-shaped settings slot).
+		 */
+		function GuardCard({ view, useGuardrailForm, mutate, unset }) {
 			const [open, setOpen] = useState(false);
 			// null draft = untouched (the authoritative value shows through);
 			// a non-null draft is the user's uncommitted edit overlay.
@@ -328,7 +366,15 @@ window.__ModuleLoader__.load({
 			const [failed, setFailed] = useState(null);
 			const [hoverDiscard, setHoverDiscard] = useState(false);
 			const [focusEl, setFocusEl] = useState(null);
-			const snapshot = React.useSyncExternalStore(scope.subscribe, scope.getSnapshot);
+			// Renderer-bound selector hook from the `hooks` compartment; the
+			// snapshot is live, unlike the page's one-time `form` prop.
+			const snapshot = useGuardrailForm((s) => s);
+
+			// The page draws the row's title, icon and crumb itself; the summary
+			// word stays the page's business, so only the body renders here.
+			if (view === 'summary') {
+				return h('span', null, 'AI 工具调用对敏感文件（.env/.git/凭据）、系统区写入与破坏性命令的拦截开关');
+			}
 
 			const shell = open ? { ...cardShell, ...cardShellOpen } : cardShell;
 			const ready = snapshot && snapshot.status === 'ready';
@@ -341,11 +387,11 @@ window.__ModuleLoader__.load({
 
 			const header = h(CardHeader, { open, dirty, onToggle: () => setOpen(!open) });
 			if (!ready) {
-				return h('li', { style: shell },
+				return h('div', { style: shell },
 					header,
 					open ? h('div', { style: bodyStyle },
 						h('p', { style: { ...style.note, padding: '12px 0 0' } }, snapshot && snapshot.status === 'unavailable'
-							? '当前会话不提供设置服务，配置来自插件行（启动时生效）。'
+							? '本 profile 未提供该配置项（插件行未激活或设置面只读），当前按插件行配置工作。'
 							: '正在加载配置…'),
 					) : null,
 				);
@@ -360,7 +406,14 @@ window.__ModuleLoader__.load({
 				setDraft({ ...(draft ?? current), unverifiable: checked });
 				setFailed(null);
 			};
-			/** Staged save: every dirty field in ONE atomic scope.mutate. */
+			/**
+			 * Staged save: every dirty field in ONE atomic form.mutate.
+			 *
+			 * `mutate` resolves to the Host's acceptance (it performs its own
+			 * recovery read after a refusal) — the same contract the official
+			 * form model relies on, so the staged drafts survive a refusal
+			 * instead of being cleared against an unaccepted value.
+			 */
 			const save = async () => {
 				if (blocked || draft === null) return;
 				setBusy(true);
@@ -372,18 +425,13 @@ window.__ModuleLoader__.load({
 					}
 				}
 				try {
-					if (ops.length > 0) await scope.mutate(ops);
-					// Host validate rejection resolves normally and rolls the
-					// snapshot back (settings-scope recovery read) — confirm the
-					// committed value actually matches the draft.
-					const fresh = scope.getSnapshot();
-					const committed = fresh && fresh.status === 'ready' ? normalized(fresh.value) : current;
-					if (!equalValue(committed, draft)) {
-						setFailed('保存被 Host 校验拒绝，已回滚为当前生效值；草稿保留，请调整后重试。');
+					const landed = ops.length === 0 || await mutate(ops);
+					if (!landed) {
+						setFailed('保存被 Host 拒绝（校验未通过或版本冲突），已回滚为当前生效值；草稿保留，请调整后重试。');
 						return;
 					}
 					setDraft(null);
-					setOpen(false); // official PluginCard: collapse after a settled save
+					setOpen(false); // official settings form: collapse after a settled save
 				} catch (error) {
 					setFailed(`写入失败（请求未达 Host）：${error && error.message ? error.message : String(error)}`);
 				} finally {
@@ -394,22 +442,23 @@ window.__ModuleLoader__.load({
 				setDraft(null);
 				setFailed(null);
 			};
-			/** Immediate row reset: clears the user override, then re-syncs the draft. */
+			/**
+			 * Immediate row reset: clears the user override so the field falls
+			 * back to the composition layer (the plugin row's own config).
+			 *
+			 * A reset is an authoritative action rather than a staged edit, so a
+			 * successful clear also drops the local draft: the row-reset target
+			 * value lives in the composition layer, which no local snapshot knows
+			 * before the write settles — re-seeding from a stale read would show a
+			 * value the Host no longer holds.
+			 */
 			const resetField = async (field) => {
 				if (!writable || busy) return;
 				setBusy(true);
 				setFailed(null);
 				try {
-					await scope.unset(field);
-					const fresh = scope.getSnapshot();
-					const committed = fresh && fresh.status === 'ready' ? normalized(fresh.value) : null;
-					if (committed) {
-						setDraft((d) => {
-							if (d === null) return d;
-							const next = { ...d, [field]: committed[field] };
-							return equalValue(next, committed) ? null : next;
-						});
-					}
+					if (await unset(field)) setDraft(null);
+					else setFailed('重置被 Host 拒绝，已回滚为当前生效值。');
 				} catch (error) {
 					setFailed(`重置失败（请求未达 Host）：${error && error.message ? error.message : String(error)}`);
 				} finally {
@@ -422,8 +471,9 @@ window.__ModuleLoader__.load({
 				setBusy(true);
 				setFailed(null);
 				try {
-					await scope.mutate(FIELDS.map((field) => ({ op: 'unset', path: [field] })));
-					setDraft(null);
+					const landed = await mutate(FIELDS.map((field) => ({ op: 'unset', path: [field] })));
+					if (landed) setDraft(null);
+					else setFailed('重置被 Host 拒绝，已回滚为当前生效值。');
 				} catch (error) {
 					setFailed(`重置失败（请求未达 Host）：${error && error.message ? error.message : String(error)}`);
 				} finally {
@@ -446,7 +496,7 @@ window.__ModuleLoader__.load({
 				}),
 			);
 
-			return h('li', { style: shell },
+			return h('div', { style: shell },
 				header,
 				open ? h('div', { style: bodyStyle },
 					rows,
@@ -459,7 +509,7 @@ window.__ModuleLoader__.load({
 						onReset: resetField,
 					}),
 					h('p', { style: style.note },
-						'修改在本地暂存，点「保存」统一写入用户设置文档（settings.yaml）并立即生效于后续判定；「重置」清除对应项的用户覆盖、回落插件行默认。',
+						'修改在本地暂存，点「保存」统一写入本 profile 的行配置（cordis.patch.yml）并立即生效于后续判定；「重置」清除对应项的用户覆盖、回落插件行默认。',
 					),
 					h(Footer, {
 						failed,
@@ -478,34 +528,42 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		/** Cordis client plugin: names must match the Host half's namespace. */
+		/** Cordis client plugin: the entry id the Host half registers. */
 		const name = 'dsh-guardrails';
-		const inject = ['slots', 'settingsScope'];
+		// `configForms` supplies the per-namespace form; `slots` registers the
+		// page. `settingsScope` is gone from the client context entirely.
+		const inject = ['slots', 'configForms'];
 
 		function apply(ctx) {
-			const scope = ctx.settingsScope.bind({ namespace: NS });
-			// The inject face is registered WITHOUT the reserved `hooks` key: the
-			// renderer consumes that compartment (each member becomes a use<Name>
-			// selector hook and `hooks` never reaches the component's props).
-			// A plain member passes through verbatim (the skill-manager card uses
-			// the same shape), and its object identity is kept so the uSES
-			// subscribe side stays referentially stable across renders.
-			const face = {
-				scope: {
-					getSnapshot: () => scope.getSnapshot(),
-					subscribe: (listener) => scope.subscribe(listener),
-					set: (field, value) => scope.set(field, value),
-					unset: (field) => scope.unset(field),
-					mutate: (ops) => scope.mutate(ops),
-				},
+			const form = ctx.configForms.get(NS);
+			// Reactivity contract (knowledge `client/15` §4.1): the `hooks`
+			// compartment is RESERVED — the renderer consumes each member as a
+			// `use<Name>` selector hook and never passes `hooks` into props.
+			// The page's `form` prop is a one-time {state, mutate} snapshot, so
+			// live re-rendering must come from this observable, not from reading
+			// the prop. Everything else passes through verbatim.
+			//
+			// `form` itself is a stable HostObservable ({getSnapshot, subscribe});
+			// wrap it so the hook name and the pass-through face stay separate.
+			const state = {
+				getSnapshot: () => form.getSnapshot(),
+				subscribe: (listener) => form.subscribe(listener),
 			};
-			ctx.slots.inject('settings.plugin.item', function* () {
-				yield ctx.slots.register({
-					name: 'settings.plugin.item',
-					key: NS,
-					inject: () => face,
-				}, GuardCard);
-			});
+			const face = {
+				hooks: { guardrailForm: state },
+				// Write path: the page's own snapshot holds `mutate`; expose the
+				// form's own methods too so a save never depends on prop freshness.
+				mutate: (ops, revision) => form.mutate(ops, revision),
+				unset: (field) => form.unset(field),
+			};
+			// Register into the Plugins page only while the Host serves this
+			// namespace, so a profile without the row shows no trace of the page.
+			// The row's own page gains a 「配置」 control from this key.
+			ctx.effect(() => ctx.configForms.whileServed([NS], () => ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
+				name: 'plugins.row.config',
+				key: ROW_KEY,
+				inject: () => face,
+			}, GuardCard))));
 		}
 
 		exports.name = name;
