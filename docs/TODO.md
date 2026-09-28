@@ -27,7 +27,7 @@
 
 agent 侧已复跑的等效项（2026-09-28）：单测 **138/138**（+8 例，含 DSR-010 的 2 例端到端）、行覆盖 **98.22%**、分层门禁通过、tarball 干净安装 + 导入冒烟通过、两个 profile 的 `--dump-config` 组合断言各恰一行（**须显式给 `DSH_TEST_HOME`/`DSH_WEB_HOME`**，否则会落到遗留全局 HOME 而误报"test 行数=0"）。
 
-⚠️ **`verify/run-verify.mjs` 第 4 步会自行 spawn 一个真实实例**（`spawn(LAUNCHER, ['--profile','test','--','--port','0'])`）⇒ **agent 不得运行该脚本的完整流程**（AGENTS.md：实例启停一律走启动器 GUI 或 `dshl`；且两实例共用同一 HOME 属 Security 红线）。agent 只跑第 1/2/3/5 步。
+⚠️ **`verify/run-verify.mjs` 第 4 步会自行 spawn 一个真实实例**（`spawn(LAUNCHER, ['--profile','test','--','--port','0'])`）⇒ **agent 不得运行该脚本的完整流程**（AGENTS.md：实例启停一律走启动器 GUI 或 `dshl`；且两实例共用同一 HOME 属 Security 红线）。**已加绕过开关 `DSH_VERIFY_SKIP_BOOT_SMOKE=1`**：跳过第 4 步、其余照跑；跳过以 `⊘` 标记并单独计数，结尾明写"跳过了 1 步、发布门禁须由用户在启动器侧补做"，不会冒充全绿。agent 侧标准命令（本次实跑，4s）：设 `DSH_BIN`/`DSH_WEB_BIN`/`DSH_TEST_HOME`/`DSH_WEB_HOME` + 该变量。脚本现已启动即回显这四处解析结果——缺变量时它们会回落到遗留 `~/.dsh`，让第 3 步报出"test 行数=0"的**假失败**（2026-09-28 实测撞到）。
 
 ### 适配期 agent 侧可自动化验证（门禁执行前，2026-09-27）
 

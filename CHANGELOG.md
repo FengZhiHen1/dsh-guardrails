@@ -37,7 +37,9 @@
 - 测试 120 → 138：`command.test.mjs` +6（`maskTextSpans` 的散文分段 / 含分隔符分段不豁免 / 参数值豁免 / 路径能力参数不豁免 / 偏移不变 / 抹除与否决定引用判定），`guard.integration.test.mjs` +2（DSR-010 引用放行 6 例、真实敏感路径仍拦 10 例，含 `git commit -m "see .git" -- .env` 证明引用不会给旁边的真引用洗白）。
 - 行覆盖 98.22%（门禁 ≥80%）；分层门禁通过（core 6 文件）；`node --check` 全绿；tarball 干净安装 + 导入冒烟通过。
 - **test 实测门禁（2026-09-27，测试实例 `0.1.7-rc.2`）已通过并在 DSR-010 之前完成**：`--dump-config` 184 行无重复 id、启动无 `N entries did not activate`／无 `startup failed`／无 `disabling profile plugin`、功能冒烟实测拦截（`tool/result` `isError: true` + 实例日志 `[guardrails] denied pwsh`）、UI 卡片由用户浏览器确认可见可配。⚠️ **该门禁覆盖的是 DSR-010 之前的代码**；本次改的是 pwsh 命令文本判定，**发布/挂载 web 前须重跑门禁**（需重启测试实例）。
-- ⚠️ `verify/run-verify.mjs` 的**第 4 步（test profile 启动冒烟）会自行 spawn 一个真实实例** ⇒ **agent 不得运行该脚本的完整流程**（AGENTS.md 红线：实例启停一律走启动器 GUI 或 `dshl`）。agent 侧只可跑第 1/2/3/5 步；第 3 步的 `--dump-config` 组合断言须显式给 `DSH_TEST_HOME`/`DSH_WEB_HOME`，否则会落到遗留的全局 HOME 而误报"test 行数=0"。
+- ⚠️ `verify/run-verify.mjs` 的**第 4 步（test profile 启动冒烟）会自行 spawn 一个真实实例** ⇒ **agent 不得运行该脚本的完整流程**（AGENTS.md 红线：实例启停一律走启动器 GUI 或 `dshl`；若 `DSH_TEST_HOME` 所指 HOME 已有实例在跑，两者共用同一 HOME 属 Security 红线）。为此新增 `DSH_VERIFY_SKIP_BOOT_SMOKE=1|true|yes` **绕过开关**：跳过第 4 步、其余照跑，跳过以 `⊘` 单独标记且**不计失败**，结尾另行计数（退出码 0，但明写"跳过了 1 步、发布门禁须由用户在启动器侧补做"）——被跳过的运行不会冒充全绿。第 4 步的代码块本身逐字未改（diff 中为上下文而非增删），仅在其外加了 `if/else` 包装。
+- ⚠️ 脚本现在**启动时回显解析后的 launcher / test home / web home / web bin 与第 4 步执行与否**：这四处均 `??` 回落到 `~/.dsh`（遗留全局 HOME），缺变量时第 3 步会对一个与实例无关的 HOME 报出"test 行数=0"这种**假失败**（2026-09-28 实测撞到），回显把"打错靶"变成看得见的事实。
+- agent 侧标准命令（本次实跑：4 步全绿 + 第 4 步显式跳过，4s）：设 `DSH_BIN`/`DSH_WEB_BIN`/`DSH_TEST_HOME`/`DSH_WEB_HOME` 后置 `DSH_VERIFY_SKIP_BOOT_SMOKE=1` 运行。
 
 ## 1.5.0（已发布）
 

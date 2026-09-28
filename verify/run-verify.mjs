@@ -21,7 +21,17 @@
 //                    global install (cross-generation risk — warns).
 //   DSH_TEST_HOME  — HOME of the test instance (boot smoke + test profile).
 //   DSH_WEB_HOME   — HOME hosting the stable web profile (dependency spec
-//                    assertion). Both default to DSH_HOME ?? ~/.dsh.
+//                    assertion). Both default to DSH_HOME ?? ~/.dsh — and that
+//                    default silently points at the legacy global HOME, which
+//                    makes step 3 report a bogus "test 行数=0" against a HOME
+//                    that has nothing to do with the instance. The resolved
+//                    homes are echoed at startup: read them.
+//   DSH_VERIFY_SKIP_BOOT_SMOKE — 1/true/yes skips step 4. Step 4 spawns a REAL
+//                    DSH instance, which an agent must never do (AGENTS.md:
+//                    instance start/stop goes through the launcher GUI or dshl;
+//                    two instances sharing one HOME is a Security redline).
+//                    Agents run steps 1/2/3/5 and set this flag; a skipped step
+//                    is counted separately and never reported as a full pass.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -51,13 +61,23 @@ const WEB_HOME = process.env.DSH_WEB_HOME ?? DSH_HOME
 // web profile 属 stable-dev 实例（可能与 DSH_BIN 不同代际）：dump 校验用它
 // 自己的实例二进制（dshl env --json → instances[].version_bin 现查）。
 const WEB_BIN = process.env.DSH_WEB_BIN ?? LAUNCHER
+// Agent 侧绕过开关：第 4 步会 spawn 真实实例，agent 不得执行（AGENTS.md 红线）。
+// 置 1 跳过该步，其余步骤照跑。
+const SKIP_BOOT_SMOKE = /^(?:1|true|yes)$/i.test(process.env.DSH_VERIFY_SKIP_BOOT_SMOKE ?? '')
 // npm invoked as `node <npm-cli.js>`: `npm.cmd` cannot be spawned directly.
 const NPM_CLI = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
 
 let failures = 0
+let skipped = 0
 function step(name, ok, detail = '') {
   console.log(`${ok ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`)
   if (!ok) failures += 1
+}
+/** Report a step as deliberately not run. Never counts as a failure, but is
+ * counted so a skipped run cannot pass itself off as a full gate. */
+function skip(name, detail = '') {
+  console.log(`⊘ ${name}${detail ? ` — ${detail}` : ''}`)
+  skipped += 1
 }
 function run(args, cwd, env = process.env) {
   return spawnSync(process.execPath, args, { cwd, encoding: 'utf8', env })
@@ -65,6 +85,15 @@ function run(args, cwd, env = process.env) {
 function runNpm(args, cwd) {
   return spawnSync(process.execPath, [NPM_CLI, ...args], { cwd, encoding: 'utf8' })
 }
+
+// Echo the resolved target so a fallback mis-target is visible up front instead
+// of surfacing as a bogus assertion failure three steps later.
+console.log('--- 解析后的目标 ---')
+console.log(`  launcher    ${LAUNCHER}`)
+console.log(`  test home   ${TEST_HOME}`)
+console.log(`  web  home   ${WEB_HOME}`)
+console.log(`  web  bin    ${WEB_BIN}`)
+console.log(`  第 4 步启动冒烟  ${SKIP_BOOT_SMOKE ? '已跳过（DSH_VERIFY_SKIP_BOOT_SMOKE）' : '将执行（会 spawn 真实实例）'}`)
 
 // 1. unit + integration
 const tests = run(['--test', TESTS], ROOT)
@@ -189,7 +218,12 @@ async function bootSmoke() {
     detail: `test profile 启动提前退出（code=${exited.code} signal=${exited.signal}）：${err.slice(0, 300)}`,
   }
 }
-{
+if (SKIP_BOOT_SMOKE) {
+  skip(
+    '发布门禁：test profile 启动冒烟（无崩溃）',
+    `已按 DSH_VERIFY_SKIP_BOOT_SMOKE 跳过——本步会 spawn 一个真实实例，agent 不得执行；须由用户在启动器侧补做（HOME=${TEST_HOME}）`,
+  )
+} else {
   const smoke = await bootSmoke()
   step('发布门禁：test profile 启动冒烟（无崩溃）', smoke.ok, smoke.detail)
 }
@@ -246,9 +280,13 @@ if (!existsSync(NPM_CLI)) {
   }
 }
 
+// A skipped run must never read as a full pass: the gate it omits is the release
+// gate itself, so the summary names it instead of just printing "全部通过".
 console.log(
-  failures === 0
-    ? '\n全部通过。冒烟（手动）：重启 test profile 后验证真实拦截行为。'
-    : `\n${failures} 项失败`,
+  failures > 0
+    ? `\n${failures} 项失败${skipped > 0 ? `（另有 ${skipped} 步被跳过）` : ''}`
+    : skipped > 0
+      ? `\n已通过的步骤全绿，但跳过了 ${skipped} 步——第 4 步 test profile 启动冒烟未执行，发布门禁须由用户在启动器侧补做。冒烟（手动）：重启 test profile 后验证真实拦截行为。`
+      : '\n全部通过。冒烟（手动）：重启 test profile 后验证真实拦截行为。',
 )
 process.exit(failures === 0 ? 0 : 1)
