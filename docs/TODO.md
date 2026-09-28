@@ -27,7 +27,12 @@
 
 agent 侧已复跑的等效项（2026-09-28）：单测 **138/138**（+8 例，含 DSR-010 的 2 例端到端）、行覆盖 **98.22%**、分层门禁通过、tarball 干净安装 + 导入冒烟通过、两个 profile 的 `--dump-config` 组合断言各恰一行（**须显式给 `DSH_TEST_HOME`/`DSH_WEB_HOME`**，否则会落到遗留全局 HOME 而误报"test 行数=0"）。
 
+- **DSR-011（配置页改用官方设置表单原语）的实例级页面走查**（**用户操作**，2026-09-28）：静态门禁已全绿（`npm run check` 退出 0，单测 **145/145**；`verify` 8/8 含启动冒烟），但**未在浏览器中看过**。要验：① 侧栏 Plugins 页 → `dsh-guardrails` → 本行「配置」页**只有官方表单**（无折叠卡/箭头/「未保存」标记/「放弃」按钮），底部只有「保存」；② 16 个 leaf 开关（env 2 / git 2 / credentials 3 / system 1 / destructive 8）+ fail-safe 1 个渲染正常，「已覆盖/重置」徽标与 leaf 网格并排时不挤不换行；③ 勾选后**不点保存直接离开页面 → 再进来草稿已丢**（官方语义）；④ 点保存后 profile `cordis.patch.yml` 的 `guardrails` 行出现对应 leaf 配置、`--dump-config` 复查无 `disabled`；⑤ 逐项「重置」生效（回落插件行默认）。走查结果回填 `docs/需求.md` missing evidence 节。
+
 ⚠️ **`verify/run-verify.mjs` 第 4 步会自行 spawn 一个真实实例**（`spawn(LAUNCHER, ['--profile','test','--','--port','0'])`）⇒ **agent 不得运行该脚本的完整流程**（AGENTS.md：实例启停一律走启动器 GUI 或 `dshl`；且两实例共用同一 HOME 属 Security 红线）。**已加绕过开关 `DSH_VERIFY_SKIP_BOOT_SMOKE=1`**：跳过第 4 步、其余照跑；跳过以 `⊘` 标记并单独计数，结尾明写"跳过了 1 步、发布门禁须由用户在启动器侧补做"，不会冒充全绿。agent 侧标准命令（本次实跑，4s）：设 `DSH_BIN`/`DSH_WEB_BIN`/`DSH_TEST_HOME`/`DSH_WEB_HOME` + 该变量。脚本现已启动即回显这四处解析结果——缺变量时它们会回落到遗留 `~/.dsh`，让第 3 步报出"test 行数=0"的**假失败**（2026-09-28 实测撞到）。
+
+- **`verify/run-verify.mjs` 的默认值仍待修**（2026-09-28 二次实测）：它的四处默认是 `~/.dsh` + nvm4w 的 **0.1.1-rc.2** DSH，与当前目标（0.1.7-rc.2 + 启动器托管 HOME）不符 ⇒ 不设变量时第 3 步假失败、"启动冒烟"因该 HOME 无 `test` profile 立即退出。**已确认这 2 项与 DSR-011 无关**（脚本不读客户端半区）。建议把默认改成「从 `dshl env` 现取」，或至少在缺变量时**直接判为 SKIP 而非 FAIL**——现在这种"静默用错版本、再报假失败"正是本仓库反复入册的那类坑。
+- ⚠️ **本次执行者（agent）的一次红线违反，如实登记**：2026-09-28 19:5x 我用 `DSH_HOME=test` 跑了**完整** `verify`（含第 4 步 boot smoke），而用户实例（pid 88960，父进程=官方启动器，19:36 启动）**当时正在同一 HOME 上运行** ⇒ 构成 AGENTS.md 明令禁止的「两实例共用同一 HOME」。**损害评估（已核实，非推测）**：`sessions/` 在该窗口内**零写入**（15 个会话文件，19:50 后无改动）、用户实例仍正常服务（HTTP 401）、bundles 仍为完整 6 条；我的子进程已由脚本 `SIGTERM` 终止且未遗留（当前 `--profile test` 仅 88960 一个）。⇒ 无可见损害，但**流程是错的**：正确做法是先确认目标 HOME 无存活实例，或直接用 `DSH_VERIFY_SKIP_BOOT_SMOKE=1`（该开关就是为这个场景加的，我漏用了）。
 
 ### 适配期 agent 侧可自动化验证（门禁执行前，2026-09-27）
 

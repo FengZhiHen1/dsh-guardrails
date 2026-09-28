@@ -32,8 +32,8 @@ const CARD = join(HERE, '..', 'src', 'client', 'card.js')
 const SOURCE = readFileSync(CARD, 'utf8')
 
 /**
- * A minimal hook runtime: `useState` with per-render slots, enough for the
- * card's local draft/busy/failed/… state. Renders are synchronous test calls.
+ * A minimal hook runtime: `useState`/`useEffect` with per-render slots, enough
+ * for the card's local state. Renders are synchronous test calls.
  */
 function makeReact() {
   let cells = []
@@ -53,6 +53,9 @@ function makeReact() {
       }
       return [cells[index], set]
     },
+    /** The official SettingsForm discards on unmount through this hook. */
+    useEffect() {},
+    useRef(initial) { return { current: initial } },
     /** Reset between renders (a fresh mount). */
     __reset() { cells = []; cursor = 0; tree.length = 0 },
     __tree: tree,
@@ -60,8 +63,107 @@ function makeReact() {
   return react
 }
 
+/**
+ * A fake `SettingsFormModel` recording the specs it was constructed with, so a
+ * test can assert the page's declared fields against the Host Config schema.
+ * `shell()`/`field()` answer from the same snapshot shape the real model reads.
+ */
+function makeFormModelClass(record) {
+  return class FakeSettingsFormModel {
+    constructor(scope, specs) {
+      record.scope = scope
+      record.specs = specs
+      record.model = this
+    }
+    shell() {
+      const snapshot = record.scope.getSnapshot()
+      return {
+        available: snapshot.status === 'ready',
+        writable: snapshot.writable,
+        dirty: record.dirty ?? false,
+        invalid: false,
+        saving: false,
+        failed: false,
+      }
+    }
+    field(field) {
+      const snapshot = record.scope.getSnapshot()
+      const spec = record.specs.find((s) => s.field === field)
+      const value = snapshot.value === undefined ? undefined : snapshot.value[field]
+      return { text: spec.format(value), overridden: false, invalid: false }
+    }
+    bind(project) {
+      record.project = project
+      return { getSnapshot: () => project(), subscribe: () => () => {} }
+    }
+    actions() {
+      return {
+        edit: (field, text) => { record.edits.push([field, text]) },
+        resetField: (field) => { record.resets.push(field) },
+        save: () => { record.saves += 1 },
+        discard: () => { record.discards += 1 },
+      }
+    }
+    dispose() { record.disposed = true }
+  }
+}
+
+/** Static UI primitives the shell seeds; Checkbox/Tag render their props through. */
+function makePrimitives(record) {
+  // The form frame is a plain ELEMENT in this harness (the real one renders a
+  // div around children). It must NOT be a function component echoing its own
+  // `children` prop: the card passes children positionally, so echoing props
+  // would re-enter the same node forever.
+  const SettingsForm = 'SettingsForm'
+  return {
+    SettingsFormModel: makeFormModelClass(record),
+    SettingsForm,
+    Checkbox: (props) => ({ type: 'Checkbox', props }),
+    Tag: (props) => ({ type: 'Tag', props }),
+  }
+}
+
+/**
+ * A miniature React: resolve function components so the tree a test walks is the
+ * tree that would render. Without this, a node whose `type` is a component
+ * function (e.g. `CategoryRow`) stays opaque and its Checkbox children are
+ * invisible to `collect` — which is exactly how the first version of this
+ * assertion silently counted zero toggles.
+ */
+function expand(node) {
+  if (node === null || node === undefined || typeof node === 'boolean') return null
+  if (Array.isArray(node)) return node.map(expand).filter((n) => n !== null)
+  if (typeof node !== 'object') return node
+  if (typeof node.type === 'function') {
+    return expand({ ...node.type({ ...node.props, children: node.children }), __from: node.type })
+  }
+  return { ...node, children: expand(node.children) }
+}
+
+/** Every rendered element in an expanded tree (depth-first). */
+function collect(node, out = []) {
+  if (node === null || node === undefined) return out
+  if (Array.isArray(node)) { for (const child of node) collect(child, out); return out }
+  if (typeof node !== 'object') return out
+  out.push(node)
+  if (Array.isArray(node.children)) for (const child of node.children) collect(child, out)
+  return out
+}
+
+/** Every plain-string text under a node. */
+function texts(node) {
+  const out = []
+  const walk = (n) => {
+    if (typeof n === 'string' || typeof n === 'number') { out.push(String(n)); return }
+    if (Array.isArray(n)) { for (const c of n) walk(c); return }
+    if (n && typeof n === 'object' && Array.isArray(n.children)) for (const c of n.children) walk(c)
+  }
+  walk(node)
+  return out
+}
+
 /** Load the bundle exactly as the client module system does, capturing its factory. */
-function loadBundle({ react }) {
+function loadBundle({ react, record }) {
   let registration
   const globalWindow = {
     __ModuleLoader__: { load: (entry) => { registration = entry } },
@@ -70,7 +172,7 @@ function loadBundle({ react }) {
   const run = new Function('window', `${SOURCE}\n;return window.__ModuleLoader__;`)
   run(globalWindow)
   assert.ok(registration, 'bundle did not call __ModuleLoader__.load')
-  const primitives = { IconChevronDownOutlineRegular: () => ({ type: 'svg' }) }
+  const primitives = makePrimitives(record)
   const exportsObject = registration.factory((name) => {
     if (name === 'react') return react
     if (name === '@deepseek-ai/dsh-client-ui-primitives') return primitives
@@ -97,7 +199,10 @@ const snapshot = (over = {}) => ({
  */
 function mount({ form = {} } = {}) {
   const react = makeReact()
-  const { registration, exportsObject } = loadBundle({ react })
+  // Records the controller's construction, actions, and disposal so tests can
+  // assert the official form model is actually driving the page.
+  const record = { edits: [], resets: [], saves: 0, discards: 0, disposed: false }
+  const { registration, exportsObject } = loadBundle({ react, record })
   const registered = []
   const injections = []
   const effects = []
@@ -140,12 +245,15 @@ function mount({ form = {} } = {}) {
     injections,
     configForm,
     react,
+    record,
     /** Render the component by hand with the props the page binds. */
     render(props) {
       react.__reset()
       return registered[0].component(props)
     },
     face: registered[0]?.options.inject?.(),
+    /** Run every fiber-scoped disposer (what unload does). */
+    dispose() { for (const off of effects) off() },
   }
 }
 
@@ -215,35 +323,84 @@ test('the form is read through the injected sources, not a one-time prop', () =>
   // snapshot must come from the hook source instead.
   assert.notEqual(face.hooks?.guardrailForm, undefined)
   const seen = face.hooks.guardrailForm.getSnapshot()
-  assert.equal(seen.status, 'ready')
-  assert.equal(seen.revision, 3)
+  // The official shell's shape: availability + writability + a per-field state.
+  assert.equal(seen.available, true)
+  assert.equal(seen.writable, true)
+  assert.equal(seen.env.text, 'true')
+  assert.equal(seen.unverifiable.text, 'true')
 })
 
-test('view: summary renders the one-liner; view: page renders the form', () => {
+test('the page is driven by the official SettingsFormModel over the row namespace', () => {
+  const m = mount()
+  // The controller constructs the official model with the row's ConfigForm and
+  // this page's field specs — that is what owns the draft, the revision fence,
+  // the read-back and discard-on-unmount now.
+  assert.equal(m.record.scope, m.configForm, 'the model must be bound to the row ConfigForm')
+  const fields = m.record.specs.map((spec) => spec.field)
+  assert.deepEqual(fields, ['env', 'git', 'credentials', 'system', 'destructive', 'unverifiable'])
+  for (const spec of m.record.specs) {
+    assert.equal(typeof spec.format, 'function', `${spec.field} needs format`)
+    assert.equal(typeof spec.parse, 'function', `${spec.field} needs parse`)
+  }
+  // Every action the component consumes comes from the model.
+  const face = m.face
+  for (const action of ['edit', 'resetField', 'save', 'discard']) {
+    assert.equal(typeof face[action], 'function', `the inject face must carry ${action}`)
+  }
+  // The model subscription is released with the fiber.
+  assert.equal(m.record.disposed, false)
+  m.dispose()
+  assert.equal(m.record.disposed, true, 'unload must dispose the form model')
+})
+
+test('view: summary renders the one-liner; view: page renders the official SettingsForm', () => {
   const m = mount()
   const props = {
-    useGuardrailForm: (selector) => selector(snapshot()),
-    mutate: async () => true,
-    unset: async () => true,
+    useGuardrailForm: (selector) => selector(m.face.hooks.guardrailForm.getSnapshot()),
+    ...m.face,
   }
   const summary = m.render({ ...props, view: 'summary' })
   // The page draws the row's title and crumb itself; the summary is text.
   assert.equal(summary.type, 'span')
   assert.equal(typeof summary.children[0], 'string')
 
-  const page = m.render({ ...props, view: 'page' })
-  // Body shell: a div (the slot renders inside a <section>), never the old
-  // list-shaped <li> that belonged to the removed settings slot.
-  assert.equal(page.type, 'div')
-  assert.notEqual(page.type, 'li')
+  const page = expand(m.render({ ...props, view: 'page' }))
+  // The body is the OFFICIAL form primitive — not a self-drawn card shell. The
+  // official pages render a bare <SettingsForm>; the previous hand-written
+  // collapsible card (header + chevron + 「未保存」 pill + 「放弃」 button)
+  // diverged from them and is gone.
+  assert.equal(page.type, 'SettingsForm', 'the body must be the official SettingsForm')
+  assert.equal(page.props.labels.save, '保存')
+  assert.equal(typeof page.props.onSave, 'function')
+  assert.equal(typeof page.props.onDiscard, 'function')
+  assert.equal(page.props.state.writable, true)
+  // No discard control and no unsaved pill: the official form offers neither
+  // (SettingsForm.tsx: "discards on unmount and offers no discard control").
+  // Asserted on CONTROL labels only — the page's explanatory note legitimately
+  // uses those words, so scanning all text would test the wording, not the chrome.
+  const nodes = collect(page)
+  const controlLabels = nodes
+    .filter((n) => n.type === 'button' || n.type === 'Tag')
+    .map((n) => (Array.isArray(n.children) ? n.children.filter((c) => typeof c === 'string').join('') : ''))
+  assert.equal(controlLabels.some((label) => /放弃/.test(label)), false,
+    'the official form offers no discard control')
+  assert.equal(controlLabels.some((label) => /未保存/.test(label)), false,
+    'the official form shows no unsaved pill')
+  // Leaf toggles are the official Checkbox: one per leaf (2+2+3+1+8) + fail-safe.
+  const boxes = nodes.filter((n) => n.type === 'Checkbox')
+  assert.equal(boxes.length, 2 + 2 + 3 + 1 + 8 + 1, 'one Checkbox per leaf plus the fail-safe toggle')
+  // The page renders the category titles itself (the shell draws no row chrome).
+  const rendered = texts(page)
+  for (const title of ['env 文件访问', '.git 内部访问', '凭据文件访问', '系统区写入', '破坏性命令', '动态目标 fail-safe']) {
+    assert.ok(rendered.some((t) => t.includes(title)), `missing category title: ${title}`)
+  }
 })
 
 test('page renders the not-ready notice without throwing when the namespace is absent', () => {
   const m = mount()
   const props = {
-    useGuardrailForm: (selector) => selector(snapshot({ status: 'unavailable', value: undefined, writable: false })),
-    mutate: async () => true,
-    unset: async () => true,
+    useGuardrailForm: (selector) => selector(m.face.hooks.guardrailForm.getSnapshot()),
+    ...m.face,
   }
   // `snapshot.value === undefined` must not crash normalization: a page that
   // throws here is removed from the slot silently.
@@ -263,4 +420,32 @@ test('shipped bundle carries none of the removed v0.1.2-era API names as code', 
   assert.ok(code.includes("'plugins.row.config'"), 'plugins.row.config must be registered')
   assert.ok(code.includes('useGuardrailForm'), 'the hooks compartment must be consumed')
   assert.ok(code.includes("'guardrails'"), 'the entry-id namespace must be bound')
+})
+
+test('the hand-written card shell is gone from code; the official form owns the write path', () => {
+  // DSR-011 (2026-09-28): the card no longer draws its own collapsible shell, and
+  // no longer hand-writes the draft/busy/failed state machine or calls
+  // form.mutate/unset itself — the official SettingsFormModel owns the draft, the
+  // revision fence, the read-back and discard-on-unmount. Comments may describe
+  // the removed shell (that is the migration record), so this asserts on CODE.
+  const code = SOURCE
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+  for (const [name, re] of [
+    ['the collapse chevron', /Chevron/],
+    ['the card shell style', /cardShell/],
+    ['the disclosure header style', /headerStyle/],
+    ['the unsaved pill', /dirtyPill/],
+    ['the discard hover state', /hoverDiscard/],
+    ['the local draft state', /setDraft/],
+  ]) {
+    assert.equal(re.test(code), false, `${name} must be gone from the shipped code`)
+  }
+  // And the self-written write path must not come back.
+  assert.equal(/\.mutate\(/.test(code), false, 'the card must not call form.mutate directly')
+  assert.equal(/\.unset\(/.test(code), false, 'the card must not call form.unset directly')
+  // The official primitives must be the ones in use.
+  assert.ok(/\bSettingsForm\b/.test(code), 'the official SettingsForm must frame the page')
+  assert.ok(/\bSettingsFormModel\b/.test(code), 'the official SettingsFormModel must own the form')
+  assert.ok(/\bCheckbox\b/.test(code), 'leaf toggles must use the official Checkbox')
 })

@@ -4,6 +4,9 @@
  * modules): script execution only registers the factory via
  * `window.__ModuleLoader__.load`; the module body (this card's React
  * component) materializes when the loader imports this package's `/client`.
+ * There is no build step for this plugin (no bundler, no `dist/`): this file
+ * is the shipped artifact, so it may only `require` bare specifiers the shell
+ * seeds, and everything lives in this one file.
  *
  * v0.1.7 wiring (knowledge `client/15` §4.1, `host/07` §1-§3):
  *   - `settings.plugin.item` and `ctx.settingsScope` NO LONGER EXIST (source
@@ -21,31 +24,26 @@
  *     (`configForms.whileServed`), so a deployment without the row shows no
  *     trace of this page.
  *
- * The card renders its own chrome and form: cross-plugin value imports are
- * rejected by the bundle-purity gate, and the compact leaf-toggle grid this
- * plugin needs has no official boolean field primitive (the shared settings
- * fields are text/secret inputs). It reads the config form's snapshot
- * (resolved value / base / user layers, revision, writability) and writes
- * through the form, whose revision fencing is owned by the DSH settings
- * surface.
+ * Form model (DSR-011, 2026-09-28): the staged draft, the revision fence, the
+ * read-back after a save, and discard-on-unmount are all owned by the official
+ * `SettingsFormModel` / `SettingsForm`; this file no longer hand-writes any of
+ * it. That earlier hand-written shell (a collapsible card with its own header,
+ * chevron, 「未保存」 pill and 「放弃」 button) diverged from the official
+ * pages, which render a bare `<SettingsForm>` — the Plugins page already draws
+ * the row's title, icon and crumb above this body.
  *
- * Form semantics follow the official staged-draft model: edits land in a local
- * draft; one 保存 commits every dirty field in a single form.mutate() (atomic,
- * one revision fence); 放弃 discards the draft; a dirty header pill marks
- * unsaved state; a successful save collapses the card, a rejected write keeps
- * the draft plus the footer diagnostic. Per-row 重置 stays immediate (clears
- * the user override, not an edit).
+ * What stays self-drawn, and why: the leaf-toggle grid. Official field
+ * primitives are text (`SettingsValueField`) and write-only secret
+ * (`SettingsSecretField`) only — `settingsNumberField`/`settingsTextField` are
+ * the whole spec-helper set, with no boolean control. So the toggles are drawn
+ * with the official `Checkbox`, and each category rides the official model as
+ * ONE field whose draft text is the canonical serialization of its leaf object
+ * (see `categorySpec`). Round-tripping through text is what lets a structured
+ * value use the official plan/parse/fence machinery unchanged.
  *
- * Card chrome follows the official settings-page geometry (knowledge `client/15`
- * §4.1): div > button.header (标题/摘要/折叠箭头) > body (border-top + margin
- * 0 16px) > footer (border-top, 放弃/保存), tokens via --dsw-alias-*, chevron
- * from @deepseek-ai/dsh-client-ui-primitives (the shell-seeded static UI
- * library; icon guarded so a missing icon never fails the card). The shell is a
- * div — the page renders a row's configuration inside its own <section>, so the
- * old list-shaped <li> (which belonged to the removed settings slot) is wrong.
- * Interactive states replicate the official chrome in inline-style form:
- * disabled = opacity .4 + default cursor, discard hover deepens, focus = brand
- * outline.
+ * Card chrome follows the official geometry: tokens via --dsw-alias-*,
+ * radii via --dsw-radius-*. Only whole-round pills stay literal (999), which is
+ * what the official Tag/Switch styles do too.
  */
 window.__ModuleLoader__.load({
 	id: 'dsh-guardrails',
@@ -54,18 +52,11 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
 		const React = require('react');
-		const { useState } = React;
 		const h = React.createElement;
-		// Static UI library seeded by the shell; guard the icon so a missing
-		// glyph degrades to a text chevron instead of failing the card. The
-		// v0.1.7 icon set dropped the size-suffixed names (Outline14/Outline16
-		// -> OutlineRegular/OutlineMedium, 190 exports), so the old
-		// `IconChevronDownOutline14` is undefined here and the glyph below is
-		// the live name; the size travels as a prop now.
+		// Static UI library seeded by the shell. The official staged form, the
+		// spec helper set, and the two controls this page draws on top of them.
 		const primitives = require('@deepseek-ai/dsh-client-ui-primitives');
-		const ChevronIcon = typeof primitives.IconChevronDownOutlineRegular === 'function'
-			? primitives.IconChevronDownOutlineRegular
-			: null;
+		const { SettingsForm, SettingsFormModel, Checkbox, Tag } = primitives;
 
 		// Settings namespace = the loader entry id of this bundle's row
 		// (`id: guardrails` in cordis.patch.yml), NOT the package name: v0.1.7
@@ -73,6 +64,12 @@ window.__ModuleLoader__.load({
 		const NS = 'guardrails';
 		// `plugins.row.config` is keyed by `<package name>#<row id>`.
 		const ROW_KEY = 'dsh-guardrails#guardrails';
+
+		// ---------- the rule model ----------
+		// Mirrors CATEGORY_LEAF_KEYS in src/core/rules.js. The Host half refuses
+		// unknown keys loudly, so a drift here would surface as a rejected save
+		// rather than a silent no-op; test/config-page.test.mjs pins the parity
+		// mechanically by importing the core module.
 		const CATEGORIES = {
 			env: ['read', 'modify'],
 			git: ['read', 'modify'],
@@ -100,275 +97,223 @@ window.__ModuleLoader__.load({
 			cli: '数据 CLI', bulk: '管道批删', target: '删除目标',
 			chain: '无门控链删', misuse: '参数误用',
 		};
-		// All six top-level fields in fixed order (save-op assembly + equality).
-		const FIELDS = ['env', 'git', 'credentials', 'system', 'destructive', 'unverifiable'];
+		// The category-independent fail-safe (a single boolean, not a leaf set).
+		const UNVERIFIABLE = 'unverifiable';
+		const UNVERIFIABLE_LABEL = '动态目标 fail-safe';
+		const UNVERIFIABLE_HINT = '命令重建后仍含动态 $() 目标时的保守拦截（慎关：检测力下降）';
 
-		const leafDefaults = (keys) => Object.fromEntries(keys.map((k) => [k, true]));
+		// ---------- value <-> draft text ----------
+		// A category is stored as a boolean (whole category on/off, v1-compatible)
+		// or as an object of op-level leaves; src/core/rules.js normalizes both.
+		// The draft text is the CANONICAL serialization so that an edit which
+		// returns a category to its stored state produces the stored text again
+		// (the official model decides "is this dirty?" by comparing texts).
+		const isPlainObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 
-		// Resolved value may be boolean (v1 category form) or a leaf object;
-		// normalize to leaf objects for the toggle UI. Key order is fixed by
-		// construction, so JSON comparison below is stable.
-		const normalized = (value) => {
-			const v = typeof value === 'object' && value !== null ? value : {};
-			const out = {};
-			for (const [cat, keys] of Object.entries(CATEGORIES)) {
-				const raw = v[cat];
-				if (raw === true || raw === undefined) out[cat] = leafDefaults(keys);
-				else if (raw === false) out[cat] = Object.fromEntries(keys.map((k) => [k, false]));
-				else out[cat] = Object.fromEntries(keys.map((k) => [k, raw[k] !== false]));
-			}
-			out.unverifiable = v.unverifiable !== false;
-			return out;
+		/** Expand any accepted category value into a leaf object. Absent ⇒ all on. */
+		const toLeaves = (value, keys) => {
+			if (value === undefined || value === null) return Object.fromEntries(keys.map((k) => [k, true]));
+			if (typeof value === 'boolean') return Object.fromEntries(keys.map((k) => [k, value]));
+			if (!isPlainObject(value)) return Object.fromEntries(keys.map((k) => [k, true]));
+			return Object.fromEntries(keys.map((k) => [k, value[k] !== false]));
 		};
-		// Drafts spread only from normalized() output, so key order never
-		// diverges and JSON equality is exact.
-		const equalValue = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-		// DSH 原生主题 token（--dsw-alias-*，ui-theme 定义）— 几何对齐
-		// 插件页设置分区的 token 体系（knowledge/15 §4.1；旧的 PluginCard
-		// 几何随该文件删除失效）。
+		/** Canonical text: `true` / `false` when uniform, else the leaf JSON. */
+		const formatCategory = (value, keys) => {
+			const leaves = toLeaves(value, keys);
+			const on = keys.every((k) => leaves[k] === true);
+			if (on) return 'true';
+			const off = keys.every((k) => leaves[k] === false);
+			return off ? 'false' : JSON.stringify(leaves);
+		};
+
+		/** Read a category draft back; undefined = not a value this field accepts. */
+		const parseCategory = (text, keys) => {
+			const trimmed = String(text).trim();
+			if (trimmed === 'true') return { kind: 'set', value: true };
+			if (trimmed === 'false') return { kind: 'set', value: false };
+			let parsed;
+			try {
+				parsed = JSON.parse(trimmed);
+			} catch (_error) {
+				return undefined;
+			}
+			if (!isPlainObject(parsed)) return undefined;
+			// Mirror the Host's own validation (src/core/rules.js evaluateCategory):
+			// it refuses unknown keys AND non-boolean leaves. Accepting a leaf here
+			// that the Host refuses would turn a locally-visible "invalid draft"
+			// into a save that crosses the wire only to be rejected.
+			if (Object.keys(parsed).some((k) => !keys.includes(k))) return undefined;
+			if (keys.some((k) => parsed[k] !== undefined && typeof parsed[k] !== 'boolean')) return undefined;
+			const leaves = toLeaves(parsed, keys);
+			const on = keys.every((k) => leaves[k] === true);
+			const off = keys.every((k) => leaves[k] === false);
+			return { kind: 'set', value: on ? true : off ? false : leaves };
+		};
+
+		/** The leaf object a category's current draft text stands for. */
+		const leavesOfText = (text, keys) => {
+			const write = parseCategory(text, keys);
+			return toLeaves(write === undefined ? undefined : write.value, keys);
+		};
+
+		/** One category's spec: the whole leaf set is a single staged field. */
+		const categorySpec = (field) => ({
+			field,
+			format: (value) => formatCategory(value, CATEGORIES[field]),
+			parse: (text) => parseCategory(text, CATEGORIES[field]),
+		});
+
+		/**
+		 * Boolean spec, text `'true'`/`'false'` — the same shape the official
+		 * `settingsNumberField` uses (text in, structured write out), because the
+		 * primitive set has no boolean field helper. Only these two texts are
+		 * accepted: the control below can produce nothing else, so accepting
+		 * on/off/1/0 would be unfounded guessing.
+		 */
+		const boolSpec = (field) => ({
+			field,
+			format: (value) => (value === true ? 'true' : 'false'),
+			parse: (text) => {
+				const normalized = String(text).trim().toLowerCase();
+				if (normalized === 'true') return { kind: 'set', value: true };
+				if (normalized === 'false') return { kind: 'set', value: false };
+				return undefined;
+			},
+		});
+
+		/** Every field this page edits — the six top-level keys of the Config schema. */
+		const SPECS = [
+			...Object.keys(CATEGORIES).map(categorySpec),
+			boolSpec(UNVERIFIABLE),
+		];
+
+		/** The form frame's copy (official SettingsFormLabels; five keys, all required). */
+		const LABELS = {
+			unavailable: '本 profile 未提供该配置项（插件行未激活或设置面只读），当前按插件行配置工作。',
+			readOnly: '当前 profile 的设置面只读，无法保存。',
+			saveFailed: '保存未生效：Host 未接受（校验未通过或版本冲突），已回读当前生效值；草稿保留，请调整后重试。',
+			save: '保存',
+			saving: '保存中…',
+		};
+		const OVERRIDDEN = '已覆盖';
+		const RESET = '重置';
+
+		// ---------- tokens & geometry ----------
+		// DSH theme tokens only (--dsw-alias-*); radii come from --dsw-radius-*.
 		const T = {
 			bgLayer2: 'var(--dsw-alias-bg-layer-2)',
 			bgLayer3: 'var(--dsw-alias-bg-layer-3)',
 			bgModulePlatform: 'var(--dsw-alias-bg-module-platform)',
+			borderL1: 'var(--dsw-alias-border-l1)',
 			borderL2: 'var(--dsw-alias-border-l2)',
 			brand: 'var(--dsw-alias-brand-primary)',
 			error: 'var(--dsw-alias-state-error-primary)',
 			labelPrimary: 'var(--dsw-alias-label-primary)',
 			labelSecondary: 'var(--dsw-alias-label-secondary)',
 			labelTertiary: 'var(--dsw-alias-label-tertiary)',
-			labelDimmed: 'var(--dsw-alias-label-dimmed)',
 		};
-
-		// Card chrome geometry (the official Plugins-page settings section).
-		const cardShell = {
-			border: `1px solid ${T.borderL2}`,
-			borderRadius: 12,
-			background: T.bgLayer3,
-			transition: 'border-color .16s, background .16s',
+		const R = {
+			sm: 'var(--dsw-radius-sm)',
+			md: 'var(--dsw-radius-md)',
 		};
-		const cardShellOpen = { background: T.bgLayer2, borderColor: T.labelDimmed };
-		const headerStyle = {
-			width: '100%',
-			appearance: 'none',
-			border: 0,
-			background: 'none',
-			font: 'inherit',
-			color: 'inherit',
-			textAlign: 'left',
-			cursor: 'pointer',
-			display: 'flex',
-			alignItems: 'center',
-			gap: 12,
-			padding: '14px 16px',
-			borderRadius: 12,
-		};
-		const headTextStyle = { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 };
-		const nameStyle = { fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: T.labelPrimary };
-		const descriptionStyle = { fontSize: 13, lineHeight: 1.5, color: T.labelTertiary };
-		const dirtyPillStyle = {
-			flex: 'none',
-			borderRadius: 999,
-			padding: '1px 8px',
-			fontSize: 11,
-			lineHeight: '17px',
-			fontWeight: 500,
-			whiteSpace: 'nowrap',
-			background: T.bgModulePlatform,
-			color: T.labelSecondary,
-		};
-		const bodyStyle = { borderTop: `1px solid ${T.borderL2}`, margin: '0 16px', paddingBottom: 8 };
 
 		const style = {
-			row: { padding: '8px 0', borderTop: `1px solid ${T.borderL2}` },
+			row: { padding: '10px 0', borderTop: `1px solid ${T.borderL1}` },
 			head: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' },
-			title: { flex: 'none', margin: 0, fontSize: '13px', fontWeight: 500, color: T.labelPrimary, lineHeight: 1.5 },
+			title: { flex: 'none', margin: 0, fontSize: 13, fontWeight: 500, color: T.labelPrimary, lineHeight: 1.5 },
 			leaves: { flex: 1, display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: '2px 12px' },
-			leaf: { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px', color: T.labelSecondary },
-			checkbox: { accentColor: T.brand, width: 13, height: 13, margin: 0 },
-			hint: { margin: '1px 0 0', fontSize: '12px', color: T.labelTertiary, lineHeight: 1.5 },
-			reset: { flex: 'none', font: 'inherit', border: 'none', background: 'none', cursor: 'pointer', color: T.labelSecondary, fontSize: '12px', padding: 0 },
-			note: { margin: '10px 0 0', fontSize: '12px', color: T.labelTertiary, lineHeight: 1.6 },
-			footer: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 0 4px', borderTop: `1px solid ${T.borderL2}` },
-			failText: { flex: 1, minWidth: 0, margin: 0, fontSize: 12, lineHeight: 1.5, color: T.error },
-			resetAll: { marginRight: 'auto', font: 'inherit', border: 'none', background: 'none', cursor: 'pointer', color: T.labelSecondary, fontSize: '12px', padding: 0 },
+			// The official Checkbox renders its own label; this only places the
+			// <label> element the primitive returns.
+			leaf: { display: 'inline-flex', alignItems: 'center', fontSize: 12, color: T.labelSecondary },
+			badge: { display: 'inline-flex', alignItems: 'center', gap: 8, flex: 'none' },
+			reset: { font: 'inherit', border: 'none', background: 'none', cursor: 'pointer', color: T.labelSecondary, fontSize: 12, padding: 0 },
+			hint: { margin: '1px 0 0', fontSize: 12, color: T.labelTertiary, lineHeight: 1.5 },
+			note: { margin: '12px 0 0', fontSize: 12, color: T.labelTertiary, lineHeight: 1.6 },
 		};
 
-		/** Collapse chevron: the shell-seeded icon, or a text glyph when absent. */
-		function Chevron({ open }) {
-			return ChevronIcon
-				? h(ChevronIcon, {
-					style: {
-						flex: 'none',
-						color: T.labelTertiary,
-						transition: 'transform .16s',
-						transform: open ? 'rotate(180deg)' : undefined,
-					},
-				})
-				: h('span', { style: { flex: 'none', color: T.labelTertiary, fontSize: 12 } }, open ? '▾' : '▸');
-		}
+		const disabledStyle = (disabled) => (disabled ? { opacity: 0.4, cursor: 'default' } : {});
 
 		/**
-		 * Card header: a collapse bar, the unsaved pill, and the chevron.
-		 *
-		 * The page already draws the row's own title and description above this
-		 * body, so the header carries neither — it only labels the disclosure.
+		 * One category: its title, one official Checkbox per operation leaf, and
+		 * its reset. A checkbox toggle does not write: it stages the whole leaf
+		 * set as this field's draft text, exactly like typing into a value field.
 		 */
-		function CardHeader({ open, dirty, onToggle }) {
-			return h('button', {
-				type: 'button',
-				'aria-expanded': open,
-				'aria-label': `${open ? '收起' : '展开'}: 权限守护规则`,
-				onClick: onToggle,
-				style: headerStyle,
-			},
-				h('span', { style: headTextStyle },
-					h('span', { style: nameStyle }, '规则开关'),
-					h('span', { style: descriptionStyle }, '按类别与操作细分；全部默认开启'),
-				),
-				dirty ? h('span', { style: dirtyPillStyle }, '未保存') : null,
-				h(Chevron, { open }),
-			);
-		}
-
-		/** One category row: title, inline leaf toggles, and the row reset. */
-		function CategoryRow({ cat, keys, value, overridden, writable, busy, first, onToggleLeaf, onReset }) {
-			const toggles = keys.map((leaf) =>
-				h('label', { key: leaf, style: style.leaf },
-					h('input', {
-						type: 'checkbox',
-						style: style.checkbox,
-						disabled: !writable || busy,
-						checked: value[leaf] === true,
-						onChange: (event) => onToggleLeaf(cat, leaf, event.target.checked),
-					}),
-					h('span', null, LEAF_LABEL[leaf] || leaf),
-				),
-			);
-			// Body already carries the card's top border; first row drops its own.
+		function CategoryRow({ cat, keys, field, writable, busy, first, onToggleLeaf, onReset }) {
+			const disabled = !writable || busy;
+			const leaves = leavesOfText(field.text, keys);
 			return h('div', { style: first ? { ...style.row, borderTop: 'none' } : style.row },
 				h('div', { style: style.head },
 					h('h4', { style: style.title }, CATEGORY_LABEL[cat] || cat),
-					h('div', { style: style.leaves }, toggles),
-					h('button', {
-						type: 'button',
-						style: { ...style.reset, opacity: writable && !busy && overridden ? 1 : 0.4, cursor: writable && !busy && overridden ? 'pointer' : 'default' },
-						disabled: !writable || busy || !overridden,
-						onClick: () => onReset(cat),
-					}, '重置'),
+					h('div', { style: style.leaves }, keys.map((leaf) =>
+						h(Checkbox, {
+							key: leaf,
+							className: style.leaf,
+							label: LEAF_LABEL[leaf] || leaf,
+							checked: leaves[leaf] === true,
+							disabled,
+							onChange: (next) => onToggleLeaf(cat, leaf, next),
+						}),
+					)),
+					field.overridden
+						? h('span', { style: style.badge },
+							h(Tag, { tone: 'neutral' }, OVERRIDDEN),
+							h('button', {
+								type: 'button',
+								disabled,
+								onClick: () => onReset(cat),
+								style: { ...style.reset, ...disabledStyle(disabled) },
+							}, RESET),
+						)
+						: null,
 				),
 				h('p', { style: style.hint }, CATEGORY_HINT[cat] || ''),
 			);
 		}
 
-		/** The category-independent unverifiable fail-safe row (single toggle). */
-		function UnverifiableRow({ value, overridden, writable, busy, onSet, onReset }) {
+		/** The category-independent fail-safe row (a single boolean toggle). */
+		function UnverifiableRow({ field, writable, busy, onSet, onReset }) {
+			const disabled = !writable || busy;
 			return h('div', { style: style.row },
 				h('div', { style: style.head },
-					h('h4', { style: style.title }, '动态目标 fail-safe'),
+					h('h4', { style: style.title }, UNVERIFIABLE_LABEL),
 					h('div', { style: style.leaves },
-						h('label', { style: style.leaf },
-							h('input', {
-								type: 'checkbox',
-								style: style.checkbox,
-								disabled: !writable || busy,
-								checked: value === true,
-								onChange: (event) => onSet(event.target.checked),
-							}),
-							h('span', null, '启用'),
-						),
+						h(Checkbox, {
+							className: style.leaf,
+							label: '启用',
+							checked: field.text === 'true',
+							disabled,
+							onChange: onSet,
+						}),
 					),
-					h('button', {
-						type: 'button',
-						style: { ...style.reset, opacity: writable && !busy && overridden ? 1 : 0.4, cursor: writable && !busy && overridden ? 'pointer' : 'default' },
-						disabled: !writable || busy || !overridden,
-						onClick: () => onReset('unverifiable'),
-					}, '重置'),
+					field.overridden
+						? h('span', { style: style.badge },
+							h(Tag, { tone: 'neutral' }, OVERRIDDEN),
+							h('button', {
+								type: 'button',
+								disabled,
+								onClick: () => onReset(UNVERIFIABLE),
+								style: { ...style.reset, ...disabledStyle(disabled) },
+							}, RESET),
+						)
+						: null,
 				),
-				h('p', { style: style.hint }, '命令重建后仍含动态 $() 目标时的保守拦截（慎关：检测力下降）'),
-			);
-		}
-
-		/** Footer: failure diagnostic + reset-all + discard/save (PluginCard parity). */
-		function Footer({ failed, blocked, busy, anyOverridden, hoverDiscard, focusEl, onDiscard, onSave, onResetAll, onHoverDiscard, onFocus }) {
-			const focusOutline = (el) => (focusEl === el ? { outline: `2px solid ${T.brand}`, outlineOffset: 1 } : {});
-			const resetAllUsable = !busy && anyOverridden;
-			return h('div', { style: style.footer },
-				failed ? h('p', { style: style.failText }, failed) : null,
-				h('button', {
-					type: 'button',
-					style: { ...style.resetAll, opacity: resetAllUsable ? 1 : 0.4, cursor: resetAllUsable ? 'pointer' : 'default' },
-					disabled: !resetAllUsable,
-					onClick: onResetAll,
-				}, '全部重置'),
-				h('button', {
-					type: 'button',
-					disabled: blocked,
-					onClick: onDiscard,
-					onMouseEnter: () => onHoverDiscard(true),
-					onMouseLeave: () => onHoverDiscard(false),
-					onFocus: () => onFocus('discard'),
-					onBlur: () => onFocus(null),
-					style: {
-						appearance: 'none',
-						border: `1px solid ${!blocked && hoverDiscard ? T.labelDimmed : T.borderL2}`,
-						borderRadius: 8,
-						padding: '5px 14px',
-						font: 'inherit',
-						fontSize: 13,
-						lineHeight: 1.5,
-						cursor: blocked ? 'default' : 'pointer',
-						background: 'none',
-						color: !blocked && hoverDiscard ? T.labelPrimary : T.labelSecondary,
-						opacity: blocked ? 0.4 : 1,
-						...focusOutline('discard'),
-					},
-				}, '放弃'),
-				h('button', {
-					type: 'button',
-					disabled: blocked,
-					onClick: onSave,
-					onFocus: () => onFocus('save'),
-					onBlur: () => onFocus(null),
-					style: {
-						appearance: 'none',
-						border: '1px solid transparent',
-						borderRadius: 8,
-						padding: '5px 14px',
-						font: 'inherit',
-						fontSize: 13,
-						lineHeight: 1.5,
-						cursor: blocked ? 'default' : 'pointer',
-						background: T.labelPrimary,
-						color: T.bgLayer3,
-						opacity: blocked ? 0.4 : 1,
-						...focusOutline('save'),
-					},
-				}, busy ? '保存中…' : '保存'),
+				h('p', { style: style.hint }, UNVERIFIABLE_HINT),
 			);
 		}
 
 		/**
-		 * Card component: one per namespace, staging the leaf toggles into one save.
+		 * The row's configuration page.
 		 *
 		 * Owner contract of `plugins.row.config` (knowledge `client/15` §4.1;
-		 * slot-contract.ts): the page asks for `view: 'summary'` for the row's
-		 * one-liner and `view: 'page'` for the body under the row's own title,
-		 * and renders the body inside a <section> — hence a div shell, never the
-		 * old <li> (that belonged to the removed list-shaped settings slot).
+		 * PluginManagerPage.tsx:491-495): the page asks for `view: 'summary'` for
+		 * the row's one-liner and `view: 'page'` for the body under the row's own
+		 * title, and renders the body inside its own <section>.
 		 */
-		function GuardCard({ view, useGuardrailForm, mutate, unset }) {
-			const [open, setOpen] = useState(false);
-			// null draft = untouched (the authoritative value shows through);
-			// a non-null draft is the user's uncommitted edit overlay.
-			const [draft, setDraft] = useState(null);
-			const [busy, setBusy] = useState(false);
-			const [failed, setFailed] = useState(null);
-			const [hoverDiscard, setHoverDiscard] = useState(false);
-			const [focusEl, setFocusEl] = useState(null);
-			// Renderer-bound selector hook from the `hooks` compartment; the
-			// snapshot is live, unlike the page's one-time `form` prop.
-			const snapshot = useGuardrailForm((s) => s);
+		function GuardCard({ view, useGuardrailForm, edit, resetField, save, discard }) {
+			// Snapshot via the renderer-bound selector hook from the `hooks`
+			// compartment; the page's `form` prop is a one-time snapshot.
+			const state = useGuardrailForm((s) => s);
 
 			// The page draws the row's title, icon and crumb itself; the summary
 			// word stays the page's business, so only the body renders here.
@@ -376,118 +321,22 @@ window.__ModuleLoader__.load({
 				return h('span', null, 'AI 工具调用对敏感文件（.env/.git/凭据）、系统区写入与破坏性命令的拦截开关');
 			}
 
-			const shell = open ? { ...cardShell, ...cardShellOpen } : cardShell;
-			const ready = snapshot && snapshot.status === 'ready';
-			const current = normalized(ready ? snapshot.value : undefined);
-			const shown = draft ?? current;
-			const dirty = draft !== null && !equalValue(draft, current);
-			const overridden = ready && typeof snapshot.user === 'object' && snapshot.user !== null ? snapshot.user : {};
-			const writable = ready && snapshot.writable === true;
-			const blocked = !dirty || busy || !writable;
+			const busy = state.saving === true;
+			const writable = state.writable === true;
 
-			const header = h(CardHeader, { open, dirty, onToggle: () => setOpen(!open) });
-			if (!ready) {
-				return h('div', { style: shell },
-					header,
-					open ? h('div', { style: bodyStyle },
-						h('p', { style: { ...style.note, padding: '12px 0 0' } }, snapshot && snapshot.status === 'unavailable'
-							? '本 profile 未提供该配置项（插件行未激活或设置面只读），当前按插件行配置工作。'
-							: '正在加载配置…'),
-					) : null,
-				);
-			}
-
-			const toggleLeaf = (cat, leaf, checked) => {
-				const base = draft ?? current;
-				setDraft({ ...base, [cat]: { ...base[cat], [leaf]: checked } });
-				setFailed(null);
-			};
-			const toggleUnverifiable = (checked) => {
-				setDraft({ ...(draft ?? current), unverifiable: checked });
-				setFailed(null);
-			};
-			/**
-			 * Staged save: every dirty field in ONE atomic form.mutate.
-			 *
-			 * `mutate` resolves to the Host's acceptance (it performs its own
-			 * recovery read after a refusal) — the same contract the official
-			 * form model relies on, so the staged drafts survive a refusal
-			 * instead of being cleared against an unaccepted value.
-			 */
-			const save = async () => {
-				if (blocked || draft === null) return;
-				setBusy(true);
-				setFailed(null);
-				const ops = [];
-				for (const field of FIELDS) {
-					if (JSON.stringify(draft[field]) !== JSON.stringify(current[field])) {
-						ops.push({ op: 'set', path: [field], value: draft[field] });
-					}
-				}
-				try {
-					const landed = ops.length === 0 || await mutate(ops);
-					if (!landed) {
-						setFailed('保存被 Host 拒绝（校验未通过或版本冲突），已回滚为当前生效值；草稿保留，请调整后重试。');
-						return;
-					}
-					setDraft(null);
-					setOpen(false); // official settings form: collapse after a settled save
-				} catch (error) {
-					setFailed(`写入失败（请求未达 Host）：${error && error.message ? error.message : String(error)}`);
-				} finally {
-					setBusy(false);
-				}
-			};
-			const discard = () => {
-				setDraft(null);
-				setFailed(null);
-			};
-			/**
-			 * Immediate row reset: clears the user override so the field falls
-			 * back to the composition layer (the plugin row's own config).
-			 *
-			 * A reset is an authoritative action rather than a staged edit, so a
-			 * successful clear also drops the local draft: the row-reset target
-			 * value lives in the composition layer, which no local snapshot knows
-			 * before the write settles — re-seeding from a stale read would show a
-			 * value the Host no longer holds.
-			 */
-			const resetField = async (field) => {
-				if (!writable || busy) return;
-				setBusy(true);
-				setFailed(null);
-				try {
-					if (await unset(field)) setDraft(null);
-					else setFailed('重置被 Host 拒绝，已回滚为当前生效值。');
-				} catch (error) {
-					setFailed(`重置失败（请求未达 Host）：${error && error.message ? error.message : String(error)}`);
-				} finally {
-					setBusy(false);
-				}
-			};
-			/** Immediate reset-all: clears every user override in one mutation. */
-			const resetAll = async () => {
-				if (!writable || busy) return;
-				setBusy(true);
-				setFailed(null);
-				try {
-					const landed = await mutate(FIELDS.map((field) => ({ op: 'unset', path: [field] })));
-					if (landed) setDraft(null);
-					else setFailed('重置被 Host 拒绝，已回滚为当前生效值。');
-				} catch (error) {
-					setFailed(`重置失败（请求未达 Host）：${error && error.message ? error.message : String(error)}`);
-				} finally {
-					setBusy(false);
-				}
+			/** Stage a leaf toggle: the whole leaf set becomes this field's draft. */
+			const toggleLeaf = (cat, leaf, next) => {
+				const keys = CATEGORIES[cat];
+				const leaves = { ...leavesOfText(state[cat].text, keys), [leaf]: next };
+				edit(cat, formatCategory(leaves, keys));
 			};
 
-			const rows = Object.entries(CATEGORIES).map(([cat, keys], index) =>
+			const rows = Object.keys(CATEGORIES).map((cat, index) =>
 				h(CategoryRow, {
 					key: cat,
 					cat,
-					keys,
-					value: shown[cat],
-					overridden: overridden[cat] !== undefined,
+					keys: CATEGORIES[cat],
+					field: state[cat],
 					writable,
 					busy,
 					first: index === 0,
@@ -496,36 +345,40 @@ window.__ModuleLoader__.load({
 				}),
 			);
 
-			return h('div', { style: shell },
-				header,
-				open ? h('div', { style: bodyStyle },
-					rows,
-					h(UnverifiableRow, {
-						value: shown.unverifiable,
-						overridden: overridden.unverifiable !== undefined,
-						writable,
-						busy,
-						onSet: toggleUnverifiable,
-						onReset: resetField,
-					}),
-					h('p', { style: style.note },
-						'修改在本地暂存，点「保存」统一写入本 profile 的行配置（cordis.patch.yml）并立即生效于后续判定；「重置」清除对应项的用户覆盖、回落插件行默认。',
-					),
-					h(Footer, {
-						failed,
-						blocked,
-						busy,
-						anyOverridden: Object.keys(overridden).length > 0,
-						hoverDiscard,
-						focusEl,
-						onDiscard: discard,
-						onSave: save,
-						onResetAll: resetAll,
-						onHoverDiscard: setHoverDiscard,
-						onFocus: setFocusEl,
-					}),
-				) : null,
+			return h(SettingsForm, { labels: LABELS, state, onSave: save, onDiscard: discard },
+				rows,
+				h(UnverifiableRow, {
+					field: state[UNVERIFIABLE],
+					writable,
+					busy,
+					onSet: (next) => edit(UNVERIFIABLE, next ? 'true' : 'false'),
+					onReset: resetField,
+				}),
+				h('p', { style: style.note },
+					'修改在本地暂存，点「保存」统一写入本 profile 的行配置（cordis.patch.yml）并立即生效于后续判定；'
+					+ '「重置」清除对应项的用户覆盖、回落插件行默认；离开本页则丢弃草稿。',
+				),
 			);
+		}
+
+		/**
+		 * Bridge the official form model onto this row's `ConfigForm`.
+		 * Mirrors the official `ShellCardController`
+		 * (ui-settings-shell/src/client/shell-card-controller.ts): one
+		 * `SettingsFormModel` over the served namespace, a `bind(projection)`
+		 * store for the component, and `actions()` as the edit face.
+		 */
+		function createController(scope) {
+			const form = new SettingsFormModel(scope, SPECS);
+			const store = form.bind(() => projection(form));
+			return { form, inject: () => ({ hooks: { guardrailForm: store }, ...form.actions() }) };
+		}
+
+		/** The snapshot the component reads through `useGuardrailForm`. */
+		function projection(form) {
+			const state = { ...form.shell() };
+			for (const spec of SPECS) state[spec.field] = form.field(spec.field);
+			return state;
 		}
 
 		/** Cordis client plugin: the entry id the Host half registers. */
@@ -535,34 +388,22 @@ window.__ModuleLoader__.load({
 		const inject = ['slots', 'configForms'];
 
 		function apply(ctx) {
-			const form = ctx.configForms.get(NS);
+			const scope = ctx.configForms.get(NS);
+			// One controller per mount; its model subscribes to the Host snapshot,
+			// so it is released with this fiber.
+			const controller = createController(scope);
+			ctx.effect(() => () => controller.form.dispose(), 'dsh-guardrails: settings form model');
 			// Reactivity contract (knowledge `client/15` §4.1): the `hooks`
 			// compartment is RESERVED — the renderer consumes each member as a
 			// `use<Name>` selector hook and never passes `hooks` into props.
-			// The page's `form` prop is a one-time {state, mutate} snapshot, so
-			// live re-rendering must come from this observable, not from reading
-			// the prop. Everything else passes through verbatim.
 			//
-			// `form` itself is a stable HostObservable ({getSnapshot, subscribe});
-			// wrap it so the hook name and the pass-through face stay separate.
-			const state = {
-				getSnapshot: () => form.getSnapshot(),
-				subscribe: (listener) => form.subscribe(listener),
-			};
-			const face = {
-				hooks: { guardrailForm: state },
-				// Write path: the page's own snapshot holds `mutate`; expose the
-				// form's own methods too so a save never depends on prop freshness.
-				mutate: (ops, revision) => form.mutate(ops, revision),
-				unset: (field) => form.unset(field),
-			};
 			// Register into the Plugins page only while the Host serves this
 			// namespace, so a profile without the row shows no trace of the page.
 			// The row's own page gains a 「配置」 control from this key.
 			ctx.effect(() => ctx.configForms.whileServed([NS], () => ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
 				name: 'plugins.row.config',
 				key: ROW_KEY,
-				inject: () => face,
+				inject: () => controller.inject(),
 			}, GuardCard))));
 		}
 
