@@ -12,6 +12,7 @@ import {
   assessUnverifiable,
   detectContentSensitiveRef,
   isListingOnly,
+  maskTextSpans,
   resolveCommandLiterals,
 } from './command.js'
 import { assessDestructive } from './destructive.js'
@@ -40,13 +41,17 @@ export function checkCommand(base, command, rules) {
   const resolved = resolveCommandLiterals(command)
   const listingOnly = isListingOnly(resolved)
   const contentClass = assessContentClass(resolved)
+  // Citations of a sensitive name (prose, or a text/pattern parameter value) are
+  // blanked for the text-reference checks only; every other pass sees the real
+  // command (DSR-010).
+  const cited = maskTextSpans(resolved)
   if (!listingOnly) {
-    const category = detectContentSensitiveRef(resolved)
+    const category = detectContentSensitiveRef(cited)
     if (category !== null && leafEnabled(rules[category], contentClass)) {
       return COMMAND_REFERENCE_REASON[category]()
     }
   }
-  if (leafEnabled(rules.credentials, contentClass) && CRED_TEXT_REFERENCE.test(resolved)) {
+  if (leafEnabled(rules.credentials, contentClass) && CRED_TEXT_REFERENCE.test(cited)) {
     return credentialBashReason()
   }
   if (!listingOnly) {

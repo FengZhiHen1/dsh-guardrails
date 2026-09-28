@@ -21,6 +21,14 @@
 
 ⚠️ 本插件**仍不得**挂载到 `0.1.2-rc.1` 实例：`Config` 在 import 期调 `.volatile()`，旧版 schemastery 3.18.2 无此方法 ⇒ `TypeError` ⇒ 整行不加载、硬拦截静默失效。故 `stable-dev`（web，运行时仍 `0.1.2-rc.1`）的升级必须**先于** v1.6.0 的挂载/更新。
 
+### 仍未完成：门禁须重跑（上表覆盖的是 DSR-010 之前的代码）
+
+2026-09-28 追补 **DSR-010 引用豁免**（`maskTextSpans`，见 `decisions/DSR-010-文本引用豁免.md`）：修掉"引用敏感名被判成访问它"的误报——本轮记录门禁结果时 `git commit -m "…references the .git directory…"` 被自己的守卫拦住。该改动落在 pwsh 命令文本判定层，**上表的实例级门禁覆盖的是改动之前的代码**，故发布 / 挂载 web 前须重跑门禁（需重启 `test` 实例；agent 不自行重启）。
+
+agent 侧已复跑的等效项（2026-09-28）：单测 **138/138**（+8 例，含 DSR-010 的 2 例端到端）、行覆盖 **98.22%**、分层门禁通过、tarball 干净安装 + 导入冒烟通过、两个 profile 的 `--dump-config` 组合断言各恰一行（**须显式给 `DSH_TEST_HOME`/`DSH_WEB_HOME`**，否则会落到遗留全局 HOME 而误报"test 行数=0"）。
+
+⚠️ **`verify/run-verify.mjs` 第 4 步会自行 spawn 一个真实实例**（`spawn(LAUNCHER, ['--profile','test','--','--port','0'])`）⇒ **agent 不得运行该脚本的完整流程**（AGENTS.md：实例启停一律走启动器 GUI 或 `dshl`；且两实例共用同一 HOME 属 Security 红线）。agent 只跑第 1/2/3/5 步。
+
 ### 适配期 agent 侧可自动化验证（门禁执行前，2026-09-27）
 
 - 单测 130 例全绿（行覆盖 98.08%，门禁 ≥80%）；分层门禁通过；`node --check` 全绿。

@@ -202,3 +202,32 @@ test('DSR-009: incident replay blocked end-to-end; ablation of chain+misuse open
   const loose = makeGuard({ destructive: { chain: false, misuse: false } })
   assert.equal(allowed(loose('pwsh', { command: incident })), true)
 })
+
+test('DSR-010: citing a sensitive name is not a reference to it', () => {
+  // The 2026-09-27 regression: a commit message quoting this guard's own deny
+  // text (which contains ".git") was blocked, so recording a gate result with
+  // `git commit` failed until the message was moved out of the command line.
+  assert.equal(
+    allowed(pwsh('git commit -m "docs: quote [guardrails] references the .git directory"')),
+    true,
+  )
+  assert.equal(allowed(pwsh('git commit -m "fix: load .env earlier"')), true)
+  assert.equal(allowed(pwsh('git commit -m "docs: keep .ssh out of the repo"')), true)
+  assert.equal(allowed(pwsh('git commit --message "the .git dir"')), true)
+  assert.equal(allowed(pwsh('Write-Output "see .git for history"')), true)
+  assert.equal(allowed(pwsh("$n -notmatch '\\.git'")), true)
+})
+
+test('DSR-010: real sensitive-path references stay blocked end-to-end', () => {
+  assert.equal(blocked(pwsh('Get-Content .git/config')), true)
+  assert.equal(blocked(pwsh("Get-Content '.git/config'")), true)
+  assert.equal(blocked(pwsh('Get-Content "C:\\Program Files\\repo\\.git\\config"')), true)
+  assert.equal(blocked(pwsh("Remove-Item '.git' -Recurse -Force")), true)
+  assert.equal(blocked(pwsh('Remove-Item -Recurse -Force .git')), true)
+  assert.equal(blocked(pwsh('git cat-file --git-dir=.git -p HEAD')), true)
+  assert.equal(blocked(pwsh('Get-Content .env')), true)
+  assert.equal(blocked(pwsh("Get-Content '.env'")), true)
+  assert.equal(blocked(pwsh('Get-Content C:\\Users\\me\\.ssh\\id_rsa')), true)
+  // a citation does not launder a real reference sitting beside it
+  assert.equal(blocked(pwsh('git commit -m "see .git" -- .env')), true)
+})

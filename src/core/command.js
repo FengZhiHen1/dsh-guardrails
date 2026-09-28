@@ -216,6 +216,128 @@ export function commandReferencesSensitiveEnv(command) {
 }
 
 /**
+ * Parameters whose value is free text or a pattern, never a path operand: a
+ * sensitive name written there is a citation, and no cmdlet dereferences a
+ * `-Message`, a comparison operator's regex, or an HTTP body as a file. Blanking
+ * those spans therefore cannot hide an access — but it does stop a commit
+ * message that quotes the guard's own deny text from being judged as a path
+ * reference (DSR-010).
+ *
+ * why the omissions matter: every path-capable parameter stays out, including
+ * the names that look textual. `-Filter`/`-Include`/`-Exclude`/`-Pattern`
+ * really do select filesystem names, and `-Value`/`-Destination`/`-LiteralPath`
+ * are write targets. Abbreviations are accepted because no path-taking cmdlet
+ * offers a path parameter starting with these letters.
+ */
+const TEXT_VALUE_PARAMS = new Set([
+  // comparison / pattern operators: the right-hand side is a regex, never a path
+  'match', 'notmatch', 'like', 'notlike', 'replace', 'split', 'join', 'contains', 'notcontains',
+  // free-text attributes: git -m / -Message, titles, descriptions, HTTP bodies
+  'm', 'message', 'title', 'description', 'subject', 'body', 'comment',
+])
+
+/** Whether a command-text character ends a word. */
+const isWordBreak = (c) => /\s/.test(c) || c === ';' || c === '|' || c === '&'
+
+/**
+ * Split raw command text into word spans, recording each quoted sub-span with
+ * its content and offsets. Purpose-built for {@link maskTextSpans}:
+ * {@link tokenizePwsh} resolves quotes into word content and keeps no offsets,
+ * so it cannot answer "was this name written inside quoted prose?".
+ *
+ * @returns `{ start, end, raw, quotes }` per word, in order.
+ */
+function scanWordSpans(command) {
+  const words = []
+  const n = command.length
+  let i = 0
+  while (i < n) {
+    if (isWordBreak(command[i])) { i += 1; continue }
+    const start = i
+    const quotes = []
+    while (i < n && !isWordBreak(command[i])) {
+      const c = command[i]
+      if (c === '`') { i += 2; continue }
+      if (c === "'" || c === '"') {
+        const quoteStart = i
+        i += 1
+        let content = ''
+        while (i < n && command[i] !== c) {
+          if (command[i] === '`' && i + 1 < n) { content += command[i + 1]; i += 2; continue }
+          content += command[i]
+          i += 1
+        }
+        if (i < n) i += 1
+        quotes.push({ start: quoteStart, end: Math.min(i, n), content })
+        continue
+      }
+      i += 1
+    }
+    words.push({ start, end: i, raw: command.slice(start, i), quotes })
+  }
+  return words
+}
+
+/**
+ * Whether a quoted span is prose — a citation rather than a path. A span holding
+ * whitespace and no path separator names one file in the current directory, and
+ * a file so named can never *be* the `.git` directory (that name has no
+ * whitespace), so blanking such a span cannot hide a reference to it. A span
+ * carrying a separator stays under the full rules, which is what keeps
+ * `"C:\Program Files\x\.git"` and `'.git/config'` blocked.
+ */
+const isProseSpan = (content) => /\s/.test(content) && !/[\\/]/.test(content)
+
+/**
+ * Blank out spans of a command that merely *cite* a sensitive name, so the
+ * text-reference checks cannot read a citation as a path reference (DSR-010).
+ * Two rules produce those spans: the value of a text/pattern parameter, and a
+ * quoted span that is prose. Only the cited characters are removed — every other
+ * offset is preserved, so delimiter context around a real path is unchanged.
+ *
+ * Callers pass the result to the text-reference checks only: listing mode,
+ * content class, system-write, unverifiable and destructive analysis all keep
+ * seeing the real command.
+ *
+ * @param command - command text after literal reconstruction.
+ * @returns the same text with citation spans replaced by equal-length blanks.
+ */
+export function maskTextSpans(command) {
+  const words = scanWordSpans(command)
+  const spans = []
+  for (let k = 0; k < words.length; k += 1) {
+    const word = words[k]
+    for (const quote of word.quotes) {
+      if (isProseSpan(quote.content)) spans.push([quote.start, quote.end])
+    }
+    if (!word.raw.startsWith('-')) continue
+    const colon = word.raw.indexOf(':')
+    const name = normalizeCommand(colon === -1 ? word.raw.slice(1) : word.raw.slice(1, colon))
+    if (!TEXT_VALUE_PARAMS.has(name)) continue
+    if (colon !== -1) {
+      // Inline `-Message:text`: only the value after the colon is a citation.
+      const valueStart = word.start + colon + 1
+      if (valueStart < word.end) spans.push([valueStart, word.end])
+      continue
+    }
+    const value = words[k + 1]
+    if (value !== undefined) spans.push([value.start, value.end])
+  }
+  if (spans.length === 0) return command
+  spans.sort((a, b) => a[0] - b[0])
+  let out = ''
+  let cursor = 0
+  for (const [from, to] of spans) {
+    const start = Math.max(from, cursor)
+    if (start > cursor) out += command.slice(cursor, start)
+    const end = Math.max(to, start)
+    out += ' '.repeat(end - start)
+    cursor = end
+  }
+  return out + command.slice(cursor)
+}
+
+/**
  * Content-sensitive reference detection, in the original check order: env → git.
  * Credentials are intentionally separate: they are checked in every mode.
  * `.dsh` (incl. session history) is not a content-sensitive target (DSR-003 revisit).

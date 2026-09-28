@@ -24,11 +24,20 @@
 - README / 规则模型 / DSR-008 中 `settings.yaml` 相关表述更新为「本 profile 的 `cordis.patch.yml`」（`settings-file` 提供方与 `settings.yaml` 已删除，遗留文件由 settings 服务导入后改名为 `settings.yaml.imported`）。
 - 新增「版本基线」节，写明**不兼容 0.1.2-rc.1 及更早运行时**，以及该结论的三条机械证据。
 
+### 误报修复：引用敏感名不再被当成访问它（DSR-010）
+
+- **现象（实测复现）**：三个文本引用检查（`GIT_DIR_REFERENCE`/`ENV_REFERENCE`/`CRED_TEXT_REFERENCE`）按文本出现判定，于是命令里**引用**敏感名也被硬阻断——`git commit -m "…this shell command references the .git directory…"`（引用的正是本插件自己的拒绝原文）、`git commit -m "fix: load .env earlier"`、`git commit -m "docs: keep .ssh out of the repo"`、`Write-Output "see .git for history"` 全被拦。⇒ 用 `git commit` 记录一份引用了守卫拒绝原文的说明，会被自己的守卫拦住，本轮实测即撞上。
+- **修复**：新增 `maskTextSpans()`（`src/core/command.js`），在**仅这三个文本引用检查**之前把"引用位置"抹成等长空白（偏移不变）：① 引号内**含空白且不含路径分隔符**的分段——含空白、不含分隔符只可能指名当前目录下的单个文件名，而 `.git` 本身不含空白，故该分段不可能是 `.git` 目录；② 文本/模式参数的值（`-match` 族与 `-m`/`-Message`/`-Title`/`-Description`/`-Subject`/`-Body`/`-Comment`）。**路径能力参数一律不豁免**（`-Path`/`-LiteralPath`/`-Filter`/`-Include`/`-Exclude`/`-Pattern`/`-Value`/`-Destination`），含 `"C:\Program Files\x\.git\config"`、`'.git/config'`、`Remove-Item -Recurse -Force .git`、`git cat-file --git-dir=.git` 在内的真实路径引用全部照旧拦截。
+- 决策与安全性论证见 [DSR-010](docs/decisions/DSR-010-文本引用豁免.md)；机制见 `technical-details/命令文本分析.md`「引用豁免」。
+- **已知残余误伤（有意 fail-closed）**：`-Pattern` 的值不豁免（`Select-String -Pattern '\.git'` 仍拦）；无空白且不含分隔符的散文分段不豁免（单独的 `'\.git'` 仍拦）。
+
 ### 测试与验证
 
 - 测试 115 → 120：`config.test.mjs` 重写为 volatile 契约（默认值经 `ref.get()` 断言、**六字段全部 volatile** 的显式断言、非法值仍挂载失败）；`settings.test.mjs` 重写为 v0.1.7 模型（`configure` 页面策略、提交后即时生效、提交一字段不扰动其他字段、无 settings 服务按行配置、非 volatile 手写配置仍可判定）。
-- 行覆盖 98.08%（门禁 ≥80%）；分层门禁通过（core 6 文件）；`node --check` 全绿；tarball 干净安装 + 导入冒烟通过（实测 `SETTINGS_NS === 'guardrails'` 且六字段均为 volatile 引用）。
-- ⚠️ **test 实测门禁未完成**：`--dump-config` 组合断言与 test profile 启动冒烟需起实例，按 AGENTS.md 红线由用户经启动器执行（agent 不起进程）。**UI 卡片冒烟必须查 DevTools Console**（新增槽位 `plugins.row.config` 的渲染契约无法由单测覆盖）。
+- 测试 120 → 138：`command.test.mjs` +6（`maskTextSpans` 的散文分段 / 含分隔符分段不豁免 / 参数值豁免 / 路径能力参数不豁免 / 偏移不变 / 抹除与否决定引用判定），`guard.integration.test.mjs` +2（DSR-010 引用放行 6 例、真实敏感路径仍拦 10 例，含 `git commit -m "see .git" -- .env` 证明引用不会给旁边的真引用洗白）。
+- 行覆盖 98.22%（门禁 ≥80%）；分层门禁通过（core 6 文件）；`node --check` 全绿；tarball 干净安装 + 导入冒烟通过。
+- **test 实测门禁（2026-09-27，测试实例 `0.1.7-rc.2`）已通过并在 DSR-010 之前完成**：`--dump-config` 184 行无重复 id、启动无 `N entries did not activate`／无 `startup failed`／无 `disabling profile plugin`、功能冒烟实测拦截（`tool/result` `isError: true` + 实例日志 `[guardrails] denied pwsh`）、UI 卡片由用户浏览器确认可见可配。⚠️ **该门禁覆盖的是 DSR-010 之前的代码**；本次改的是 pwsh 命令文本判定，**发布/挂载 web 前须重跑门禁**（需重启测试实例）。
+- ⚠️ `verify/run-verify.mjs` 的**第 4 步（test profile 启动冒烟）会自行 spawn 一个真实实例** ⇒ **agent 不得运行该脚本的完整流程**（AGENTS.md 红线：实例启停一律走启动器 GUI 或 `dshl`）。agent 侧只可跑第 1/2/3/5 步；第 3 步的 `--dump-config` 组合断言须显式给 `DSH_TEST_HOME`/`DSH_WEB_HOME`，否则会落到遗留的全局 HOME 而误报"test 行数=0"。
 
 ## 1.5.0（已发布）
 

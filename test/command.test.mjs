@@ -10,6 +10,7 @@ import {
   classifyVerb,
   detectContentSensitiveRef,
   isListingOnly,
+  maskTextSpans,
   tokenizePwsh,
   unwrapFragment,
 } from '../src/core/command.js'
@@ -61,6 +62,67 @@ test('detectContentSensitiveRef: env → git order, null otherwise', () => {
 })
 
 const SYS_BASE = 'E:/Project/DSH_Plugins'
+
+test('maskTextSpans: prose in a quoted span is a citation, not a path (DSR-010)', () => {
+  // The 2026-09-27 false positive: a commit message quoting this guard's own
+  // deny text was judged as a path reference into .git.
+  assert.equal(
+    maskTextSpans('git commit -m "docs: references the .git directory"').includes('.git'),
+    false,
+  )
+  assert.equal(maskTextSpans('Write-Output "see .git for history"').includes('.git'), false)
+  assert.equal(maskTextSpans('git commit -m "keep .ssh out of the repo"').includes('.ssh'), false)
+})
+
+test('maskTextSpans: path-shaped spans keep their separators under full rules', () => {
+  // A span with whitespace but no separator cannot name the .git directory, so
+  // it is blanked; anything carrying a separator stays visible to the checks.
+  for (const cmd of [
+    'Get-Content ".git/config"',
+    "Get-Content '.git/config'",
+    'Get-Content "C:\\Program Files\\repo\\.git\\config"',
+    'Get-Content ".git"',
+    'Get-Content .git',
+  ]) {
+    assert.equal(maskTextSpans(cmd).includes('.git'), true, cmd)
+  }
+})
+
+test('maskTextSpans: text/pattern parameter values are citations', () => {
+  assert.equal(maskTextSpans("$n -notmatch '\\.git'").includes('.git'), false)
+  assert.equal(maskTextSpans('git commit --message "the .git dir"').includes('.git'), false)
+  assert.equal(maskTextSpans('git commit -Message:"the .git dir"').includes('.git'), false)
+})
+
+test('maskTextSpans: path-capable parameters are never exempted', () => {
+  // -Filter / -Pattern / -Include / -Exclude really do select filesystem names.
+  assert.equal(maskTextSpans('Get-ChildItem -Filter ".git"').includes('.git'), true)
+  assert.equal(maskTextSpans('Select-String -Pattern "\\.git" x').includes('.git'), true)
+  assert.equal(maskTextSpans('Get-ChildItem -Include ".git"').includes('.git'), true)
+  assert.equal(maskTextSpans('Get-Content -LiteralPath ".git"').includes('.git'), true)
+  // a text parameter's citation is blanked, but the immediately following
+  // positional path is untouched
+  const mixed = maskTextSpans('git commit -m "see .git" .env')
+  assert.equal(mixed.includes('.git'), false)
+  assert.equal(mixed.includes('.env'), true)
+})
+
+test('maskTextSpans: blanking preserves length and every non-cited character', () => {
+  const cmd = 'git commit -m "see .git" x'
+  const masked = maskTextSpans(cmd)
+  assert.equal(masked.length, cmd.length)
+  // The cited span includes its quotes, so compare the text on either side of it.
+  assert.equal(masked.slice(0, 14), cmd.slice(0, 14)) // 'git commit -m '
+  assert.equal(masked.slice(-2), cmd.slice(-2)) // ' x'
+  assert.equal(masked.slice(14, 24), ' '.repeat(10))
+  assert.equal(maskTextSpans('git status'), 'git status')
+})
+
+test('maskTextSpans: masking is what keeps citations from reading as references', () => {
+  const cited = 'git commit -m "references the .git directory"'
+  assert.equal(detectContentSensitiveRef(cited), 'git') // unmasked: reads as a reference
+  assert.equal(detectContentSensitiveRef(maskTextSpans(cited)), null) // masked: a citation
+})
 
 test('applyCwdCommand: cd tracking matches destructive-analysis semantics', () => {
   let state = { dir: SYS_BASE, known: true }
