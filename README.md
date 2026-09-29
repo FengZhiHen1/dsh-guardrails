@@ -26,7 +26,9 @@
 
 - 命令文本：整条命令全部由元数据动词组成（`Get-ChildItem`/`ls`/`dir`/`Get-Item`/`Test-Path`/`Resolve-Path`/`Split-Path` 等，以及格式化/过滤动词 `Select-Object`/`Sort-Object`/`Where-Object`，且无 `$()` 子表达式、无重定向）才按"列举"处理；否则按内容访问走全规则（未识别命令保持保守）。
 - 命令文本先经**字面量重建**：可静态求值的 `$()`（如 `$('nv')`）与同命令内的赋值变量（`$p='.env'`）会先还原为字面量，再跑全部规则——`$()` 拼接、变量间接调用无法再隐藏敏感名（每次 pwsh 调用都是全新进程，变量无法跨调用持久）。
+- **语句位置按 PowerShell 语法判定**（DSR-012）：词首为引号的语句是**输出**（裸字符串），不是被调用的命令（`"cmd" arg` 是语法错误，`$(...) arg` 是运行时错误）；只有前置 `&`/`.` 才是显式调用。"命令本身是动态的"因此只在**词首是 `$(`** 时成立——`$n=1; "total: $($n.Count)"` 这类合法插值输出不再被误拦（实测真实语料中被拦总数 478 → 76 即由此而来）。
 - 重建后仍含动态 `$()` 的命令：若命令本身或**内容/删除类动词**（`Get-Content`/`Set-Content`/`Remove-Item`/`Copy-Item`/`Out-File`/`New-Item` 等）的参数由动态表达式构成，目标无法静态验证，一律保守拦截（与类别开关无关的 fail-safe 层，受 `unverifiable` 键控制，缺省开）。
+- **双引号插值的子表达式会作为命令被判定**（DSR-012）：`"$(...)"` 在 PowerShell 中**真的执行**，故其内容递归跑全部规则——`Write-Output "$(Get-Content .env)"`、`"$(Remove-Item C:\Windows\x -Recurse)"`、`"$(git reset --hard)"` 全部拦截（此前这三类同时逃过内容引用、系统区写、破坏性三层）。单引号不插值，维持字面量。
 - 工具层：`read`/`grep`/`write`/`edit` 是内容访问（全规则）；`glob` 只列举（仅凭据目标拦截）。
 - **系统区写检测**（W0）：写类动词（`Set-Content`/`Remove-Item`/`New-Item`/`Copy-Item`/`Move-Item`/`Out-File` 等）的静态目标、重定向目标（`>`/`>>`/`2>`）命中系统区前缀即拦；带 cd 链模拟（`cd C:\Windows; Set-Content x y` 同样被拦）。读与列举始终放行（DSR-005）。
 - 破坏性分析（`rm -rf`、`Get-ChildItem | Remove-Item`——含中间夹过滤/格式化动词或 `%`/`ForEach-Object` 脚本块的管道、`git reset --hard`、机器级命令、**绝对盘根删除**（`Remove-Item C:\`/`D:\`/`/` 及 `C:\*` 通配形态）、**无门控链删**（同调用内 move/copy/rename 之后经 `;`/换行/裸`&` 接带 `-Recurse`/`-Force`/`-r`/`-f`/`/s` 的删除；`&&` 或 `-ErrorAction Stop` 视为错误门）、**参数误用**（`-LiteralPath` 等携带 `*`/`?`——必败且静默；removal/mutator 的通配解析目标携带 `[ ]`——会命中未指名文件）等）逐子族受 `destructive` 配置控制（八子族缺省全开，DSR-006/009）；其中删除目标分析（盘根/工作区根）属 `target` 子族，关闭对应拦截即放行。
@@ -109,6 +111,8 @@ profile 覆盖形态示例（部署基线）：
   （如 `Select-String -Pattern "\.env"`）的只读元数据命令也会被拦——
   保守取舍，避免文本混淆绕过；`git` 等常见只读命令不在列举白名单中，
   只能走全规则。
+- **`& $var`（变量作命令名）不拦**（DSR-012 显式接受的边界）：真解析需完整 PowerShell 语法。该形态在 DSH 的实际调用方式（新进程 + `-NoProfile -NonInteractive`）下无可利用性——未赋值的 `& $exe --help` 抛 `InvalidOperation` 且**不执行任何命令**；已赋值的合法写法由字面量重建还原为字面量（实测语料 53 处 `& $var` 全部还原，0 处残留动态）。
+- **不是解析器，仍是文本启发式**：`tree-sitter-powershell` 类真解析器已评估（DSR-012 方向 B），在 **34.4%** 的真实命令上报语法错误（最大单因 `--`），parse 覆盖率不足以支撑整体替换；在无法解析处回退启发式会重新引入误伤。重访条件见 DSR-012。
 - 系统区前缀按 C: 系统盘建模；Linux/macOS 清单与注册表类命令
   （`reg`/`HKCU:`）不在 v1 范围（见 DSR-001）。
 - **DSH 自管理面不拦截**（DSR-008）：对 `$DSH_HOME` 配置面（本 profile 的

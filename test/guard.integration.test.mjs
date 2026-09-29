@@ -231,3 +231,50 @@ test('DSR-010: real sensitive-path references stay blocked end-to-end', () => {
   // a citation does not launder a real reference sitting beside it
   assert.equal(blocked(pwsh('git commit -m "see .git" -- .env')), true)
 })
+
+// DSR-012: statement position and interpolated subexpressions.
+// The 2026-09-29 evidence: 478/9062 real agent commands were denied, 413 of
+// them as "the command itself is computed" — yet 395 of those were a bare
+// double-quoted string used as an output statement, whose only "command" was an
+// interpolated `$(...)`. Reading a quoted head as a command name was the bug;
+// ignoring what the interpolation executes would have been the mirror-image bug.
+test('DSR-012: a bare quoted string statement is output, not a computed command', () => {
+  assert.equal(allowed(pwsh('"total: $($list.Count)"')), true)
+  assert.equal(allowed(pwsh('$list = @(1,2); "total: $($list.Count)"')), true)
+  assert.equal(allowed(pwsh('$n = 1; "count: $($n.Count)"')), true)
+  assert.equal(allowed(pwsh('"just text"')), true)
+  assert.equal(allowed(pwsh('"=== banner ==="; Resolve-DnsName example.com')), true)
+  assert.equal(allowed(pwsh('cd E:\\Project; "=== section ==="')), true)
+  // an expression whose head is a keyword is not a computed command either
+  assert.equal(allowed(pwsh('$x=1; if ($x) { "value: $($x)" } else { "none" }')), true)
+})
+
+test('DSR-012: a genuinely computed command name stays blocked', () => {
+  // `$(...)` as the command itself, and the explicit `&` call operator with a
+  // computed name, are the shapes where the invoked command really is dynamic.
+  assert.equal(blocked(pwsh('$(Get-Command git) status')), true)
+  assert.equal(blocked(pwsh("$(if ($true) {'Get-ChildItem .'})")), true)
+  assert.equal(blocked(pwsh('& "$(Get-Date)"')), true)
+})
+
+test('DSR-012: interpolated subexpressions are judged as commands', () => {
+  // The mirror-image gap: PowerShell executes these, so the reference, system
+  // write and destructive passes must see them.
+  assert.equal(blocked(pwsh('"$(Get-Content .env)"')), true)
+  assert.equal(blocked(pwsh('"$(Get-Content .git/config)"')), true)
+  assert.equal(blocked(pwsh('Write-Output "$(Get-Content .env)"')), true)
+  assert.equal(blocked(pwsh('Write-Host "$(Get-Content C:\\Users\\me\\.ssh\\id_rsa)"')), true)
+  assert.equal(blocked(pwsh('Write-Output "$(Remove-Item C:\\Windows\\x -Recurse)"')), true)
+  assert.equal(blocked(pwsh('"$(Remove-Item C:\\Windows\\x -Recurse)"')), true)
+  assert.equal(blocked(pwsh('"$(git reset --hard)"')), true)
+  assert.equal(blocked(pwsh('$a = "$(Get-Content .env)"; Write-Output $a')), true)
+  // nesting one level deeper does not launder it
+  assert.equal(blocked(pwsh('$x=1; "outer $(if ($x) { "$(Get-Content .env)" })"')), true)
+})
+
+test('DSR-012: single-quoted spans stay literal (PowerShell does not interpolate)', () => {
+  // A single-quoted span is inert content, so naming a sensitive file inside it
+  // is a citation, exactly like DSR-010's prose case.
+  assert.equal(allowed(pwsh("Write-Output '$(Get-Content .env)'")), true)
+})
+

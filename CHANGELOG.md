@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.7.0（当前，未发布）
+
+### 误报修复：裸引号输出语句不再被当成动态命令（DSR-012）
+
+- **现象（真实语料取证）**：按 DSH 帧契约解开 `stable-dev` HOME 4 天会话日志，取出 **9062 条真实 pwsh 命令**重跑现行规则 ⇒ **478 条被拦（5.4%）**，其中 **413 条**是 `unverifiable` 的"命令本身是动态的"，而这 413 条里 **397 条（96%）** 的语句头是一个**裸双引号插值字符串**。
+- **根因（范畴错误，非"设变量"）**：`assessUnverifiable` 用 `invocation.cmd.includes('$(')` 判"命令名动态"，而词法把引号吞进词内容、不留边界 ⇒ 语句头 `total: $(x)` 被当成命令词。PowerShell 实测：裸引号串是**输出**语句（`"cmd" arg` 是**语法错误**，不可能带参数）；`$(...) arg` 是**运行时错误**；只有 `&`/`.` 是显式调用。⇒ 修正为：词首为引号且非显式调用 ⇒ 输出，不是命令位置；"命令名动态"须**词首为 `$(`**（`if(...){... "$(...)" ...}` 这类控制表达式不算）。
+- **同批补上方向相反的漏防**（比误伤更该先修）：`tokenizePwsh` 的引号分支把 `$(...)` 吞掉、**不推进 `nested`**，且 `isProseSpan` 把 `$(Get-Content .env)` 判成散文抹掉 ⇒ `Write-Output "$(Get-Content .env)"`、`Write-Output "$(Remove-Item C:\Windows\x -Recurse)"`、`Write-Output "$(git reset --hard)"` **同时逃过内容引用、系统区写、破坏性三层**，实测全部放行。修复：双引号内 `$(...)` 收入 `nested`（单引号是字面量不提，配平引号感知）、`isProseSpan` 只对**单引号**保留散文豁免、`checkCommand` 对子表达式**递归跑全部规则**（`MAX_SUBEXPRESSION_DEPTH = 8`）。
+- **效果（同一 9062 条语料，只改判定）**：被拦 **478 → 76（5.4% → 0.8%）**；**新增误伤 0**；`unverifiable:command` **413 → 3**；检测力 22/22（含 6 条"引号内藏破坏性命令"必须仍被拦）+ 12/12 应放行。
+- 决策与实测表见 [DSR-012](docs/decisions/DSR-012-语句位置与插值子表达式.md)；机制见 `technical-details/命令文本分析.md`「语句位置」「子表达式递归」。
+
+### 修复：审计日志此前无法定位命令
+
+- 审计行上限 140 字符，而拒绝消息前缀已占 **112** ⇒ 日志里命令**只剩 28 字符**，正是上面根因长期无法从日志定位的原因（每条都像以赋值开头）。改为 `AUDIT_LINE_MAX = 400`（覆盖拒绝消息内嵌的 200 字符预览）+ 对 pwsh 追加独立 `[guardrails] denied input:` 行——文本引用类拒绝消息本身**不含命令**，此前事后完全无法归因。
+
+### 测试与验证
+
+- 测试 145 → 155：`command.test.mjs` +6（词带引号来源 / 双引号插值提取 / 配平引号感知 / `splitFragments` 新出口 / `isCommandPosition` / `isComputedCommandName`），`guard.integration.test.mjs` +4（DSR-012 端到端正反 3 例 + 单引号字面量 1 例）。
+- 行覆盖 **98.55%**（门禁 ≥80%）；分层门禁通过（core 6 文件）；`npm run check` 全绿；`quality_floor` **PASS**（0 error）。
+- ⚠️ **`verify/run-verify.mjs` 第 3 步（test profile 组合断言）本次 FAIL**：`homes\test` 的 `test` profile 当前 `dependencies` 0 条、`bundles` 仅 `dsh-base`+`dsh-web-app`（本插件行未装）——这是**部署状态**，与本次源码改动无关（改动只落在 `src/`）。发布/挂载 web 前须先按门禁流程在 test 实例装载本版本并重跑；第 4 步启动冒烟按 `DSH_VERIFY_SKIP_BOOT_SMOKE=1` 跳过，**由用户在启动器侧补做**。
+- ⚠️ 实例级门禁**尚未执行**（需重启 test 实例，agent 不得自行重启）⇒ 按 AGENTS.md，本版本**尚不可发布/挂载 web**。
+
 ## 1.6.0（当前，未发布）
 
 ### 破坏性变更：适配 DSH `0.1.7-rc.2`（新基线 settings / client 模型换代）

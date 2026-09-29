@@ -21,6 +21,42 @@ import { checkPath, resolvePath } from '../core/path-check.js'
 import { checkCommand } from '../core/check-command.js'
 import { PATH_REASON_BY_CATEGORY } from '../core/deny-messages.js'
 
+// Audit-line budget. The deny renderers already bound the command preview they
+// embed to 200 characters (`core/deny-messages.js`), so this cap must clear that
+// preview plus the longest rationale — otherwise the logged command is cut off
+// while the message reads as if it were complete. The previous 140 cap left only
+// 28 characters of command, which made 2026-09-29's false-positive hunt
+// impossible from logs alone: every entry looked like it began with an
+// assignment purely because the truncation landed there.
+const AUDIT_LINE_MAX = 400
+
+/**
+ * Render one deny reason as a single bounded audit line.
+ * Only the FIRST line is logged: it carries the rationale and, for the classes
+ * that embed one, the command preview; the remaining lines are the fixed
+ * pass-through guidance that the model still receives in the returned message.
+ */
+const auditLine = (reason) => {
+  const line = reason.split('\n', 1)[0].trim()
+  return line.length > AUDIT_LINE_MAX ? `${line.slice(0, AUDIT_LINE_MAX)}…` : line
+}
+
+/**
+ * Render the judged input as a single bounded audit field.
+ *
+ * Only the pwsh channel needs this. The command-text reference classes (`.env` /
+ * `.git` / credential text hits) name the *category* but never quote the
+ * command that triggered it, so without this field those denials cannot be
+ * attributed after the fact — the 2026-09-29 false-positive assessment had to
+ * re-read session logs to recover what the live audit line had dropped. Path
+ * classes are deliberately excluded because their reasons already quote the
+ * offending path.
+ */
+const renderAuditInput = (command) => {
+  const text = command.replace(/\s+/g, ' ').trim()
+  return text.length > AUDIT_LINE_MAX ? `${text.slice(0, AUDIT_LINE_MAX)}…` : text
+}
+
 // ---------- config schema (official DSH config boundary) ----------
 // Every cordis config entry may carry a `config` block; the plugin declares a
 // Schemastery schema that the loader validates BEFORE apply and fills in with
@@ -108,6 +144,8 @@ function judgeExecution(execution, rawConfig, sandboxPolicy) {
     const toolName = execution.name
     const args = execution.arguments
     let reason
+    /** Bounded command text to log alongside a pwsh denial; unset for other tools. */
+    let deniedInput
     if (toolName === 'read' || toolName === 'write' || toolName === 'edit' || toolName === 'read_image') {
       const hit = checkPath(
         base,
@@ -127,9 +165,18 @@ function judgeExecution(execution, rawConfig, sandboxPolicy) {
         const workdir =
           typeof args.workdir === 'string' && args.workdir ? args.workdir : undefined
         reason = checkCommand(workdir ? resolvePath(base, workdir) : base, command, rules)
+        // The command-text reference classes name a category without quoting the
+        // command, so the judged input is logged separately for the pwsh
+        // channel; the path classes already quote their offending path.
+        if (reason) deniedInput = renderAuditInput(command)
       }
     }
-    if (reason) console.log(`[guardrails] denied ${toolName}: ${reason.slice(0, 140)}`)
+    if (reason) {
+      console.log(
+        `[guardrails] denied ${toolName}: ${auditLine(reason)}` +
+          (deniedInput === undefined ? '' : `\n[guardrails] denied input: ${deniedInput}`),
+      )
+    }
     return reason
   } catch (error) {
     // Fail-open with a loud log: a guard bug must not deadlock the session.

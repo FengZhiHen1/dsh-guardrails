@@ -9,12 +9,21 @@ import {
   assessSystemWrite,
   classifyVerb,
   detectContentSensitiveRef,
+  isCommandPosition,
+  isComputedCommandName,
   isListingOnly,
   maskTextSpans,
+  splitFragments,
   tokenizePwsh,
   unwrapFragment,
 } from '../src/core/command.js'
 import { LISTING_SAMPLES, NON_LISTING_SAMPLES } from './fixtures/command-samples.mjs'
+
+/** Fragment view carrying the per-fragment flags the position rules consume. */
+const makeChain = (command) => {
+  const { fragments, quotedHeads, leadSeps } = splitFragments(tokenizePwsh(command).tokens)
+  return fragments.map((words, i) => ({ words, quoted: quotedHeads[i], leadSep: leadSeps[i] }))
+}
 
 test('tokenizePwsh: words, quotes, backticks, separators, subexpressions', () => {
   const { tokens, nested } = tokenizePwsh('Get-Content "a b" \'c`d\' $var; echo $(Get-Content .env) | cat')
@@ -30,6 +39,61 @@ test('tokenizePwsh: words, quotes, backticks, separators, subexpressions', () =>
 test('tokenizePwsh: && and || keep their two-char values (error-gate fidelity)', () => {
   const { tokens } = tokenizePwsh('a && b || c')
   assert.deepEqual(tokens.filter((t) => t.kind === 'sep').map((t) => t.value), ['&&', '||'])
+})
+
+test('tokenizePwsh: words record quote origin (a quoted head is not a command)', () => {
+  const { tokens } = tokenizePwsh('"total: $($n.Count)" . "C:\\x.ps1" plain')
+  const words = tokens.filter((t) => t.kind === 'word')
+  assert.equal(words[0].quoted, true) // bare string statement
+  assert.equal(words[1].quoted, false) // dot-source word
+  assert.equal(words[2].quoted, true) // quoted script path
+  assert.equal(words[3].quoted, false) // bare command name
+})
+
+test('tokenizePwsh: double-quoted spans yield their embedded subexpressions', () => {
+  // Interpolated `$(...)` really executes; the lexer must surface it so the
+  // reference and destructive passes can judge it (v1.7.0).
+  assert.deepEqual(tokenizePwsh('"$(Get-Content .env)"').nested, ['Get-Content .env'])
+  assert.deepEqual(tokenizePwsh('Write-Output "a $(gci x) b"').nested, ['gci x'])
+  // A group opened inside a quoted span is closed by the matching `)` inside
+  // that same span; the body ends where the outer `$(...)` ends.
+  assert.deepEqual(
+    tokenizePwsh('$x=1; "outer $(if ($x) { "$(gci y)" })"').nested,
+    ['if ($x) { "$(gci y)" }'],
+  )
+  // Single quotes never interpolate in PowerShell.
+  assert.deepEqual(tokenizePwsh("'$(Get-Content .env)'").nested, [])
+})
+
+test('tokenizePwsh: subexpression scan is quote-aware (parens inside strings)', () => {
+  assert.deepEqual(tokenizePwsh('$(Write-Output "a)b")').nested, ['Write-Output "a)b"'])
+  assert.deepEqual(tokenizePwsh('$(Remove-Item "x)y" -Recurse)').nested, ['Remove-Item "x)y" -Recurse'])
+})
+
+test('splitFragments: reports quoted heads and leading separators', () => {
+  const { fragments, quotedHeads, leadSeps } = splitFragments(
+    tokenizePwsh('"banner"; Get-ChildItem x; & "cmd"').tokens,
+  )
+  assert.deepEqual(fragments.map((f) => f[0]), ['banner', 'Get-ChildItem', 'cmd'])
+  assert.deepEqual(quotedHeads, [true, false, true])
+  // The `&` call operator is a separator, so it is the third fragment's lead —
+  // that is exactly what marks the quoted head as an invoked command.
+  assert.deepEqual(leadSeps, [undefined, ';', '&'])
+})
+
+test('isCommandPosition: quoted heads are output unless explicitly invoked', () => {
+  const chain = makeChain('"banner"; & "cmd"; . "x.ps1"')
+  assert.equal(isCommandPosition(chain[0].words, chain[0].quoted, chain[0].leadSep), false)
+  assert.equal(isCommandPosition(chain[1].words, chain[1].quoted, chain[1].leadSep), true)
+  assert.equal(isCommandPosition(chain[2].words, chain[2].quoted, chain[2].leadSep), true)
+})
+
+test('isComputedCommandName: only a head that starts with $( is a computed name', () => {
+  assert.equal(isComputedCommandName('$(x)', true), true)
+  // Merely containing a subexpression is an expression, not a command name.
+  assert.equal(isComputedCommandName('if($x){$(x)b}', true), false)
+  assert.equal(isComputedCommandName('$(x)', false), false)
+  assert.equal(isComputedCommandName('getcontent', true), false)
 })
 
 test('unwrapFragment: skips $var / & / . prefixes, normalizes dashes', () => {

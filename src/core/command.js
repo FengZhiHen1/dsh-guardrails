@@ -21,38 +21,98 @@ export const normalizeCommand = (word) => word.toLowerCase().replace(/-/g, '')
  * Quotes and backtick escapes are resolved into word content; separators are
  * `;` newlines `|` `&` (incl. `&&`/`||` pairs).
  *
- * @returns `{ tokens, nested }` — tokens in order; nested holds each raw
- *   `$(...)` body (paren-balanced, quote-aware).
+ * Two quote facts the downstream passes depend on:
+ * - a word token carries `quoted: true` when the word STARTS with a quote, i.e.
+ *   it came from a quoted literal rather than a bare command name. PowerShell
+ *   evaluates a bare string in statement position as output, and `"cmd" arg` is
+ *   a parse error, so a quoted-start head is never an invoked command;
+ * - `$(...)` inside a DOUBLE-quoted span is an interpolated subexpression and is
+ *   collected into `nested` (single quotes are literal in PowerShell and never
+ *   interpolate). Without this, a destructive command embedded in an
+ *   interpolated string was invisible to both the text-reference and the
+ *   destructive passes.
+ *
+ * @returns `{ tokens, nested }` — tokens in order, each word token carrying
+ *   `quoted`; nested holds each raw subexpression body (paren-balanced,
+ *   quote-aware), from bare and double-quoted positions alike.
  */
 export function tokenizePwsh(command) {
   const tokens = []
   const nested = []
   let word = ''
+  let wordQuoted = false
   let i = 0
   const n = command.length
   const flush = () => {
     if (word) {
-      tokens.push({ kind: 'word', value: word })
+      tokens.push({ kind: 'word', value: word, quoted: wordQuoted })
       word = ''
+      wordQuoted = false
     }
+  }
+  // Extract one balanced `$(...)` body whose opening paren sits at `i + 1`.
+  // Quote-aware: a paren inside a quoted string is content, not nesting, so
+  // `$(Write-Output "a)b")` yields the whole body instead of stopping at `a`.
+  // Single quotes are literal (`''` escapes a quote). Inside double quotes a
+  // backtick escapes the next character, and a nested `$(` opens its own group.
+  const readSubexpression = () => {
+    let depth = 1
+    let j = i + 2
+    let quote = null
+    while (j < n && depth > 0) {
+      const ch = command[j]
+      if (quote === "'") {
+        if (ch === "'") {
+          if (command[j + 1] === "'") { j += 2; continue }
+          quote = null
+        }
+        j += 1
+        continue
+      }
+      if (quote === '"') {
+        if (ch === '`') { j += 2; continue }
+        if (ch === '"') { quote = null; j += 1; continue }
+        if (ch === '$' && command[j + 1] === '(') { depth += 1; j += 2; continue }
+        // A `)` inside the quoted text still closes a `$(` opened inside it,
+        // so the group opened above must be balanced here; plain parens that
+        // are just string content leave depth untouched.
+        if (ch === ')' && depth > 1) { depth -= 1; j += 1; continue }
+        j += 1
+        continue
+      }
+      if (ch === "'" || ch === '"') { quote = ch; j += 1; continue }
+      if (ch === '`') { j += 2; continue }
+      if (ch === '(') depth += 1
+      else if (ch === ')') depth -= 1
+      j += 1
+    }
+    return { inner: command.slice(i + 2, j - 1), end: j }
   }
   while (i < n) {
     const c = command[i]
     if (c === "'" || c === '"') {
       const quote = c
+      const startsWord = word === ''
       i += 1
-      let content = ''
       while (i < n && command[i] !== quote) {
         if (command[i] === '`' && i + 1 < n) {
-          content += command[i + 1]
+          word += command[i + 1]
           i += 2
           continue
         }
-        content += command[i]
+        // Only double quotes interpolate; single-quoted content is literal.
+        if (quote === '"' && command[i] === '$' && command[i + 1] === '(') {
+          const { inner, end } = readSubexpression()
+          if (inner) nested.push(inner)
+          word += '$(x)'
+          i = end
+          continue
+        }
+        word += command[i]
         i += 1
       }
       i += 1
-      word += content
+      if (startsWord) wordQuoted = true
       continue
     }
     if (c === '`') {
@@ -65,17 +125,10 @@ export function tokenizePwsh(command) {
       continue
     }
     if (c === '$' && command[i + 1] === '(') {
-      let depth = 1
-      let j = i + 2
-      while (j < n && depth > 0) {
-        if (command[j] === '(') depth += 1
-        else if (command[j] === ')') depth -= 1
-        j += 1
-      }
-      const inner = command.slice(i + 2, j - 1)
+      const { inner, end } = readSubexpression()
       if (inner) nested.push(inner)
       word += '$(x)'
-      i = j
+      i = end
       continue
     }
     if (c === ';' || c === '\n' || c === '\r' || c === '|' || c === '&') {
@@ -107,26 +160,82 @@ export function tokenizePwsh(command) {
 /**
  * Split tokens into fragments at separators, keeping the separator values.
  *
- * @returns `{ fragments, seps }` — `fragments[i]` is the word list of command
- *   i; `seps[i]` is the separator between fragments i and i+1.
+ * @returns `{ fragments, seps, quotedHeads, leadSeps }` — `fragments[i]` is the
+ *   word list of command i; `seps[i]` is the separator between fragments i and
+ *   i+1; `quotedHeads[i]` records whether fragment i's FIRST word came from a
+ *   quoted literal; `leadSeps[i]` is the separator that immediately precedes
+ *   fragment i (undefined at the start of the text). The last two are what let
+ *   the statement-position checks tell an invoked command from a bare string
+ *   evaluated as output.
  */
 export function splitFragments(tokens) {
   const fragments = []
   const seps = []
+  const quotedHeads = []
+  const leadSeps = []
   let current = []
+  let currentQuoted = false
+  let pendingSep
+  const push = () => {
+    fragments.push(current)
+    quotedHeads.push(currentQuoted)
+    leadSeps.push(pendingSep)
+    current = []
+    currentQuoted = false
+    pendingSep = undefined
+  }
   for (const t of tokens) {
     if (t.kind === 'sep') {
-      if (current.length) {
-        fragments.push(current)
-        current = []
-      }
+      if (current.length) push()
       seps.push(t.value)
+      pendingSep = t.value
       continue
     }
+    if (current.length === 0 && t.quoted === true) currentQuoted = true
     current.push(t.value)
   }
-  if (current.length) fragments.push(current)
-  return { fragments, seps }
+  if (current.length) push()
+  return { fragments, seps, quotedHeads, leadSeps }
+}
+
+/**
+ * Whether a fragment's head is a computed COMMAND NAME — the only shape where
+ * "the command itself is dynamic" is a real statement about an invocation.
+ *
+ * The test is deliberately narrow: the head word must START with `$(`. A word
+ * that merely contains a subexpression later on is an expression, not a command
+ * name — `if ($x) { 'a' } else { "$($_.Length)B" }` is a control expression
+ * whose head is `if`, and PowerShell never resolves a command name from it.
+ * Widening this test to `includes('$(')` is what produced the 2026-09-29 false
+ * positives, where ordinary interpolated output was read as a dynamic command.
+ *
+ * @param cmd - the fragment's normalized head word.
+ * @param inCommandPosition - whether the fragment is invoked at all
+ *   (see {@link isCommandPosition}).
+ */
+export const isComputedCommandName = (cmd, inCommandPosition) =>
+  inCommandPosition && cmd.startsWith('$(')
+
+/**
+ * Whether a fragment sits in command position — i.e. PowerShell invokes
+ * something there, rather than just evaluating a value.
+ *
+ * A fragment that starts with a quoted literal is normally a bare string in
+ * statement position: PowerShell writes it to the output stream, and appending
+ * arguments to it (`"cmd" arg`) is a parse error, so it can never be the
+ * invoked command. The two exceptions are explicit invocation:
+ * - a leading `&` call operator (which the lexer records as this fragment's
+ *   `leadSep`), and
+ * - a leading `.` dot-source word, which `unwrapFragment` already skips past.
+ *
+ * @param words - the fragment's word list.
+ * @param quotedHead - whether the fragment's first word came from a quote.
+ * @param leadSep - the separator immediately preceding the fragment.
+ */
+export function isCommandPosition(words, quotedHead, leadSep) {
+  if (!quotedHead) return true
+  if (leadSep === '&') return true
+  return words[0] === '&' || words[0] === '.'
 }
 
 /**
@@ -268,7 +377,7 @@ function scanWordSpans(command) {
           i += 1
         }
         if (i < n) i += 1
-        quotes.push({ start: quoteStart, end: Math.min(i, n), content })
+        quotes.push({ start: quoteStart, end: Math.min(i, n), content, quote: c })
         continue
       }
       i += 1
@@ -285,8 +394,22 @@ function scanWordSpans(command) {
  * whitespace), so blanking such a span cannot hide a reference to it. A span
  * carrying a separator stays under the full rules, which is what keeps
  * `"C:\Program Files\x\.git"` and `'.git/config'` blocked.
+ *
+ * A DOUBLE-quoted span containing `$(` is NOT prose: PowerShell interpolates and
+ * executes that subexpression. Blanking it was how
+ * `Write-Output "$(Get-Content .env)"` escaped the text-reference checks
+ * entirely — the citation argument above (a filename cannot be the `.git`
+ * directory) says nothing about evaluated code, so the exemption must not extend
+ * to it. Single quotes are literal in PowerShell and never interpolate, so they
+ * keep the ordinary prose exemption.
+ *
+ * @param content - the quoted span's content.
+ * @param quote - the quote character that delimited the span.
  */
-const isProseSpan = (content) => /\s/.test(content) && !/[\\/]/.test(content)
+const isProseSpan = (content, quote) =>
+  /\s/.test(content) &&
+  !/[\\/]/.test(content) &&
+  !(quote === '"' && content.includes('$('))
 
 /**
  * Blank out spans of a command that merely *cite* a sensitive name, so the
@@ -308,7 +431,7 @@ export function maskTextSpans(command) {
   for (let k = 0; k < words.length; k += 1) {
     const word = words[k]
     for (const quote of word.quotes) {
-      if (isProseSpan(quote.content)) spans.push([quote.start, quote.end])
+      if (isProseSpan(quote.content, quote.quote)) spans.push([quote.start, quote.end])
     }
     if (!word.raw.startsWith('-')) continue
     const colon = word.raw.indexOf(':')
@@ -590,15 +713,26 @@ export const CONTENT_VERBS = new Set([
  * a content/removal verb, the target cannot be statically verified — block
  * conservatively (the same intent rephrased differently remains unverifiable).
  *
+ * Statement position and head shape both matter, and both are narrow on purpose:
+ * - a fragment whose first word is a quoted literal is a bare string evaluated
+ *   as output, not an invoked command — PowerShell rejects `"cmd" arg` outright;
+ * - a computed command name is a word that STARTS with `$(`. A word merely
+ *   containing one is an expression (`if (…) { … "$(…)" … }`) whose head is a
+ *   keyword, and PowerShell resolves no command name from it.
+ * Both interpolations are still judged: the recursive pass in `checkCommand`
+ * runs every embedded subexpression through this same pipeline.
+ *
  * @returns `{ text }` describing the unverifiable construct, or `null`.
  */
 export function assessUnverifiable(resolved) {
   const { tokens } = tokenizePwsh(resolved)
-  const { fragments } = splitFragments(tokens)
-  for (const words of fragments) {
+  const { fragments, quotedHeads, leadSeps } = splitFragments(tokens)
+  for (let f = 0; f < fragments.length; f += 1) {
+    const words = fragments[f]
     const invocation = unwrapFragment(words)
     if (!invocation) continue
-    if (invocation.cmd.includes('$(')) {
+    const inCommandPosition = isCommandPosition(words, quotedHeads[f], leadSeps[f])
+    if (isComputedCommandName(invocation.cmd, inCommandPosition)) {
       return {
         text: 'the command itself is computed from a dynamic expression and cannot be verified',
       }
