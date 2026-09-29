@@ -1,5 +1,16 @@
 # TODO
 
+> 本文件只记**待办**。已完成的实录与取证归档在 `technical-details/部署.md`（v1.7.0 挂载与实测场清理）与各 `decisions/`。
+
+## v1.7.0（DSR-012）待办（2026-09-29）
+
+- [ ] **web（stable-dev）挂载 v1.7.0** —— 待用户执行。命令、前置条件与实测取证见 `technical-details/部署.md`「v1.7.0 挂载与实测场清理实录」。要点：① 须先在启动器 GUI 停 `stable-dev` 实例（该实例正是本会话所在的 3080 进程，重启会中断会话）；② 用钉 ref 的 `github:` spec `#1cc9bc5ec8ef3d967538792aebfc23b3c0f73b86`；③ 改的是 Host 半侧 ⇒ **必须重启实例才生效**；④ 重启后复查 `--dump-config` 无异常 + 启动无 `N entries did not activate`。
+- [ ] **npm 发布 + 切换 web 为 registry 依赖**（`dsh plugin --profile web add dsh-guardrails`）—— 未开始。⚠️ 用户已明确指示**本轮不做功能冒烟**（"程序性的应该没问题"），故 v1.7.0 的实例级实测门禁**未按 AGENTS.md「发布前置门禁」完整履行**（agent 侧仅完成：单测 155/155、行覆盖 98.55%、分层门禁、`npm run check`、`quality_floor`、性能与消融、挂载模块离线断言）。若发布前需补齐，须重新挂载 test 实测场（见下条）。
+- [ ] **test 实测场已清空 ⇒ 无可用实测载体**（2026-09-29 按用户指令清理）。test profile 已回归纯净壳（bundles 仅 base + web-app；0 个自研 symlink；patch 层无插件 insert 行）。**任何后续"test 实测"须先按 `technical-details/部署.md` 重新挂载**。备份在 `tmp/test-profile-backup-20260929/`（原 `package.json`/`cordis.patch.yml`/`pnpm-lock.yaml` + symlink 清单；`tmp/` 已 gitignore，属**临时**备份、不入库）。
+- [ ] **`skill-manager-baseline.mjs gate` 现为红灯（R4）** —— 这是清空 test 的**预期后果**，非故障：R4 检查的 skill-manager 配置载体（那条 patch insert 行）已被移除。含义是「test 目前不具备开 skill-manager 实测的条件」。要做 skill-manager 场地实测前须先处置。
+- [ ] **test HOME 数据残留待用户决定** —— `skill-manager/`（含 `backups/yao-meta-skill-20260909082000435/`，722 文件）、`unity-search/readings/`、`deepseek-harness-background/up-e5f94106….jpg`（6.3 MB）。**未删**：其中该备份目录经查在 `E:\Project\Skills\skills`、`E:\Project\Skills-test\skills` 及别处**均无同名副本**，很可能是唯一副本，按破坏性操作纪律不予删除。
+- [ ] **test 启动时的 `2 entries did not activate` 已随清理消失，但根因未修** —— 来源是 `skill-manager` / `unity-search` 的 `cannot get property "webServer" without inject`（既有问题，与本插件无关；同一日志中更早的运行同样出现）。属那两个插件的待办。
+
 ## v1.6.0（0.1.7-rc.2 适配）的 test 实测门禁 —— **已通过**（2026-09-27，`test` 实例）
 
 用户授权后，由 agent 经 `dshl instances restart test --profile test`（正规通道，非手工 spawn）在 `test` 实例（运行时 `0.1.7-rc.2`，pid 12152，`--profile test`）执行。挂载形态 `link:E:\Project\DSH_Plugins\plugins\dsh-guardrails`——**test 专属，web 仍只吃发布包 / `github:` git 依赖**。两插件均为只读型（不写配置目录及其派生现场），适用 AGENTS.md 隔离红线的只读例外，故未跑 `skill-manager-baseline.mjs gate`。

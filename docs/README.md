@@ -17,7 +17,7 @@
 - **审计日志可诊断性（v1.7.0）**：审计行上限 140 字符，而拒绝消息前缀已占 112 ⇒ 命令**只剩 28 字符**，导致上述根因无法从日志直接定位（每条都像以赋值开头）。改为 400 字符上限 + 对 pwsh 追加独立 `denied input:` 行（文本引用类拒绝消息不含命令，此前事后无法归因）。
 - 工程化设计：2026-08-17 经用户确认，结构重构已随 v1.0.0 落地；v1.4.0 按仓库 core/adapter 约定二次分层，见 [工程结构与测试体系.md](technical-details/工程结构与测试体系.md)。
 - 已实现设计（2026-08 定稿，v1.1.0 落地）：**防御层全量配置化**——类别键扩展为布尔/对象（操作级叶子 `read`/`modify`/`list`/`write`）、`destructive` 拆分六子族（git/machine/eval/cli/bulk/target）、新增 `unverifiable` 键，见 [DSR-006](decisions/DSR-006-防御层全量配置化.md) 与 [需求.md](需求.md) R-03。
-- 部署：test profile 源码直挂（`link:` 符号链接，重启生效）；web profile 当前以 `github:` 钉 ref 的 git 依赖（`FengZhiHen1/dsh-guardrails`）挂载——只读快照，非源码直挂（AGENTS.md 红线：web 只吃发布物），发布后切换 registry 版本。**运行时基线 `0.1.7-rc.2` 及以后**。
+- 部署：**test 实测场按需直挂、用完即清**（`link:` 符号链接，源码改动重启即生效；2026-09-29 已按指令清空为纯净壳，重挂命令见 [部署.md](technical-details/部署.md)）；**web profile 只吃发布物**——当前以 `github:` git 依赖（`FengZhiHen1/dsh-guardrails`，spec 无 ref、lockfile 承载 resolution）挂载，非源码直挂（AGENTS.md 红线），发布后切换 registry 版本。**运行时基线 `0.1.7-rc.2` 及以后**。
 - `missing evidence`：符号链接/Junction 的真实路径解析行为（现状为纯段运算，不解析链接）；跨平台（Linux/macOS）敏感清单；`reg` 注册表类命令文本的覆盖范围。
 
 ## 阅读顺序
@@ -34,5 +34,5 @@
 | `technical-details/README.md` | 技术细节目录的阅读顺序与文档地图 |
 | `technical-details/规则模型.md` | 敏感类别 × 操作类型矩阵、路径级与命令文本级检查、名单结构与 fail 语义 |
 | `technical-details/命令文本分析.md` | PowerShell 命令文本词法、语句位置、动词分类、列举模式判定、子表达式递归、破坏性分析与固有限制 |
-| `technical-details/部署.md` | 包形态、部署红线、安装验证、生效流程、测试体系与发布路径 |
+| `technical-details/部署.md` | 包形态、部署红线、安装验证、生效流程、挂载与实测场清理实录、测试体系与发布路径 |
 | `decisions/` | 真实重大取舍的备选、评价、后果与重访条件 |
