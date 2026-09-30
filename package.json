@@ -28,7 +28,8 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "check": "node --check index.js && node --check src/core/rules.js && node --check src/core/path-check.js && node --check src/core/command.js && node --check src/core/destructive.js && node --check src/core/deny-messages.js && node --check src/core/check-command.js && node --check src/adapter/host.js && node --check src/client/card.js && node --test test/*.test.mjs",
-    "verify": "node verify/run-verify.mjs"
+    "verify": "node verify/run-verify.mjs",
+    "corpus": "node tools/corpus-replay.mjs"
   },
   "engines": {
     "node": "^22.19.0 || >=24"

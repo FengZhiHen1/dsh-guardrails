@@ -15,6 +15,12 @@
 - 审计行上限 140 字符，而拒绝消息前缀已占 **112** ⇒ 日志里命令**只剩 28 字符**，正是上面根因长期无法从日志定位的原因（每条都像以赋值开头）。改为 `AUDIT_LINE_MAX = 400`（覆盖拒绝消息内嵌的 200 字符预览）+ 对 pwsh 追加独立 `[guardrails] denied input:` 行——文本引用类拒绝消息本身**不含命令**，此前事后完全无法归因。
 - **补测（R-16 此前零覆盖）**：新增 `test/audit-log.test.mjs` 7 例，钉住「一次 pwsh 拒绝 = 一条两行日志（受限 rationale + `denied input:`）」「命令 400 字符内逐字可还原、超出以 `…` 标记」「多行命令折叠成单行」「path 通道**不**出第二行（其 reason 已引路径）」「放行调用零日志」「两次拒绝两条、不合并」。经消融验证检测力：把上限退回 140 并摘掉 `denied input:` 行后 **7 例中 5 例转红**（余 2 例不涉及被改代码）。
 
+### 取证工具入库：`tools/corpus-replay.mjs`
+
+- 替代 `tmp/` 下 15 个各自重复实现「会话日志遍历 + zstd 多帧解码 + 命令抽取」的探针（`tmp/` 已 gitignore ⇒ 每轮清理即丢失）。只读重放真实 pwsh 命令并分类统计，支持 `--json` 快照与 `--baseline` 前后对比（语料规模变化时显式告警）。
+- ❌ 不进 `npm test`：语料位于用户 HOME（AGENTS.md 禁止入仓）、随保留窗口漂移、绝对数每次都变——它是**取证工具**而非测试，其发现固化后才写成 `test/` 里的断言。已显式排除出 `package.json` 的 `files`，不随 npm 发布。
+- 实测（`stable-dev` HOME，4 天窗口）：257 个会话文件、14691 条去重命令、139 条被拦（**0.95%**）；`unverifiable:command` 仅 4 条（DSR-012 前为 413 条量级）。
+
 ### 测试与验证
 
 - 测试 145 → **162**：`command.test.mjs` +6（词带引号来源 / 双引号插值提取 / 配平引号感知 / `splitFragments` 新出口 / `isCommandPosition` / `isComputedCommandName`），`guard.integration.test.mjs` +4（DSR-012 端到端正反 3 例 + 单引号字面量 1 例），`audit-log.test.mjs` +7（R-16，见上）。
