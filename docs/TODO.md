@@ -4,6 +4,10 @@
 
 ## v1.7.0（DSR-012）待办（2026-09-29）
 
+- [x] **R-16 审计日志测试补覆盖**（2026-09-30 完成）—— 新增 `test/audit-log.test.mjs` 7 例；消融验证：上限退回 140 + 摘掉 `denied input:` 后 5/7 转红。单测 155 → 162。
+- [ ] **`MAX_SUBEXPRESSION_DEPTH = 8` 的深度上界无干净实测** —— 用敏感字面量埋深测不出（顶层文本引用层直接看见整条命令），须改用**只有破坏性层才认**的危害（如深埋 `git reset --hard`）才能判定上界处是「放行（到达上界）」还是「仍拦（顶层已命中）」。当前**只知道上界存在、不知道其实际行为**，未登记为已验证。
+- [ ] **`tmp/guardrails-snapshot/` 与 `guardrails-oldvsnew.mjs` 可清理** —— 旧 core 快照用于 DSR-012 新旧对比，改动已合入 ⇒ 无参考价值（`oldvsnew` 已失效）。未删，待用户过目。
+
 - [ ] **web（stable-dev）挂载 v1.7.0** —— 待用户执行。命令、前置条件与实测取证见 `technical-details/部署.md`「v1.7.0 挂载与实测场清理实录」。要点：① 须先在启动器 GUI 停 `stable-dev` 实例（该实例正是本会话所在的 3080 进程，重启会中断会话）；② 用钉 ref 的 `github:` spec `#1cc9bc5ec8ef3d967538792aebfc23b3c0f73b86`；③ 改的是 Host 半侧 ⇒ **必须重启实例才生效**；④ 重启后复查 `--dump-config` 无异常 + 启动无 `N entries did not activate`。
 - [ ] **npm 发布 + 切换 web 为 registry 依赖**（`dsh plugin --profile web add dsh-guardrails`）—— 未开始。⚠️ 用户已明确指示**本轮不做功能冒烟**（"程序性的应该没问题"），故 v1.7.0 的实例级实测门禁**未按 AGENTS.md「发布前置门禁」完整履行**（agent 侧仅完成：单测 155/155、行覆盖 98.55%、分层门禁、`npm run check`、`quality_floor`、性能与消融、挂载模块离线断言）。若发布前需补齐，须重新挂载 test 实测场（见下条）。
 - [ ] **test 实测场已清空 ⇒ 无可用实测载体**（2026-09-29 按用户指令清理）。test profile 已回归纯净壳（bundles 仅 base + web-app；0 个自研 symlink；patch 层无插件 insert 行）。**任何后续"test 实测"须先按 `technical-details/部署.md` 重新挂载**。备份在 `tmp/test-profile-backup-20260929/`（原 `package.json`/`cordis.patch.yml`/`pnpm-lock.yaml` + symlink 清单；`tmp/` 已 gitignore，属**临时**备份、不入库）。

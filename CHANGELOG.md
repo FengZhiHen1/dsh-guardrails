@@ -13,10 +13,11 @@
 ### 修复：审计日志此前无法定位命令
 
 - 审计行上限 140 字符，而拒绝消息前缀已占 **112** ⇒ 日志里命令**只剩 28 字符**，正是上面根因长期无法从日志定位的原因（每条都像以赋值开头）。改为 `AUDIT_LINE_MAX = 400`（覆盖拒绝消息内嵌的 200 字符预览）+ 对 pwsh 追加独立 `[guardrails] denied input:` 行——文本引用类拒绝消息本身**不含命令**，此前事后完全无法归因。
+- **补测（R-16 此前零覆盖）**：新增 `test/audit-log.test.mjs` 7 例，钉住「一次 pwsh 拒绝 = 一条两行日志（受限 rationale + `denied input:`）」「命令 400 字符内逐字可还原、超出以 `…` 标记」「多行命令折叠成单行」「path 通道**不**出第二行（其 reason 已引路径）」「放行调用零日志」「两次拒绝两条、不合并」。经消融验证检测力：把上限退回 140 并摘掉 `denied input:` 行后 **7 例中 5 例转红**（余 2 例不涉及被改代码）。
 
 ### 测试与验证
 
-- 测试 145 → 155：`command.test.mjs` +6（词带引号来源 / 双引号插值提取 / 配平引号感知 / `splitFragments` 新出口 / `isCommandPosition` / `isComputedCommandName`），`guard.integration.test.mjs` +4（DSR-012 端到端正反 3 例 + 单引号字面量 1 例）。
+- 测试 145 → **162**：`command.test.mjs` +6（词带引号来源 / 双引号插值提取 / 配平引号感知 / `splitFragments` 新出口 / `isCommandPosition` / `isComputedCommandName`），`guard.integration.test.mjs` +4（DSR-012 端到端正反 3 例 + 单引号字面量 1 例），`audit-log.test.mjs` +7（R-16，见上）。
 - 行覆盖 **98.55%**（门禁 ≥80%）；分层门禁通过（core 6 文件）；`npm run check` 全绿；`quality_floor` **PASS**（0 error）。
 - ⚠️ **`verify/run-verify.mjs` 第 3 步（test profile 组合断言）本次 FAIL**：`homes\test` 的 `test` profile 当前 `dependencies` 0 条、`bundles` 仅 `dsh-base`+`dsh-web-app`（本插件行未装）——这是**部署状态**，与本次源码改动无关（改动只落在 `src/`）。发布/挂载 web 前须先按门禁流程在 test 实例装载本版本并重跑；第 4 步启动冒烟按 `DSH_VERIFY_SKIP_BOOT_SMOKE=1` 跳过，**由用户在启动器侧补做**。
 - ⚠️ 实例级门禁**尚未执行**（需重启 test 实例，agent 不得自行重启）⇒ 按 AGENTS.md，本版本**尚不可发布/挂载 web**。
