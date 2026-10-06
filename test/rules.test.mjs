@@ -14,6 +14,7 @@ import {
   CRED_SUFFIXES,
   CRED_TEXT_REFERENCE,
   CRED_TEXT_REFERENCE_STRICT,
+  CRED_TEXT_SUFFIXES,
   ENV_REFERENCE,
   GIT_DIR_REFERENCE,
   SAFE_CRED_DIR_FILES,
@@ -60,6 +61,28 @@ test('credentials: non-matching paths stay allowed', () => {
   assert.equal(pathTargetsCredentials('C:/Users/me/.ssh-key-pair-docs/id_rsa_example.txt'), false)
   assert.equal(pathTargetsCredentials('E:/repo/readme.md'), false)
   assert.equal(pathTargetsCredentials('E:/repo/.env.example'), false)
+})
+
+test('DSR-014: private-key suffixes match in the text channel, except .key', () => {
+  // Derived from CRED_SUFFIXES, so pin the derivation: every path-layer suffix
+  // must appear here EXCEPT .key, and .key must be the only omission.
+  assert.deepEqual(CRED_TEXT_SUFFIXES, CRED_SUFFIXES.filter((s) => s !== '.key'))
+  assert.equal(CRED_TEXT_SUFFIXES.includes('.key'), false)
+  assert.equal(CRED_SUFFIXES.includes('.key'), true) // path layer keeps it
+  for (const suffix of CRED_TEXT_SUFFIXES) {
+    assert.equal(CRED_TEXT_REFERENCE.test(`ssh -i C:/keys/prod${suffix} host`), true, suffix)
+    assert.equal(CRED_TEXT_REFERENCE_STRICT.test(`ssh -i C:/keys/prod${suffix} host`), true, suffix)
+    // Public keys stay free, matching the path layer's .pub exclusion.
+    assert.equal(CRED_TEXT_REFERENCE.test(`Get-Content C:/keys/prod${suffix}.pub`), false, `${suffix}.pub`)
+  }
+  // The deliberate .key exclusion: text layer ignores it (property-access noise),
+  // while the path layer still blocks the real file.
+  assert.equal(CRED_TEXT_REFERENCE.test('ssh -i C:/keys/prod.key host'), false)
+  assert.equal(pathTargetsCredentials('C:/keys/prod.key'), true)
+  // The 100%-false-positive forms that motivated the exclusion stay free.
+  for (const expr of ['$_.Key', 'event.key', '[section.key']) {
+    assert.equal(CRED_TEXT_REFERENCE.test(expr), false, expr)
+  }
 })
 
 test('DSR-013: SAFE_CRED_DIR_FILES exempts only the named final segment', () => {

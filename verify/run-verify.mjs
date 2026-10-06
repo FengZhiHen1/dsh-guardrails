@@ -21,11 +21,17 @@
 //                    global install (cross-generation risk — warns).
 //   DSH_TEST_HOME  — HOME of the test instance (boot smoke + test profile).
 //   DSH_WEB_HOME   — HOME hosting the stable web profile (dependency spec
-//                    assertion). Both default to DSH_HOME ?? ~/.dsh — and that
-//                    default silently points at the legacy global HOME, which
-//                    makes step 3 report a bogus "test 行数=0" against a HOME
-//                    that has nothing to do with the instance. The resolved
-//                    homes are echoed at startup: read them.
+//                    assertion).
+//   All four default to values DERIVED FROM `dshl env --json` (see
+//   resolveEnvFacts below), which is the authoritative on-disk source for the
+//   instance/version/bin triple (AGENTS.md: 版本号不写死，现查). They used to
+//   default to `~/.dsh` + a legacy global CLI — a combination that has nothing
+//   to do with any launcher-managed instance, so step 3 reported a bogus
+//   "test 行数=0" FAIL against the wrong HOME, and step 4 exited instantly
+//   because that HOME has no `test` profile. A mis-targeted check must not be
+//   reportable as a real failure: when a target cannot be resolved at all the
+//   steps now SKIP with the reason instead of FAILing.
+//   The resolved values are echoed at startup: read them.
 //   DSH_VERIFY_SKIP_BOOT_SMOKE — 1/true/yes skips step 4. Step 4 spawns a REAL
 //                    DSH instance, which an agent must never do (AGENTS.md:
 //                    instance start/stop goes through the launcher GUI or dshl;
@@ -44,23 +50,60 @@ const ROOT = join(HERE, '..')
 // Glob form: `node --test <dir>` fails to resolve directories on Windows.
 const TESTS = join(ROOT, 'test', '*.test.mjs')
 const HARNESS = process.env.DSH_HARNESS_ROOT ?? 'E:/Project/Open_Source/deepseek-harness'
+// Repo tool that owns the launcher config surface (instances/HOME/version/bin).
+const DSHL = join(ROOT, '..', '..', 'tools', 'dsh-launcher-cli', 'cli.mjs')
+
+/**
+ * Resolve the instance facts from `dshl env --json` — the authoritative source
+ * for version/bin/HOME (AGENTS.md: never hard-code versions, read them live).
+ * Returns `null` when the tool is unavailable or its output is unparsable, so
+ * callers can SKIP rather than assert against a guessed target.
+ *
+ * @returns `{ byName: Map<string, {home, bin}> } | null`
+ */
+function resolveEnvFacts() {
+  if (!existsSync(DSHL)) return null
+  const res = spawnSync(process.execPath, [DSHL, 'env', '--json'], { encoding: 'utf8' })
+  if (res.status !== 0 || !res.stdout) return null
+  try {
+    const parsed = JSON.parse(res.stdout)
+    const byName = new Map()
+    for (const inst of parsed.instances ?? []) {
+      byName.set(inst.name, { home: inst.home, bin: inst.version_bin })
+    }
+    return { byName }
+  } catch {
+    return null
+  }
+}
+const FACTS = resolveEnvFacts()
+/** Pick an instance fact by preference order (e.g. `dev` then `test`). */
+const factFor = (...names) => {
+  for (const n of names) {
+    const hit = FACTS?.byName.get(n)
+    if (hit?.home) return hit
+  }
+  return undefined
+}
+
+// Explicit env wins; otherwise derive from the launcher facts. The stable web
+// profile lives in the stable-dev HOME; the test profile in the `test` instance.
+const WEB_FACT = factFor('stable-dev')
+const TEST_FACT = factFor('test')
 // 部署校验一律用实例版本二进制（AGENTS.md 红线 + dshl env 跨代告警）：
 // DSH_BIN 优先（dshl env --json → instances[].version_bin 现查）；源码检出
-// launcher 仅在显式设置 DSH_HARNESS_ROOT 时使用（开发者自担构建新鲜度）；
-// 最后的全局安装路径是 0.1.1 代际遗留，命中时打印告警。
+// launcher 仅在显式设置 DSH_HARNESS_ROOT 时使用（开发者自担构建新鲜度）。
+// 不再回落到"遗留全局 CLI"：那个回落在两个 HOME 上都指向错误的东西，
+// 是 2026-09-28 那次假失败的成因；宁可不判（SKIP）也不误判（FAIL）。
 const LAUNCHER = process.env.DSH_BIN
   ?? (process.env.DSH_HARNESS_ROOT
     ? join(HARNESS, 'apps', 'cli', 'lib', 'bin.js')
-    : 'C:/nvm4w/nodejs/node_modules/@deepseek-ai/dsh/lib/bin.js')
-if (!process.env.DSH_BIN && !process.env.DSH_HARNESS_ROOT) {
-  console.warn('⚠ 未设置 DSH_BIN：组合断言/启动冒烟将使用遗留全局 CLI（跨代校验风险，以 dshl env --json 的 instances[].version_bin 为准）')
-}
-const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-const TEST_HOME = process.env.DSH_TEST_HOME ?? DSH_HOME
-const WEB_HOME = process.env.DSH_WEB_HOME ?? DSH_HOME
+    : TEST_FACT?.bin ?? WEB_FACT?.bin)
+const TEST_HOME = process.env.DSH_TEST_HOME ?? TEST_FACT?.home
+const WEB_HOME = process.env.DSH_WEB_HOME ?? WEB_FACT?.home
 // web profile 属 stable-dev 实例（可能与 DSH_BIN 不同代际）：dump 校验用它
 // 自己的实例二进制（dshl env --json → instances[].version_bin 现查）。
-const WEB_BIN = process.env.DSH_WEB_BIN ?? LAUNCHER
+const WEB_BIN = process.env.DSH_WEB_BIN ?? WEB_FACT?.bin ?? LAUNCHER
 // Agent 侧绕过开关：第 4 步会 spawn 真实实例，agent 不得执行（AGENTS.md 红线）。
 // 置 1 跳过该步，其余步骤照跑。
 const SKIP_BOOT_SMOKE = /^(?:1|true|yes)$/i.test(process.env.DSH_VERIFY_SKIP_BOOT_SMOKE ?? '')
@@ -86,13 +129,15 @@ function runNpm(args, cwd) {
   return spawnSync(process.execPath, [NPM_CLI, ...args], { cwd, encoding: 'utf8' })
 }
 
-// Echo the resolved target so a fallback mis-target is visible up front instead
-// of surfacing as a bogus assertion failure three steps later.
+// Echo the resolved target so a mis-target is visible up front instead of
+// surfacing as a bogus assertion failure three steps later. `(未解析)` means the
+// corresponding step will SKIP rather than assert against a guessed HOME.
 console.log('--- 解析后的目标 ---')
-console.log(`  launcher    ${LAUNCHER}`)
-console.log(`  test home   ${TEST_HOME}`)
-console.log(`  web  home   ${WEB_HOME}`)
-console.log(`  web  bin    ${WEB_BIN}`)
+console.log(`  来源        ${FACTS ? 'dshl env --json（现查）' : '不可用 —— 未解析项将 SKIP'}`)
+console.log(`  launcher    ${LAUNCHER ?? '(未解析)'}`)
+console.log(`  test home   ${TEST_HOME ?? '(未解析)'}`)
+console.log(`  web  home   ${WEB_HOME ?? '(未解析)'}`)
+console.log(`  web  bin    ${WEB_BIN ?? '(未解析)'}`)
 console.log(`  第 4 步启动冒烟  ${SKIP_BOOT_SMOKE ? '已跳过（DSH_VERIFY_SKIP_BOOT_SMOKE）' : '将执行（会 spawn 真实实例）'}`)
 
 // 1. unit + integration
@@ -126,15 +171,15 @@ if (cov.status === 0) {
 
 // 3. composition assertions
 if (!existsSync(LAUNCHER)) {
-  step('组合断言', false, `launcher 不存在：${LAUNCHER}（设置 DSH_BIN）`)
+  skip('组合断言', `目标二进制无法解析：${LAUNCHER ?? '(未设置 DSH_BIN，且 dshl env 不可用)'} —— 设置 DSH_BIN 或让 tools/dsh-launcher-cli 可用`)
 } else {
   // A stable profile must never mount source: the dependency spec must be a
   // release form (registry range or a tarball), never `link:`/`file:` into a
   // source directory, and the resolved node_modules entry must not be a
   // junction/symlink back to source. The stable web profile lives in the
   // launcher-managed stable-dev HOME (DSH_WEB_HOME).
-  const webManifestPath = join(WEB_HOME, 'profiles', 'web', 'package.json')
-  const webDep = existsSync(webManifestPath)
+  const webManifestPath = WEB_HOME ? join(WEB_HOME, 'profiles', 'web', 'package.json') : undefined
+  const webDep = webManifestPath && existsSync(webManifestPath)
     ? JSON.parse(readFileSync(webManifestPath, 'utf8')).dependencies?.['dsh-guardrails']
     : undefined
   const releaseSpec = typeof webDep === 'string'
@@ -142,8 +187,15 @@ if (!existsSync(LAUNCHER)) {
     && (webDep.startsWith('^') || webDep.startsWith('~') || /\.tgz$/.test(webDep)
       || /^github:/.test(webDep) || /^git\+https:\/\//.test(webDep))
   for (const [profile, home, bin] of [['test', TEST_HOME, LAUNCHER], ['web', WEB_HOME, WEB_BIN]]) {
+    const label = `组合：${profile} 恰一行且解析自 dsh-guardrails`
+    // An unresolved target is a SKIP, not a FAIL: asserting against a guessed
+    // HOME is how this script used to report a bogus "行数=0" failure.
+    if (!home) {
+      skip(label, `未解析到 ${profile} 实例的 HOME（设置 ${profile === 'web' ? 'DSH_WEB_HOME' : 'DSH_TEST_HOME'}，或让 dshl env 可用）`)
+      continue
+    }
     if (!existsSync(bin)) {
-      step(`组合：${profile} 恰一行且解析自 dsh-guardrails`, false, `二进制不存在：${bin}（设置 ${profile === 'web' ? 'DSH_WEB_BIN' : 'DSH_BIN'}）`)
+      skip(label, `二进制不存在：${bin}（设置 ${profile === 'web' ? 'DSH_WEB_BIN' : 'DSH_BIN'}）`)
       continue
     }
     const env = { ...process.env, DSH_HOME: home }
@@ -151,7 +203,7 @@ if (!existsSync(LAUNCHER)) {
     const out = `${dump.stdout ?? ''}\n${dump.stderr ?? ''}`
     const rowCount = (out.match(/id: guardrails/g) ?? []).length
     const resolved = /name: dsh-guardrails/.test(out)
-    step(`组合：${profile} 恰一行且解析自 dsh-guardrails`, rowCount === 1 && resolved, `行数=${rowCount}`)
+    step(label, rowCount === 1 && resolved, `行数=${rowCount}`)
   }
   step(
     '组合：web 依赖为发布物形态（registry 范围、tarball 或 github: 钉 ref，非源码直挂）',
@@ -184,7 +236,8 @@ async function bootSmoke() {
   // SSH 变量非空 → web-runtime 跳过默认浏览器交接（--no-open 在
   // `-profile` 透传形态下易被 launcher/commander 误解析，交给环境开关）。
   const env = { ...process.env, DSH_HOME: TEST_HOME, SSH_CONNECTION: '1', SSH_TTY: '1' }
-  if (!existsSync(LAUNCHER)) return { ok: false, detail: `launcher 不存在：${LAUNCHER}（设置 DSH_BIN）` }
+  if (!TEST_HOME) return { skip: true, detail: '未解析到 test 实例的 HOME（设置 DSH_TEST_HOME）——不猜目标，跳过而非误判' }
+  if (!existsSync(LAUNCHER)) return { skip: true, detail: `launcher 不存在：${LAUNCHER}（设置 DSH_BIN）` }
   const child = spawn(
     process.execPath,
     // 第一个 `--` 由 launcher 消耗（apps/cli/src/args.ts），`--port 0` 送达应用。
@@ -225,7 +278,8 @@ if (SKIP_BOOT_SMOKE) {
   )
 } else {
   const smoke = await bootSmoke()
-  step('发布门禁：test profile 启动冒烟（无崩溃）', smoke.ok, smoke.detail)
+  if (smoke.skip) skip('发布门禁：test profile 启动冒烟（无崩溃）', smoke.detail)
+  else step('发布门禁：test profile 启动冒烟（无崩溃）', smoke.ok, smoke.detail)
 }
 
 // 5. clean-install smoke: pack → install into a temp dir → import + apply.

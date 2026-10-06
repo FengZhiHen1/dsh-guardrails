@@ -29,10 +29,17 @@ import {
 
 /**
  * Bound on the subexpression nesting this pipeline recurses through. Each level
- * costs one full pass, and adversarial input can nest arbitrarily; PowerShell
- * text produced by a model never approaches this, so the cap only ever fires on
- * pathological input — where stopping early is the conservative direction
- * because the outer pass already sees the (still unverifiable) text.
+ * costs one full pass, and adversarial input can nest arbitrarily — but nesting
+ * is *attacker-controlled*, so the bound must never be the thing that lets a
+ * command through. Reaching it fails CLOSED (see the cap branch in
+ * {@link checkCommand}); it is a work bound, not a trust boundary.
+ *
+ * Measured on 26,764 real commands (7-day `stable-dev` corpus): nesting depth is
+ * 0 for 21,280, 1 for 5,420, 2 for 64, and never higher. So a legitimate command
+ * does not approach this bound, and failing closed here costs ~no false
+ * positives — while the previous "stop early and allow" cost a real bypass
+ * (verified: 9 wrapped levels of `Write-Output "$( ... )"` around a system-area
+ * write executed the write and was judged clean).
  */
 const MAX_SUBEXPRESSION_DEPTH = 8
 
@@ -97,9 +104,34 @@ export function checkCommand(base, command, rules, depth = 0) {
   }
   const hit = assessDestructive(base, resolved, rules.destructive)
   if (hit) return destructiveReason(hit.text, command)
-  if (depth >= MAX_SUBEXPRESSION_DEPTH) return undefined
-  for (const nested of tokenizePwsh(resolved).nested) {
-    const nestedHit = checkCommand(base, nested, rules, depth + 1)
+  const nested = tokenizePwsh(resolved).nested
+  if (depth >= MAX_SUBEXPRESSION_DEPTH) {
+    // Fail CLOSED at the work bound. Stopping early is only safe if the passes
+    // above are guaranteed to have seen whatever the un-expanded nesting hides —
+    // and that guarantee does NOT hold. The text-reference and destructive passes
+    // do scan the whole string, but the system-write pass (and any other
+    // fragment+path pass) resolves a *parsed* write target, and at depth >= 1 the
+    // top-level fragment is just `writeoutput`. Measured consequence of the old
+    // "return undefined" here: `Write-Output "$( ... )"` nested 9 deep around a
+    // system-area write was ALLOWED, and PowerShell really does execute it.
+    // Nesting depth is chosen by the author of the command, so a deeper nest must
+    // not be a way to be judged clean.
+    //
+    // Gated by `unverifiable` (DSR-006: every defense layer stays configurable).
+    // It is the same semantic as that gate — "this cannot be verified statically,
+    // so refuse" — and reusing the key avoids adding config surface that would
+    // then need its own schema, settings card and tests. Turning `unverifiable`
+    // off therefore also accepts this risk, which is the profile owner's call.
+    if (rules.unverifiable && nested.length > 0) {
+      return unverifiableReason(
+        `the command nests subexpressions deeper than the ${MAX_SUBEXPRESSION_DEPTH}-level analysis bound`,
+        command,
+      )
+    }
+    return undefined
+  }
+  for (const inner of nested) {
+    const nestedHit = checkCommand(base, inner, rules, depth + 1)
     if (nestedHit) return nestedHit
   }
   return undefined

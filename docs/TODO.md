@@ -2,14 +2,25 @@
 
 > 本文件只记**待办**。已完成的实录与取证归档在 `technical-details/部署.md`（v1.7.0 挂载与实测场清理）与各 `decisions/`。
 
+## v1.7.0（DSR-013/DSR-014，2026-10-06）已办结
+
+- [x] **深度上界实测——结论是修 bug，不是补测量**（2026-10-06 完成，入 DSR-012 后果条）—— 本条原判"未登记为已验证"。实测方法与结论：
+  - **判据设计**（避开原推断的困惑）：对同一文本比较「完整判定（depth=0，会递归）」与「仅跑本级（depth=MAX）」。两者同拦 ⇒ 命中来自本级全文本扫描、递归未参与；只有出现「完整拦 / 仅本级放」才证明递归必要、才可能触及上界。
+  - **分类结论**：凭据/env/git/machine 等**全文本正则类**在任意嵌套深度都由顶层文本扫描命中（`Write-Output` 包裹不隐藏文本），深度不可达；唯 **`system.write`（需片段解析 + 路径解析）** 依赖递归——因为 depth≥1 时顶层片段只剩 `writeoutput`。
+  - **实证缺陷**：`Set-Content C:/Windows/x y` 包裹 **9 层** `Write-Output "$( ... )"` ⇒ **放行**（0..8 拦）。并用临时文件验证 **PowerShell 真的执行**了内层写。原注释"停止展开是保守方向，因为外层已看见文本"对片段解析类**不成立**。
+  - **修复**：到界改为 **fail-closed**（且由既有 `unverifiable` 键门控，遵守 DSR-006），不再"到界放行"。
+  - **误伤实测**：同一语料 **26,834 条**命令中嵌套深度 ≥8 的 **0 条**（深度分布：0→21280、1→5420、2→64），故新增误伤 **0**。
+- [x] **`verify/run-verify.mjs` 默认值错误（静默用错版本 ⇒ 假失败）已修**（2026-10-06 完成）—— 四处默认由 `dshl env --json` **现查**（实例 HOME 与 version_bin），不再回落到 `~/.dsh` + 遗留全局 CLI；**无法解析目标时判 SKIP 而非 FAIL**（`skip()` 单独计数，不冒充全绿）。实测：不设任何变量即正确解析到 `homes\test` / `homes\stable-dev` + `0.1.7-rc.2` bin。
+- [x] **`.pem` 文本通道缺口已闭合**（2026-10-06 完成，DSR-014）—— 私钥后缀进文本正则（由 `CRED_SUFFIXES` 派生、去掉 `.key`）。`ssh -i C:/keys/prod.pem` 由放改拦；语料新增拦截 7 条**全为真**；`.key` 的 24 条**实测全为误报**（`$_.Key`/`event.key`）故有意保留在路径层。
+- [x] **`tmp/guardrails-snapshot/` 与 `guardrails-oldvsnew.mjs` 已不存在**（2026-10-06 核实）—— 本条所述残留物实测已不在（`Test-Path` 均为 False），属已完成清理后未勾销的陈旧条目。
+
 ## v1.7.0（DSR-012）待办（2026-09-29）
 
 - [x] **R-16 审计日志测试补覆盖**（2026-09-30 完成）—— 新增 `test/audit-log.test.mjs` 7 例；消融验证：上限退回 140 + 摘掉 `denied input:` 后 5/7 转红。单测 155 → 162。
 - [x] **语料取证工具入库**（2026-09-30 完成）—— `tools/corpus-replay.mjs` 替代 `tmp/` 下 15 个重复实现「日志遍历 + zstd 解码 + 命令抽取」的探针；不入 `npm test`、不随 npm 发布。
-- [ ] **`MAX_SUBEXPRESSION_DEPTH = 8` 的深度上界无干净实测** —— 用敏感字面量埋深测不出（顶层文本引用层直接看见整条命令），须改用**只有破坏性层才认**的危害（如深埋 `git reset --hard`）才能判定上界处是「放行（到达上界）」还是「仍拦（顶层已命中）」。当前**只知道上界存在、不知道其实际行为**，未登记为已验证。
-- [ ] **`tmp/guardrails-snapshot/` 与 `guardrails-oldvsnew.mjs` 可清理** —— 旧 core 快照用于 DSR-012 新旧对比，改动已合入 ⇒ 无参考价值（`oldvsnew` 已失效）。未删，待用户过目。
 
 - [ ] **web（stable-dev）挂载 v1.7.0** —— 待用户执行。命令、前置条件与实测取证见 `technical-details/部署.md`「v1.7.0 挂载与实测场清理实录」。要点：① 须先在启动器 GUI 停 `stable-dev` 实例（该实例正是本会话所在的 3080 进程，重启会中断会话）；② 用钉 ref 的 `github:` spec `#1cc9bc5ec8ef3d967538792aebfc23b3c0f73b86`；③ 改的是 Host 半侧 ⇒ **必须重启实例才生效**；④ 重启后复查 `--dump-config` 无异常 + 启动无 `N entries did not activate`。
+  - ⚠️ **该 spec 的 ref 已过期**：`#1cc9bc5` 是 DSR-012 时期的 commit，此后已有 DSR-010/013/014 与深度上界修复（当前 HEAD `1b936bf` 及本地未推提交）。挂载前须改为**当次 HEAD 的钉 ref**。
 - [ ] **npm 发布 + 切换 web 为 registry 依赖**（`dsh plugin --profile web add dsh-guardrails`）—— 未开始。⚠️ 用户已明确指示**本轮不做功能冒烟**（"程序性的应该没问题"），故 v1.7.0 的实例级实测门禁**未按 AGENTS.md「发布前置门禁」完整履行**（agent 侧仅完成：单测 155/155、行覆盖 98.55%、分层门禁、`npm run check`、`quality_floor`、性能与消融、挂载模块离线断言）。若发布前需补齐，须重新挂载 test 实测场（见下条）。
 - [ ] **test 实测场已清空 ⇒ 无可用实测载体**（2026-09-29 按用户指令清理）。test profile 已回归纯净壳（bundles 仅 base + web-app；0 个自研 symlink；patch 层无插件 insert 行）。**任何后续"test 实测"须先按 `technical-details/部署.md` 重新挂载**。备份在 `tmp/test-profile-backup-20260929/`（原 `package.json`/`cordis.patch.yml`/`pnpm-lock.yaml` + symlink 清单；`tmp/` 已 gitignore，属**临时**备份、不入库）。
 - [ ] **`skill-manager-baseline.mjs gate` 现为红灯（R4）** —— 这是清空 test 的**预期后果**，非故障：R4 检查的 skill-manager 配置载体（那条 patch insert 行）已被移除。含义是「test 目前不具备开 skill-manager 实测的条件」。要做 skill-manager 场地实测前须先处置。

@@ -93,6 +93,20 @@ export const GIT_DIR_REFERENCE = /(?:^|[\s;|&'"`()\[\]{}<>=:\\/])\.git(?:$|[\/\\
 // pwsh channel cannot bypass them (DSR-004: single maintenance point).
 const CRED_NAME_PATTERN =
   '(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.npmrc|\\.pypirc|\\.netrc|\\.pgpass|\\.credentials\\.yaml|\\.auteur-media-secret|\\.git-credentials|ntuser\\.dat|usrclass\\.dat|pagefile\\.sys|hiberfil\\.sys)'
+// DSR-014: private-key SUFFIXES in the command-text channel. Derived from
+// CRED_SUFFIXES minus `.key`, so the two layers cannot drift on the shared part
+// while the deliberate exclusion stays visible and commented.
+//
+// Why `.key` is excluded from the TEXT layer only: `.key` is an extremely common
+// property/identifier name, so a text match cannot tell the file `event.key`
+// from the expression `event.key`. Measured on 26,870 real commands, adding
+// `.key` here blocked 24 commands and every distinct match was a property access
+// (`$_.Key`, `event.key`, `i.key`, `[section.key`); adding the other four
+// suffixes blocked 7 and every match was a genuine key/cert path (`cert.pem`,
+// `admin-singapore.pem`). The path layer keeps `.key` — there the name is known
+// to be a path.
+export const CRED_TEXT_SUFFIXES = CRED_SUFFIXES.filter((s) => s !== '.key')
+const CRED_TEXT_SUFFIX_PATTERN = `[\\w.-]+(?:${CRED_TEXT_SUFFIXES.map((s) => `\\${s}`).join('|')})`
 // Derived from CRED_DIR_SEGMENTS + SAFE_CRED_DIR_FILES rather than hand-written,
 // so the path channel and the command-text channel cannot drift apart (DSR-004:
 // `rules.js` is the single maintenance point, and `CRED_DIR_PATTERN` mirrors the
@@ -127,6 +141,11 @@ const CRED_COMBO_PATTERN =
 const buildCredTextReference = (dirPattern) =>
   new RegExp(
     `(?:^|[^\\w.-])${CRED_NAME_PATTERN}(?![A-Za-z0-9_-]|\\.pub\\b)` +
+      // Private-key suffixes (DSR-014). Present in BOTH the relaxed and strict
+      // forms: a suffix hit means "this command names key material", which is
+      // independent of the read/write split that DSR-013's exception governs.
+      // `.pub` is excluded so public keys stay free, matching the path layer.
+      `|(?:^|[^\\w.-])${CRED_TEXT_SUFFIX_PATTERN}(?![A-Za-z0-9_.-])` +
       `|(?:^|[^\\w.-])${dirPattern}(?![A-Za-z0-9_.-])` +
       `|(?:^|[^\\w.-])${CRED_COMBO_PATTERN}(?![A-Za-z0-9_.-])`,
     'i',

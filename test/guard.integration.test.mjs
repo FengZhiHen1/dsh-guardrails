@@ -159,6 +159,22 @@ test('credentials config key still governs the ssh config exception', () => {
   assert.equal(allowed(off('read', { file_path: 'C:/Users/me/.ssh/id_rsa' })), true)
 })
 
+test('DSR-014: a key outside a credential dir is caught on the pwsh channel too', () => {
+  // Before this, the suffix rule existed only on the path channel, so a key
+  // moved out of `.ssh` was blocked for `read` but ALLOWED through pwsh
+  // (`ssh -i C:/keys/prod.pem …`) — the same protection at two different widths.
+  assert.equal(blocked(read('C:/keys/prod.pem')), true)
+  assert.equal(blocked(pwsh('ssh -i C:/keys/prod.pem ubuntu@host')), true)
+  assert.equal(blocked(pwsh('Get-Content E:/keys/prod.pem')), true)
+  assert.equal(blocked(pwsh('ssh -i /mnt/keys/prod.p12 ubuntu@host')), true)
+  // Public keys and prose citations stay allowed (DSR-010 exemption).
+  assert.equal(allowed(pwsh('Get-Content C:/keys/prod.pem.pub')), true)
+  assert.equal(allowed(pwsh('Write-Output "the .pem file is documented in the runbook"')), true)
+  // .key is deliberately text-layer-free (24/24 measured false positives).
+  assert.equal(allowed(pwsh('ssh -i C:/keys/prod.key ubuntu@host')), true)
+  assert.equal(blocked(read('C:/keys/prod.key')), true)
+})
+
 test('grep on .dsh paths is allowed (no sessions rule)', () => {
   assert.equal(blocked(grep('.dsh/sessions')), false)
 })
@@ -242,6 +258,49 @@ test('unverifiable fail-safe gate is toggleable (default on)', () => {
   const lax = makeGuard({ unverifiable: false })
   assert.equal(allowed(lax('pwsh', { command: 'Get-Content $($x)' })), true)
   assert.equal(blocked(guard('pwsh', { command: 'Get-Content $($x)' })), true)
+})
+
+test('depth bound fails CLOSED: deep nesting cannot hide a system-area write', () => {
+  // Regression: the cap used to `return undefined` — "stop early and allow" —
+  // justified by "the outer pass already sees the text". That holds for the
+  // text-reference and destructive passes (they scan the whole string) but NOT
+  // for the system-write pass, which resolves a PARSED write target; at depth >= 1
+  // the top-level fragment is just `writeoutput`. Verified consequence: nesting
+  // 9 levels of `Write-Output "$( ... )"` around a system-area write was allowed,
+  // and PowerShell really does execute the inner write (checked with a temp file).
+  const wrap = (inner, n) => {
+    let s = inner
+    for (let i = 0; i < n; i += 1) s = `Write-Output "$(${s})"`
+    return s
+  }
+  for (const inner of ['Set-Content C:/Windows/x y', 'Get-Date > C:/Windows/x']) {
+    for (const depth of [0, 1, 8, 9, 12]) {
+      assert.equal(blocked(pwsh(wrap(inner, depth))), true, `depth=${depth} inner=${inner}`)
+    }
+  }
+})
+
+test('depth bound stays configurable through the unverifiable key (DSR-006)', () => {
+  // Every defense layer must remain toggleable, and the bound reuses the
+  // "cannot be verified statically" semantic rather than adding new config
+  // surface. Turning it off re-opens the deep-nesting hole — the profile
+  // owner's explicit call, asserted here so the coupling is not silent.
+  const wrap9 = (inner) => {
+    let s = inner
+    for (let i = 0; i < 9; i += 1) s = `Write-Output "$(${s})"`
+    return s
+  }
+  assert.equal(blocked(pwsh(wrap9('Set-Content C:/Windows/x y'))), true)
+  // The coupling is asserted, not just described: with the gate explicitly off,
+  // the depth branch returns undefined again and the deep nest passes. That is
+  // the documented cost of disabling this layer (DSR-006 keeps it the profile
+  // owner's call), and pinning it here means a future change to the gating
+  // cannot pass silently in either direction.
+  const lax = makeGuard({ unverifiable: false })
+  assert.equal(allowed(lax('pwsh', { command: wrap9('Set-Content C:/Windows/x y') })), true)
+  // Shallow rules stay intact regardless of the gate.
+  assert.equal(blocked(lax('pwsh', { command: 'Set-Content C:/Windows/x y' })), true)
+  assert.equal(blocked(lax('pwsh', { command: 'Get-Content .env' })), true)
 })
 
 test('DSR-009: incident replay blocked end-to-end; ablation of chain+misuse opens it again', () => {
