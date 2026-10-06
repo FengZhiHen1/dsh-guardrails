@@ -103,6 +103,62 @@ test('path-level: glob only blocks pure credential targets', () => {
   assert.equal(blocked(glob('.dsh/sessions/**')), false)
 })
 
+test('DSR-013: ~/.ssh/config is readable (routing table, not key material)', () => {
+  // The alias table is how the sanctioned path (`ssh <alias>`) is discovered;
+  // reading it never exposes key material.
+  assert.equal(allowed(read('C:/Users/me/.ssh/config')), true)
+  assert.equal(allowed(grep('C:/Users/me/.ssh/config')), true)
+  assert.equal(allowed(glob('C:/Users/me/.ssh/config')), true)
+  assert.equal(allowed(pwsh('Get-Content ~/.ssh/config')), true)
+  assert.equal(allowed(pwsh('ssh -G campfire-hk')), true)
+})
+
+test('DSR-013: the relaxation is read-only — writing the config stays blocked', () => {
+  assert.equal(blocked(write('C:/Users/me/.ssh/config')), true)
+  assert.equal(blocked(pwsh('Set-Content ~/.ssh/config Host x')), true)
+  assert.equal(blocked(pwsh('Out-File ~/.ssh/config')), true)
+})
+
+test('DSR-013: the exception does not leak to siblings, nesting, or other dirs', () => {
+  // Only the exact final segment directly inside the credential dir qualifies.
+  assert.equal(blocked(read('C:/Users/me/.ssh/config.bak')), true)
+  assert.equal(blocked(read('C:/Users/me/.ssh/sub/config')), true)
+  assert.equal(blocked(pwsh('Get-Content ~/.ssh/config.bak')), true)
+  assert.equal(blocked(pwsh('Get-Content ~/.ssh/sub/config')), true)
+  // `.kube/config` is a real token/cert store: the exception is a name inside a
+  // known directory, never the name `config` everywhere.
+  assert.equal(blocked(read('C:/Users/me/.kube/config')), true)
+  assert.equal(blocked(pwsh('Get-Content ~/.kube/config')), true)
+  // Keys and the remaining contents of .ssh are untouched by the exception.
+  assert.equal(blocked(read('C:/Users/me/.ssh/id_rsa')), true)
+  assert.equal(blocked(read('C:/Users/me/.ssh/campfire-hk.pem')), true)
+  assert.equal(blocked(read('C:/Users/me/.ssh/known_hosts')), true)
+  assert.equal(blocked(pwsh('Get-ChildItem ~/.ssh')), true)
+  assert.equal(blocked(pwsh('ssh -i ~/.ssh/campfire-hk.pem ubuntu@host')), true)
+})
+
+test('DSR-013: the shipped ssh guidance is itself usable and quotable', () => {
+  // The guidance names `~/.ssh/config` literally, so two things must hold:
+  //  1. Following it — mentioning that path in a PATH position — must be
+  //     allowed, which IS the DSR-013 exemption (verified by ablation: emptying
+  //     SAFE_CRED_DIR_FILES turns the last assertion below red).
+  //  2. Quoting it is safe, but that is DSR-010's text-parameter masking, NOT
+  //     this exemption. An earlier version of this test attributed it to
+  //     DSR-013 and could therefore never fail — keep the attribution honest.
+  const reason = pwsh('Get-Content ~/.ssh/id_rsa')
+  assert.equal(blocked(reason), true)
+  assert.ok(reason.includes('~/.ssh/config'), 'the shipped guidance names the config path')
+  assert.equal(allowed(pwsh(`git commit -m "${reason}"`)), true)
+  // Path position: -Path is path-capable, so it is NOT masked (unlike -m).
+  assert.equal(allowed(pwsh('Select-String -Path ~/.ssh/config -Pattern Host')), true)
+})
+
+test('credentials config key still governs the ssh config exception', () => {
+  const off = makeGuard({ credentials: false })
+  assert.equal(allowed(off('read', { file_path: 'C:/Users/me/.ssh/config' })), true)
+  assert.equal(allowed(off('read', { file_path: 'C:/Users/me/.ssh/id_rsa' })), true)
+})
+
 test('grep on .dsh paths is allowed (no sessions rule)', () => {
   assert.equal(blocked(grep('.dsh/sessions')), false)
 })

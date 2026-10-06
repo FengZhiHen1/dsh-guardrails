@@ -21,6 +21,21 @@ export const CRED_BASENAMES = new Set([
 export const CRED_BASENAME_PREFIXES = ['ntuser.dat', 'usrclass.dat']
 export const CRED_SUFFIXES = ['.pem', '.key', '.p12', '.pfx', '.ppk']
 export const CRED_DIR_SEGMENTS = new Set(['.ssh', '.aws', '.azure', '.gnupg', '.kube', '.pki'])
+// DSR-013: named exceptions inside a credential directory. A credential dir is
+// blocked as a whole because its *contents* are key material, but a routing
+// table is not key material: `~/.ssh/config` maps Host aliases to host/user/key
+// file and holds no secret. Blocking it made the sanctioned path
+// (`ssh <alias>`) unreachable for an agent — the alias list could only come from
+// the user, and `glob ~/.ssh` is blocked too, so discovery was impossible.
+//
+// Keyed by directory segment so the relaxation is enumerable and stays narrow:
+// the file must sit DIRECTLY in that directory and be the final segment
+// (`~/.ssh/sub/config` and `~/.ssh/config.bak` stay blocked), and the exception
+// is per directory — `.kube/config` is a real token/certificate store and is
+// deliberately NOT exempt, because the exception is a name inside one known
+// directory, not the name `config` everywhere. Single maintenance point
+// (DSR-004): CRED_DIR_PATTERN is derived from this map below, never hand-written.
+export const SAFE_CRED_DIR_FILES = new Map([['.ssh', new Set(['config'])]])
 // Adjacent segment combos (username-independent path shapes):
 // cloud CLIs, container auth, browser profiles, Windows credential stores /
 // DPAPI, and the system hive files.
@@ -78,15 +93,53 @@ export const GIT_DIR_REFERENCE = /(?:^|[\s;|&'"`()\[\]{}<>=:\\/])\.git(?:$|[\/\\
 // pwsh channel cannot bypass them (DSR-004: single maintenance point).
 const CRED_NAME_PATTERN =
   '(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.npmrc|\\.pypirc|\\.netrc|\\.pgpass|\\.credentials\\.yaml|\\.auteur-media-secret|\\.git-credentials|ntuser\\.dat|usrclass\\.dat|pagefile\\.sys|hiberfil\\.sys)'
-const CRED_DIR_PATTERN = '(?:\\.aws|\\.ssh|\\.azure|\\.gnupg|\\.kube|\\.pki)'
+// Derived from CRED_DIR_SEGMENTS + SAFE_CRED_DIR_FILES rather than hand-written,
+// so the path channel and the command-text channel cannot drift apart (DSR-004:
+// `rules.js` is the single maintenance point, and `CRED_DIR_PATTERN` mirrors the
+// path-level lists so the pwsh channel cannot bypass them).
+//
+// A directory with named safe files carries its own exclusion lookahead. The
+// exclusion applies only when the safe name is the FINAL path segment: `/config`
+// followed by neither a name character nor another separator. Hence
+// `~/.ssh/config` stops matching while `~/.ssh/config.bak` and
+// `~/.ssh/sub/config` keep matching (the latter because the trailing `(?![\\/])`
+// fails). A real filesystem cannot nest under a `config` file, but the text
+// channel must not be more permissive than the path channel on principle.
+const SEP = '[\\\\/]'
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const dirAlternative = (dir, allowSafeFiles) => {
+  const safeFiles = allowSafeFiles ? SAFE_CRED_DIR_FILES.get(dir) : undefined
+  if (safeFiles === undefined || safeFiles.size === 0) return escapeRegex(dir)
+  const names = [...safeFiles].map(escapeRegex).join('|')
+  return `${escapeRegex(dir)}(?!${SEP}(?:${names})(?![A-Za-z0-9_.-])(?!${SEP}))`
+}
+const buildCredDirPattern = (allowSafeFiles) =>
+  `(?:${[...CRED_DIR_SEGMENTS].map((dir) => dirAlternative(dir, allowSafeFiles)).join('|')})`
+// Read/list form: honours the DSR-013 named exceptions.
+const CRED_DIR_PATTERN = buildCredDirPattern(true)
+// Modify form: no exceptions at all. The relaxation is read-only (DSR-013), and
+// the two channels must agree — otherwise `Set-Content ~/.ssh/config` would slip
+// through the pwsh channel while `write` is blocked on the path channel, which is
+// exactly the bypass DSR-004's mirrored pattern exists to prevent.
+const CRED_DIR_PATTERN_STRICT = buildCredDirPattern(false)
 const CRED_COMBO_PATTERN =
   '(?:\\.config[\\\\/]gcloud|system32[\\\\/]config[\\\\/](?:sam|security|system)|google[\\\\/]chrome[\\\\/]user data|microsoft[\\\\/]edge[\\\\/]user data|mozilla[\\\\/]firefox[\\\\/]profiles|microsoft[\\\\/]credentials|microsoft[\\\\/]protect)'
-export const CRED_TEXT_REFERENCE = new RegExp(
-  `(?:^|[^\\w.-])${CRED_NAME_PATTERN}(?![A-Za-z0-9_-]|\\.pub\\b)` +
-    `|(?:^|[^\\w.-])${CRED_DIR_PATTERN}(?![A-Za-z0-9_.-])` +
-    `|(?:^|[^\\w.-])${CRED_COMBO_PATTERN}(?![A-Za-z0-9_.-])`,
-  'i',
-)
+const buildCredTextReference = (dirPattern) =>
+  new RegExp(
+    `(?:^|[^\\w.-])${CRED_NAME_PATTERN}(?![A-Za-z0-9_-]|\\.pub\\b)` +
+      `|(?:^|[^\\w.-])${dirPattern}(?![A-Za-z0-9_.-])` +
+      `|(?:^|[^\\w.-])${CRED_COMBO_PATTERN}(?![A-Za-z0-9_.-])`,
+    'i',
+  )
+export const CRED_TEXT_REFERENCE = buildCredTextReference(CRED_DIR_PATTERN)
+/**
+ * Same reference check WITHOUT the DSR-013 named exceptions, for commands that
+ * modify: a config file may be read (the alias table is not key material) but
+ * never written, since rewriting it silently redirects where connections go.
+ * Exported so `check-command.js` can pick the form matching the operation class;
+ * both forms are built here from the shared lists (DSR-004 single source).
+ */
+export const CRED_TEXT_REFERENCE_STRICT = buildCredTextReference(CRED_DIR_PATTERN_STRICT)
 
 /** Every valid top-level config key, in README order. */
 export const RULE_KEYS = ['env', 'git', 'credentials', 'destructive', 'system', 'unverifiable']

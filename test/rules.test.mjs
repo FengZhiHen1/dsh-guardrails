@@ -13,8 +13,10 @@ import {
   CRED_DIR_SEGMENTS,
   CRED_SUFFIXES,
   CRED_TEXT_REFERENCE,
+  CRED_TEXT_REFERENCE_STRICT,
   ENV_REFERENCE,
   GIT_DIR_REFERENCE,
+  SAFE_CRED_DIR_FILES,
   evaluateRules,
   isSensitiveEnvName,
 } from '../src/core/rules.js'
@@ -58,6 +60,35 @@ test('credentials: non-matching paths stay allowed', () => {
   assert.equal(pathTargetsCredentials('C:/Users/me/.ssh-key-pair-docs/id_rsa_example.txt'), false)
   assert.equal(pathTargetsCredentials('E:/repo/readme.md'), false)
   assert.equal(pathTargetsCredentials('E:/repo/.env.example'), false)
+})
+
+test('DSR-013: SAFE_CRED_DIR_FILES exempts only the named final segment', () => {
+  // Pin the expected content so the data-driven loop below cannot pass
+  // vacuously if the map is ever emptied (verified by ablation: an empty map
+  // left this test green while the behaviour was gone).
+  assert.deepEqual([...SAFE_CRED_DIR_FILES].map(([dir, names]) => [dir, [...names]]), [['.ssh', ['config']]])
+  // Every entry in the map is exempt as the direct child of its directory...
+  for (const [dir, names] of SAFE_CRED_DIR_FILES) {
+    for (const name of names) {
+      assert.equal(pathTargetsCredentials(`C:/Users/me/${dir}/${name}`), false, `${dir}/${name}`)
+      // ...but the directory hit still lands one level deeper, and a namesake
+      // elsewhere in the tree is never exempt.
+      assert.equal(pathTargetsCredentials(`C:/Users/me/${dir}/sub/${name}`), true, `${dir}/sub/${name}`)
+      assert.equal(pathTargetsCredentials(`C:/Users/me/${dir}/${name}.bak`), true, `${dir}/${name}.bak`)
+    }
+  }
+  // The exception is read-class; the modify class keeps the full directory hit.
+  assert.equal(pathTargetsCredentials('C:/Users/me/.ssh/config', false), true)
+})
+
+test('DSR-013: strict reference set rejects the ssh config, relaxed set allows it', () => {
+  assert.equal(CRED_TEXT_REFERENCE.test('Get-Content ~/.ssh/config'), false)
+  assert.equal(CRED_TEXT_REFERENCE_STRICT.test('Get-Content ~/.ssh/config'), true)
+  // Both sets agree on everything the exception does not cover.
+  for (const cmd of ['Get-Content ~/.ssh/id_rsa', 'Get-Content ~/.ssh/config.bak', 'Get-Content ~/.kube/config']) {
+    assert.equal(CRED_TEXT_REFERENCE.test(cmd), true, cmd)
+    assert.equal(CRED_TEXT_REFERENCE_STRICT.test(cmd), true, cmd)
+  }
 })
 
 test('env names: sensitive vs safe suffixes', () => {

@@ -10,6 +10,7 @@ import {
   CRED_COMBOS,
   CRED_DIR_SEGMENTS,
   CRED_SUFFIXES,
+  SAFE_CRED_DIR_FILES,
   SYSTEM_COMBOS,
   SYSTEM_PREFIXES,
   isSensitiveEnvName,
@@ -57,8 +58,24 @@ export function entersGitDir(resolved) {
  * Matches basenames (incl. hive transaction-log prefixes), suffixes
  * (.pem/.key/...), credential directory segments, and username-independent
  * adjacent segment combos (browser profiles, Windows stores, system hives).
+ *
+ * DSR-013: a directory segment may carry named exceptions (see
+ * {@link SAFE_CRED_DIR_FILES}). An excepted NAME is not automatically allowed —
+ * it only escapes the directory-segment hit, and only as the final segment
+ * directly inside that directory, so every remaining rule (suffix, basename,
+ * combo, a deeper or differently-named sibling) still applies. That is what
+ * keeps `~/.ssh/config` readable while `~/.ssh/config.bak` and
+ * `~/.ssh/sub/config` stay blocked.
+ *
+ * @param resolved - slash-normalized path.
+ * @param allowSafeDirFiles - whether the DSR-013 exceptions apply. True for
+ *   reads and listings; false for writes/edits, because the relaxation is
+ *   read-only (a rewritten alias table silently redirects connections, and the
+ *   command-text channel applies the same split via
+ *   `CRED_TEXT_REFERENCE_STRICT`). Defaults to true so path-shape callers that
+ *   only ask "is this a credential target at all" keep the read semantics.
  */
-export function pathTargetsCredentials(resolved) {
+export function pathTargetsCredentials(resolved, allowSafeDirFiles = true) {
   const segs = segmentsOf(resolved)
   const lowerSegs = segs.map((s) => s.toLowerCase())
   const base = lowerSegs.length ? lowerSegs[lowerSegs.length - 1] : ''
@@ -70,8 +87,14 @@ export function pathTargetsCredentials(resolved) {
   for (const suffix of CRED_SUFFIXES) {
     if (base.endsWith(suffix)) return true
   }
-  for (const seg of lowerSegs) {
-    if (CRED_DIR_SEGMENTS.has(seg)) return true
+  for (let i = 0; i < lowerSegs.length; i += 1) {
+    if (!CRED_DIR_SEGMENTS.has(lowerSegs[i])) continue
+    // The exception needs the safe name to BE the final segment of THIS
+    // directory: an inner hit (`~/.ssh` in `~/.ssh/sub/config`) has a following
+    // segment, so it does not qualify and is judged as a credential dir.
+    const safeFiles = allowSafeDirFiles ? SAFE_CRED_DIR_FILES.get(lowerSegs[i]) : undefined
+    if (safeFiles?.has(base) && i === lowerSegs.length - 2) continue
+    return true
   }
   for (const combo of CRED_COMBOS) {
     for (let i = 0; i + combo.length <= lowerSegs.length; i += 1) {
@@ -128,7 +151,7 @@ export function checkPath(base, raw, modifying, metadataOnly = false, rules) {
     : modifying
       ? rules.credentials.modify
       : rules.credentials.read
-  if (credentialsOn && pathTargetsCredentials(resolved)) {
+  if (credentialsOn && pathTargetsCredentials(resolved, !modifying)) {
     return { category: 'credentials', modifying, raw }
   }
   // W0: writes into system areas only; reads and listings stay allowed (DSR-005).

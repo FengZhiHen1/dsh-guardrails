@@ -6,7 +6,7 @@
 // subexpressions); no DSH imports.
 // Reference: docs/technical-details/命令文本分析.md; DSR-002/005/006/007/012.
 
-import { CRED_TEXT_REFERENCE } from './rules.js'
+import { CRED_TEXT_REFERENCE, CRED_TEXT_REFERENCE_STRICT } from './rules.js'
 import {
   assessContentClass,
   assessSystemWrite,
@@ -70,7 +70,14 @@ export function checkCommand(base, command, rules, depth = 0) {
       return COMMAND_REFERENCE_REASON[category]()
     }
   }
-  if (leafEnabled(rules.credentials, contentClass) && CRED_TEXT_REFERENCE.test(cited)) {
+  // The DSR-013 read-only exceptions apply only when this command cannot write:
+  // `'modify'` (a write verb or a `>` redirect) uses the strict reference set, so
+  // `Set-Content ~/.ssh/config x` stays blocked while `Get-Content` passes. The
+  // `'unknown'` class is fail-closed and therefore also gets the strict set.
+  const credReference = contentClass === 'read' || contentClass === 'list'
+    ? CRED_TEXT_REFERENCE
+    : CRED_TEXT_REFERENCE_STRICT
+  if (leafEnabled(rules.credentials, contentClass) && credReference.test(cited)) {
     return credentialBashReason()
   }
   if (!listingOnly) {

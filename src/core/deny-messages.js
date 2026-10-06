@@ -29,12 +29,24 @@ const gitBashReason = () =>
   `[guardrails] Blocked: this shell command references the .git directory. Direct access to .git internals risks repository corruption and can expose unreferenced data. Safe alternative: use git commands (git status / git log / git diff / git config). ${NO_BYPASS_GUIDANCE} ${escalateFor('git')}`
 const CRED_READ_GUIDANCE =
   "Ask the user to handle credential files manually; never read, copy, or modify them on the user's behalf."
+// DSR-013: the SSH-specific sanctioned path. The guard blocks key MATERIAL, not
+// key USE — `ssh <alias>` is allowed because it never names a key file, while
+// `ssh -i <key>` and reads of the key are blocked. Naming the alias mechanism
+// here is what makes the refusal actionable instead of an invitation to
+// circumvent it via -i or by copying the key into the workspace.
+//
+// This text names `~/.ssh/config` literally, which is safe only because DSR-013
+// exempts that path from the credential text-reference check; otherwise the
+// guard would block an agent for quoting the guidance it was just given (the
+// DSR-010 failure mode, reproduced once already on this file's own wording).
+const CRED_SSH_GUIDANCE =
+  'For SSH, use the Host alias defined in ~/.ssh/config (run `ssh <alias>`); `ssh -G <alias>` prints the resolved host, user and key file, so no key needs to be read.'
 const credReadReason = (p) =>
-  `[guardrails] Blocked: "${p}" is a credential file (private key, cloud/registry token, or secret store). Reading it can expose secrets that grant impersonation or data access — treated as credential-theft risk. ${CRED_READ_GUIDANCE} ${NO_BYPASS_GUIDANCE} ${escalateFor('credentials')}`
+  `[guardrails] Blocked: "${p}" is a credential file (private key, cloud/registry token, or secret store). Reading it can expose secrets that grant impersonation or data access — treated as credential-theft risk. ${CRED_SSH_GUIDANCE} ${CRED_READ_GUIDANCE} ${NO_BYPASS_GUIDANCE} ${escalateFor('credentials')}`
 const credModifyReason = (p) =>
   `[guardrails] Blocked: "${p}" is a credential file. Modifying it can break the user's authentication or, done maliciously, hijack their access. ${CRED_READ_GUIDANCE} ${NO_BYPASS_GUIDANCE} ${escalateFor('credentials')}`
 const credBashReason = () =>
-  `[guardrails] Blocked: this shell command references a credential file or credential directory (private keys, cloud/registry tokens, secret stores) — treated as credential-theft risk. ${CRED_READ_GUIDANCE} ${NO_BYPASS_GUIDANCE} ${escalateFor('credentials')}`
+  `[guardrails] Blocked: this shell command references a credential file or credential directory (private keys, cloud/registry tokens, secret stores) — treated as credential-theft risk. ${CRED_SSH_GUIDANCE} ${CRED_READ_GUIDANCE} ${NO_BYPASS_GUIDANCE} ${escalateFor('credentials')}`
 
 /** Deny message for a destructive-command hit, with a single-line command preview. */
 const destructiveReason = (text, command) => {

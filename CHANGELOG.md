@@ -2,6 +2,15 @@
 
 ## 1.7.0（当前，未发布）
 
+### SSH 可用性：`~/.ssh/config` 读放行 + 别名引导（DSR-013）
+
+- **问题**：凭据目录段规则（DSR-002 严格策略）把 `.ssh` 下**一切**文件当密钥物质，其中包含 `~/.ssh/config`。后果有二：① 把"用别名"这条正路堵死——密钥不该由 Agent 持有，推荐的 `ssh <别名>` 需要别名清单，而 config 不可读、`glob ~/.ssh` 也被拦 ⇒ 别名只能靠人肉告知或写进 AGENTS.md 并随之漂移；② 拦截语义与防护目标错位——守卫实际守的是密钥**物质**（`ssh <别名>` 用着私钥却放行，`ssh -i <key>` 才拦），config 这种纯路由信息没有理由按密钥对待。拒绝文案亦只让用户手工处理，未给出 SSH 场景的可行替代路径。
+- **决定（方向 C：具名最小例外 + 文案引导）**：新增 `SAFE_CRED_DIR_FILES`（**按目录段**声明该目录下可豁免的文件名，当前唯一 = `{ .ssh: [config] }`）。例外**只对直接父目录且为末段**的具名文件生效，**且仅限读/列举通道**——`~/.ssh/config` 放行；`id_rsa`、`*.pem`、`known_hosts`、`config.bak`、`sub/config`、`glob ~/.ssh`、`write/edit ~/.ssh/config`、`.kube/config`（真令牌存储）全部维持拦截。目录段正则由 `CRED_DIR_SEGMENTS` + 该表**派生**（不再手写），保持 DSR-004 单一维护点。
+- **读/写通道必须同宽**：例外是只读的，故新增 `CRED_TEXT_REFERENCE_STRICT`，`check-command.js` 按内容级别选用（`read`/`list` 用宽松版，`modify` 与 fail-closed 的 `unknown` 用严格版）；路径通道 `pathTargetsCredentials(resolved, allowSafeDirFiles)` 同样按 `modifying` 取严格版。否则 `Set-Content ~/.ssh/config` 会从 pwsh 通道溜过而 `write` 工具被拦——正是 DSR-004 镜像名单所要防的绕过。
+- **文案**：凭据拒绝消息新增 SSH 引导（走 config 里的 `Host` 别名 `ssh <别名>`；`ssh -G <别名>` 查生效的主机/用户/密钥；不要读密钥、不要用 `-i` 拼路径）。该文案引用 config 路径**不会被自己拦**——避免复现 DSR-010「引用守卫自己的拒绝原文反被拦」那类误伤。
+- **已知缺口（未修，记录在案）**：命令文本的凭据正则不含 `.pem` 等**后缀**匹配，故密钥不在 `.ssh` 下时 `ssh -i C:/keys/x.pem …` 在 pwsh 通道不命中（路径通道仍拦）。此为 DSR-013 之前既有缺口，本次刻意不扩面。
+- 决策见 [DSR-013](docs/decisions/DSR-013-ssh-config安全例外与别名引导.md)；机制见 `technical-details/规则模型.md`、`命令文本分析.md`。
+
 ### 误报修复：裸引号输出语句不再被当成动态命令（DSR-012）
 
 - **现象（真实语料取证）**：按 DSH 帧契约解开 `stable-dev` HOME 4 天会话日志，取出 **9062 条真实 pwsh 命令**重跑现行规则 ⇒ **478 条被拦（5.4%）**，其中 **413 条**是 `unverifiable` 的"命令本身是动态的"，而这 413 条里 **397 条（96%）** 的语句头是一个**裸双引号插值字符串**。
@@ -24,6 +33,8 @@
 ### 测试与验证
 
 - 测试 145 → **162**：`command.test.mjs` +6（词带引号来源 / 双引号插值提取 / 配平引号感知 / `splitFragments` 新出口 / `isCommandPosition` / `isComputedCommandName`），`guard.integration.test.mjs` +4（DSR-012 端到端正反 3 例 + 单引号字面量 1 例），`audit-log.test.mjs` +7（R-16，见上）。
+- **DSR-013 补测 162 → 169**：`guard.integration.test.mjs` +5（config 读放行 / 写仍拦 / 例外不泄漏到 `config.bak`·`sub/config`·`.kube/config`·`known_hosts`·`id_rsa`·列举 / 拒绝文案可被引用 / credentials 开关仍生效），`rules.test.mjs` +2（数据表驱动的具名例外边界 + 宽松/严格两套引用集对比）。
+- **消融验证检测力**（把 `SAFE_CRED_DIR_FILES` 置空、其余不变）：三个 DSR-013 用例转红；还原后按 SHA256 逐字节核对一致。消融暴露并修掉两处**测试自身缺陷**：① 数据表驱动用例在空表下**空转通过**（已加 `deepEqual` 内容断言）；② 一条"文案不被自拦"用例把功劳记在 DSR-013 上，但 `-m` 是文本参数、本就由 DSR-010 屏蔽 ⇒ 该断言**永远不会失败**——已改为走 `Select-String -Path ~/.ssh/config`（路径能力参数、不被屏蔽）并在注释里更正归因。两次消融均经 `git stash` 对照纯净基线确认。
 - 行覆盖 **98.55%**（门禁 ≥80%）；分层门禁通过（core 6 文件）；`npm run check` 全绿；`quality_floor` **PASS**（0 error）。
 - ⚠️ **`verify/run-verify.mjs` 第 3 步（test profile 组合断言）本次 FAIL**：`homes\test` 的 `test` profile 当前 `dependencies` 0 条、`bundles` 仅 `dsh-base`+`dsh-web-app`（本插件行未装）——这是**部署状态**，与本次源码改动无关（改动只落在 `src/`）。发布/挂载 web 前须先按门禁流程在 test 实例装载本版本并重跑；第 4 步启动冒烟按 `DSH_VERIFY_SKIP_BOOT_SMOKE=1` 跳过，**由用户在启动器侧补做**。
 - ⚠️ 实例级门禁**尚未执行**（需重启 test 实例，agent 不得自行重启）⇒ 按 AGENTS.md，本版本**尚不可发布/挂载 web**。
