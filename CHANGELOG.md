@@ -2,6 +2,20 @@
 
 ## 1.7.0（当前，未发布）
 
+### test 实测门禁：已重挂 test 实测场并完成实例级启动门禁（2026-10-06）
+
+用户授权后以 `link:` 源码直挂重挂 `homes\test`（bundles = base + web-app + **dsh-guardrails**；挂载时该实例 `running=false`，不构成共用 HOME）。用户启动 test 实例后完成门禁：
+
+| 门禁项 | 结果 |
+| --- | --- |
+| `--dump-config` | ✅ 1257 行、`id: guardrails` **恰 1 次**、来源 `# == dsh-guardrails`、**无 `disabled`** |
+| 无 `N entries did not activate` / `startup failed` / `disabling profile plugin` | ✅ 当前启动块（挂载后那次）**全部 0 次** |
+| 行达 ACTIVE | ✅ RPC `POST /api/settings/describe` 返回 `ns:"guardrails"` + 六字段齐现（`describe()` 按 `fiber.state === ACTIVE` 过滤，见 `settings/src/index.ts:307`；六字段齐现即全 volatile） |
+| 构建新鲜度 | ✅ 进程启动 12:32:01 晚于挂载 12:27:17 |
+| **功能冒烟** | ⏳ **待用户手动做**（用户选择不发提示词）——判据见 `technical-details/部署.md` 该节 ⑦ |
+
+⚠️ 实测踩到的判读陷阱：该实例日志是**跨多次启动的追加文件、无行内时间戳**，历史块长期留着 `2 entries did not activate` 与 skill-manager/unity-search 的 `webServer` 报错。**全文 grep 会把历史告警误判为本次失败**；须按最后一次启动边界切片，或直接用 RPC（不依赖日志）。本次已确认当前组合里根本没有这两个插件，故其报错必属历史。
+
 ### 安全修复：深度上界曾可致「系统区写」绕过（DSR-012 后果条更正）
 
 - **原判被实测推翻**：`MAX_SUBEXPRESSION_DEPTH = 8` 的注释称"停止展开是保守方向，因为外层已看见文本"。实测证明该论断**只对全文本正则类成立**，对**片段解析类不成立**：
