@@ -1,6 +1,38 @@
 # Changelog
 
-## 1.7.0（当前，未发布）
+## 2.0.0（2026-10-16，未发布）
+
+**不兼容重构：从「guard 硬阻断」到「pre-execute 原生审批」的职责收缩**，按 `references/dsh-guardrails` 已确认设计基线（B / B-2 / C / A / T-A，2026-10-16 六轮研讨）实施；决策记录见 [DSR-015](docs/decisions/DSR-015-审批式敏感读与职责收缩.md)。
+
+### 语义变化（破坏性）
+
+- **不再拒绝任何调用**：删除 `ctx.tools.guard` 钩子与全部 deny 路径；对敏感文件**内容读取**返回 `tools/pre-execute` `{ kind: 'ask' }`，由 DSH 原生一次性审批（allow-once）决定，拒绝/取消/无审批通道时不执行。
+- **规则收缩为两层**：内置窄凭据名单（具名私钥、注册表令牌、AWS credentials、Hive/转储、DSH 凭据文件）+ 用户标记的精确绝对路径（`sensitiveFiles`）。
+- **退役类别**：`.env` 全局拦截、`.git` 内部拦截、系统区写（W0）、破坏性命令八子族、`unverifiable` fail-safe、目录段/密钥后缀/浏览器/DPAPI 规则——上下文相关判断交 DSH 原生 Auto Review 与 OS 权限。
+- **触发面收窄为读取**：`read`/`read_image`/单文件 `grep`；`glob`、目录级搜索、一切写改删不触发。
+- **配置换代**：`sensitiveFiles: string[]`（相对路径/通配符挂载即失败）+ `credentialsReadAsk: boolean`，两字段全 `.volatile()`；v1 的六键配置不再被接受（挂载报 unknown config key）。
+- **peer 抬到 `@deepseek-ai/dsh-settings ^0.2.0-rc.2`**：在 0.1.7-rc.2 上该行被 peer 门禁静默禁用；升级顺序=先实例后插件，旧运行时用 v1.7.0 发布物。
+
+### 客户端
+
+- 配置卡片改为「内置名单开关 + 标记路径编辑器（每行一个绝对路径，本地校验绝对性与通配符）」，仍由官方 `SettingsForm`/`SettingsFormModel` 驱动；slot 键与命名空间不变（`dsh-guardrails#guardrails` / `guardrails`）。
+
+### 测试与工具
+
+- 测试矩阵重写为 V2 语义：58 例全绿（目标匹配/退役消融/配置校验/生命周期/设置接缝/客户端布线/审批文案），行覆盖 99.22%。
+- 删除 `check-command.js`/`command.js`/`destructive.js`/`deny-messages.js` 与 `tools/corpus-replay.mjs`（其依赖的会话日志格式知识已随 format v4 过时）；`corpus` npm 脚本移除。
+- `verify/run-verify.mjs` 干净安装断言更新到新文件清单；组合断言、覆盖率门禁、tarball 冒烟保持。
+
+### 审批超时（T-A）结论
+
+DSH `0.2.0-rc.2` 原生审批链**没有等待超时**（源码核查 2026-10-16）；无人值守姿态为会话 `approval policy = never`。统一等待上限属 DSH Approval Service / Host answerer 公共边界，本插件不实现。
+
+### 待办（部署侧）
+
+- test 实测场重挂 + 实例级门禁（启动冒烟、真实 ask 弹窗、Auto Review 组合、`never` 策略行为）——须用户授权启动 test 实例。
+- web profile 当前钉在 v1.7.0 发布物（`github:#fb587cb`）；迁移 v2 须先升实例到 0.2.0-rc.2，再过 test 门禁后换 ref。
+
+## 1.7.0（2026-10-06）
 
 ### test 实测门禁：已重挂 test 实测场并完成实例级启动门禁（2026-10-06）
 

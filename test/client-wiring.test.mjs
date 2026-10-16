@@ -10,14 +10,14 @@
 // deployment-level error.
 //
 // These tests therefore drive the real bundle with a minimal React and a mock
-// client ctx, and assert the v0.1.7 contract the Plugins page depends on:
+// client ctx, and assert the current contract the Plugins page depends on:
 //   - the module registers and exports the cordis plugin face;
 //   - `apply` registers into `plugins.row.config` under `<pkg>#<row id>`;
 //   - reactivity rides the RESERVED `hooks` compartment (a `form` prop would be
 //     a one-time snapshot the page passes in, with no subscribe side);
 //   - the reserved keys never leak into component props;
 //   - the component honours `view: 'summary' | 'page'`;
-//   - no removed v0.1.2-era API name survives in the shipped bundle.
+//   - no removed-era API name survives in the shipped bundle.
 //
 // No browser, no network, no DSH process.
 
@@ -126,7 +126,7 @@ function makePrimitives(record) {
 /**
  * A miniature React: resolve function components so the tree a test walks is the
  * tree that would render. Without this, a node whose `type` is a component
- * function (e.g. `CategoryRow`) stays opaque and its Checkbox children are
+ * function (e.g. `CredentialsRow`) stays opaque and its Checkbox children are
  * invisible to `collect` — which is exactly how the first version of this
  * assertion silently counted zero toggles.
  */
@@ -184,7 +184,7 @@ function loadBundle({ react, record }) {
 /** A settings-form snapshot as `ConfigForm.getSnapshot()` returns it. */
 const snapshot = (over = {}) => ({
   status: 'ready',
-  value: { env: true, git: true, credentials: true, system: true, destructive: true, unverifiable: true },
+  value: { sensitiveFiles: ['E:/x/secret'], credentialsReadAsk: true },
   base: undefined,
   user: {},
   revision: 3,
@@ -263,7 +263,7 @@ test('bundle registers as a lazy-CJS module under its id', () => {
   assert.equal(typeof m.registration.factory, 'function')
 })
 
-test('module face is a cordis client plugin with the v0.1.7 services', () => {
+test('module face is a cordis client plugin with the current services', () => {
   const m = mount()
   assert.equal(m.exported.name, 'dsh-guardrails')
   assert.equal(typeof m.exported.apply, 'function')
@@ -289,7 +289,7 @@ test('registers into plugins.row.config under <package>#<row id>', () => {
 
 test('namespace bound to configForms is the loader entry id, not the package name', () => {
   const m = mount()
-  // v0.1.7: a settings namespace IS the local loader entry id (`id: guardrails`
+  // A settings namespace IS the local loader entry id (`id: guardrails`
   // in cordis.patch.yml). Binding the package name would silently resolve to a
   // namespace no entry serves, leaving the page permanently 'unavailable'.
   assert.equal(m.configForm.__ns, 'guardrails')
@@ -326,8 +326,8 @@ test('the form is read through the injected sources, not a one-time prop', () =>
   // The official shell's shape: availability + writability + a per-field state.
   assert.equal(seen.available, true)
   assert.equal(seen.writable, true)
-  assert.equal(seen.env.text, 'true')
-  assert.equal(seen.unverifiable.text, 'true')
+  assert.equal(seen.credentialsReadAsk.text, 'true')
+  assert.equal(seen.sensitiveFiles.text, 'E:/x/secret')
 })
 
 test('the page is driven by the official SettingsFormModel over the row namespace', () => {
@@ -337,7 +337,7 @@ test('the page is driven by the official SettingsFormModel over the row namespac
   // the read-back and discard-on-unmount now.
   assert.equal(m.record.scope, m.configForm, 'the model must be bound to the row ConfigForm')
   const fields = m.record.specs.map((spec) => spec.field)
-  assert.deepEqual(fields, ['env', 'git', 'credentials', 'system', 'destructive', 'unverifiable'])
+  assert.deepEqual(fields, ['sensitiveFiles', 'credentialsReadAsk'])
   for (const spec of m.record.specs) {
     assert.equal(typeof spec.format, 'function', `${spec.field} needs format`)
     assert.equal(typeof spec.parse, 'function', `${spec.field} needs parse`)
@@ -365,17 +365,13 @@ test('view: summary renders the one-liner; view: page renders the official Setti
   assert.equal(typeof summary.children[0], 'string')
 
   const page = expand(m.render({ ...props, view: 'page' }))
-  // The body is the OFFICIAL form primitive — not a self-drawn card shell. The
-  // official pages render a bare <SettingsForm>; the previous hand-written
-  // collapsible card (header + chevron + 「未保存」 pill + 「放弃」 button)
-  // diverged from them and is gone.
+  // The body is the OFFICIAL form primitive — not a self-drawn card shell.
   assert.equal(page.type, 'SettingsForm', 'the body must be the official SettingsForm')
   assert.equal(page.props.labels.save, '保存')
   assert.equal(typeof page.props.onSave, 'function')
   assert.equal(typeof page.props.onDiscard, 'function')
   assert.equal(page.props.state.writable, true)
-  // No discard control and no unsaved pill: the official form offers neither
-  // (SettingsForm.tsx: "discards on unmount and offers no discard control").
+  // No discard control and no unsaved pill: the official form offers neither.
   // Asserted on CONTROL labels only — the page's explanatory note legitimately
   // uses those words, so scanning all text would test the wording, not the chrome.
   const nodes = collect(page)
@@ -386,13 +382,16 @@ test('view: summary renders the one-liner; view: page renders the official Setti
     'the official form offers no discard control')
   assert.equal(controlLabels.some((label) => /未保存/.test(label)), false,
     'the official form shows no unsaved pill')
-  // Leaf toggles are the official Checkbox: one per leaf (2+2+3+1+8) + fail-safe.
+  // Exactly one boolean Checkbox: the builtin-list toggle. The path list is a
+  // textarea, not a checkbox grid — the V1 per-leaf grid (16 toggles) is gone.
   const boxes = nodes.filter((n) => n.type === 'Checkbox')
-  assert.equal(boxes.length, 2 + 2 + 3 + 1 + 8 + 1, 'one Checkbox per leaf plus the fail-safe toggle')
-  // The page renders the category titles itself (the shell draws no row chrome).
+  assert.equal(boxes.length, 1, 'one Checkbox for the builtin-list toggle only')
+  const areas = nodes.filter((n) => n.type === 'textarea')
+  assert.equal(areas.length, 1, 'one textarea for the marked-path editor')
+  // The page renders the section titles itself (the shell draws no row chrome).
   const rendered = texts(page)
-  for (const title of ['env 文件访问', '.git 内部访问', '凭据文件访问', '系统区写入', '破坏性命令', '动态目标 fail-safe']) {
-    assert.ok(rendered.some((t) => t.includes(title)), `missing category title: ${title}`)
+  for (const title of ['内置凭据名单读取审批', '标记的敏感文件']) {
+    assert.ok(rendered.some((t) => t.includes(title)), `missing section title: ${title}`)
   }
 })
 
@@ -407,7 +406,7 @@ test('page renders the not-ready notice without throwing when the namespace is a
   assert.doesNotThrow(() => m.render({ ...props, view: 'page' }))
 })
 
-test('shipped bundle carries none of the removed v0.1.2-era API names as code', () => {
+test('shipped bundle carries none of the removed-era API names as code', () => {
   // Comments may NAME the removed APIs (they document the migration), so strip
   // comments first and assert on the remaining CODE only.
   const code = SOURCE
@@ -415,28 +414,23 @@ test('shipped bundle carries none of the removed v0.1.2-era API names as code', 
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
   assert.equal(/settingsScope/.test(code), false, 'ctx.settingsScope must be gone from code')
   assert.equal(/settings\.plugin\.item/.test(code), false, 'the removed slot must not be registered')
-  assert.equal(/IconChevronDownOutline14/.test(code), false, 'the pre-0.1.7 icon name must be gone from code')
   // The live names must be present in the code instead.
   assert.ok(code.includes("'plugins.row.config'"), 'plugins.row.config must be registered')
   assert.ok(code.includes('useGuardrailForm'), 'the hooks compartment must be consumed')
   assert.ok(code.includes("'guardrails'"), 'the entry-id namespace must be bound')
 })
 
-test('the hand-written card shell is gone from code; the official form owns the write path', () => {
-  // DSR-011 (2026-09-28): the card no longer draws its own collapsible shell, and
-  // no longer hand-writes the draft/busy/failed state machine or calls
-  // form.mutate/unset itself — the official SettingsFormModel owns the draft, the
-  // revision fence, the read-back and discard-on-unmount. Comments may describe
-  // the removed shell (that is the migration record), so this asserts on CODE.
+test('the V1 leaf-toggle grid and hand-written write path stay gone', () => {
+  // V2/DSR-015: the 16-toggle category grid is retired; the official form model
+  // still owns the draft/fence/read-back. Comments may describe the removed
+  // shell (that is the migration record), so this asserts on CODE.
   const code = SOURCE
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
   for (const [name, re] of [
-    ['the collapse chevron', /Chevron/],
+    ['the V1 category map', /CATEGORY_LEAF_KEYS/],
+    ['the leaf-toggle helper', /toggleLeaf/],
     ['the card shell style', /cardShell/],
-    ['the disclosure header style', /headerStyle/],
-    ['the unsaved pill', /dirtyPill/],
-    ['the discard hover state', /hoverDiscard/],
     ['the local draft state', /setDraft/],
   ]) {
     assert.equal(re.test(code), false, `${name} must be gone from the shipped code`)
@@ -447,5 +441,5 @@ test('the hand-written card shell is gone from code; the official form owns the 
   // The official primitives must be the ones in use.
   assert.ok(/\bSettingsForm\b/.test(code), 'the official SettingsForm must frame the page')
   assert.ok(/\bSettingsFormModel\b/.test(code), 'the official SettingsFormModel must own the form')
-  assert.ok(/\bCheckbox\b/.test(code), 'leaf toggles must use the official Checkbox')
+  assert.ok(/\bCheckbox\b/.test(code), 'the builtin toggle must use the official Checkbox')
 })

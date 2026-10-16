@@ -1,19 +1,23 @@
-// Path-level rule unit tests for src/core/path-check.js.
+// Path-level rule unit tests for src/core/path-check.js (V2 sensitive-read
+// matching: builtin credential list + user-marked exact paths).
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   baseNameOf,
-  checkPath,
-  entersGitDir,
-  isSystemAreaPath,
+  checkSensitiveRead,
+  isAbsolutePath,
   normCompare,
   resolvePath,
   segmentsOf,
+  slash,
 } from '../src/core/path-check.js'
 import { evaluateRules } from '../src/core/rules.js'
 
 const RULES = evaluateRules({})
+const MARKED = evaluateRules({
+  sensitiveFiles: ['E:/Project/app/.env.production', 'C:/Users/me/.kube/config'],
+})
 const BASE = 'E:/Project/DSH_Plugins'
 
 test('resolvePath: absolute, relative, dot-dot folding, separators', () => {
@@ -26,105 +30,54 @@ test('resolvePath: absolute, relative, dot-dot folding, separators', () => {
   assert.equal(resolvePath('', 'x'), 'x')
 })
 
-test('segmentsOf / baseNameOf / normCompare basics', () => {
+test('segmentsOf / baseNameOf / normCompare / slash basics', () => {
   assert.deepEqual(segmentsOf('a/b/c'), ['a', 'b', 'c'])
   assert.deepEqual(segmentsOf('a\\b\\c'), ['a', 'b', 'c'])
   assert.deepEqual(segmentsOf('./a/'), ['a'])
   assert.equal(baseNameOf('a/b/c.txt'), 'c.txt')
   assert.equal(normCompare('A:\\B'), 'a:/b')
+  assert.equal(slash('a\\b'), 'a/b')
+  assert.equal(isAbsolutePath('C:/x'), true)
+  assert.equal(isAbsolutePath('/x'), true)
+  assert.equal(isAbsolutePath('x/y'), false)
 })
 
-test('category predicates', () => {
-  assert.equal(entersGitDir('E:/repo/.git/config'), true)
-  assert.equal(entersGitDir('E:/repo/.gitignore'), false)
+test('checkSensitiveRead: builtin credential hits', () => {
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.ssh/id_rsa'), RULES), 'credentials')
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.npmrc'), RULES), 'credentials')
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.aws/credentials'), RULES), 'credentials')
 })
 
-test('isSystemAreaPath: absolute prefixes, case/separator tolerant', () => {
-  for (const p of [
-    'C:/Windows',
-    'C:/windows/system32/drivers/etc/hosts',
-    'C:/Windows/System32/Tasks/x',
-    'C:/Program Files/Common Files/x',
-    'C:/Program Files (x86)/x',
-    'C:/ProgramData/Microsoft/Certificate/x',
-    'C:/Recovery/x',
-  ]) {
-    assert.equal(isSystemAreaPath(p), true, p)
-  }
-  assert.equal(isSystemAreaPath('C:/Windows.old/x'), false) // prefix, not substring
-  assert.equal(isSystemAreaPath('D:/Windows/x'), false) // non-C drive is user data
-  assert.equal(isSystemAreaPath('E:/repo/windows/x'), false)
-  assert.equal(isSystemAreaPath('C:/Users/me/x'), false)
+test('checkSensitiveRead: user-marked exact paths (case-insensitive, separator-insensitive)', () => {
+  assert.equal(
+    checkSensitiveRead(resolvePath('E:/Project/app', '.env.production'), MARKED),
+    'marked',
+  )
+  assert.equal(checkSensitiveRead('e:/project/app/.env.production', MARKED), 'marked')
+  assert.equal(checkSensitiveRead('E:\\Project\\app\\.env.production', MARKED), 'marked')
+  assert.equal(checkSensitiveRead('c:/users/ME/.KUBE/config', MARKED), 'marked')
+  // A sibling or subpath is NOT the marked file.
+  assert.equal(checkSensitiveRead('E:/Project/app/.env', MARKED), null)
+  assert.equal(checkSensitiveRead('E:/Project/app/.env.production.bak', MARKED), null)
+  assert.equal(checkSensitiveRead('E:/Project/app/sub/.env.production', MARKED), null)
 })
 
-test('isSystemAreaPath: username-independent startup/profile combos', () => {
-  assert.equal(isSystemAreaPath('C:/Users/me/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.ps1'), true)
-  assert.equal(isSystemAreaPath('C:/Users/me/Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1'), true)
-  assert.equal(isSystemAreaPath('C:/Users/me/Documents/PowerShell/Microsoft.PowerShell_profile.ps1'), true)
-  assert.equal(isSystemAreaPath('C:/Users/me/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Other/x.lnk'), false)
-  assert.equal(isSystemAreaPath('E:/repo/docs/powershell/script.ps1'), false) // 'docs' is not the profile dir shape
-  assert.equal(isSystemAreaPath('E:/repo/documents/powershell/x.ps1'), true) // combo is username-independent (accepted rare FP)
+test('checkSensitiveRead: ordinary files and unmarked .env stay free', () => {
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'src/core/rules.js'), RULES), null)
+  assert.equal(checkSensitiveRead(resolvePath(BASE, '.env'), RULES), null, 'plain .env is Auto-Review territory')
+  assert.equal(checkSensitiveRead(resolvePath(BASE, '.env.example'), RULES), null)
+  assert.equal(checkSensitiveRead(resolvePath(BASE, '.git/config'), RULES), null)
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Windows/System32/drivers/etc/hosts'), RULES), null)
 })
 
-test('checkPath: env category, read vs modify, metadata mode', () => {
-  assert.deepEqual(checkPath(BASE, '.env', false, false, RULES), { category: 'env', modifying: false, raw: '.env' })
-  assert.deepEqual(checkPath(BASE, '.env', true, false, RULES), { category: 'env', modifying: true, raw: '.env' })
-  assert.equal(checkPath(BASE, '.env.example', false, false, RULES), null)
-  // listing (.env) is allowed: metadataOnly skips env
-  assert.equal(checkPath(BASE, '.env', false, true, RULES), null)
+test('checkSensitiveRead: builtin toggle off removes only the builtin channel', () => {
+  const off = { ...RULES, credentialsReadAsk: false }
+  assert.equal(checkSensitiveRead('C:/Users/me/.ssh/id_rsa', off), null)
+  assert.equal(checkSensitiveRead('E:/Project/app/.env.production', { ...off, sensitiveFiles: MARKED.sensitiveFiles }), 'marked')
 })
 
-test('checkPath: git category only in content mode', () => {
-  assert.deepEqual(checkPath(BASE, '.git/config', false, false, RULES), { category: 'git', modifying: false, raw: '.git/config' })
-  assert.equal(checkPath(BASE, '.git/config', false, true, RULES), null)
-})
-
-test('checkPath: .dsh paths are not intercepted (sessions rule removed)', () => {
-  assert.equal(checkPath(BASE, '.dsh/sessions/x.jsonl', false, false, RULES), null)
-  assert.equal(checkPath(BASE, '.dsh/sessions/x.jsonl', true, false, RULES), null)
-  assert.equal(checkPath(BASE, '.dsh/sessions', false, true, RULES), null)
-  assert.equal(checkPath(BASE, '.dsh/skills/SKILL.md', false, false, RULES), null)
-})
-
-test('checkPath: credentials category in every mode', () => {
-  assert.deepEqual(checkPath(BASE, '.ssh/anything', false, false, RULES), { category: 'credentials', modifying: false, raw: '.ssh/anything' })
-  assert.deepEqual(checkPath(BASE, '.ssh/**', false, true, RULES), { category: 'credentials', modifying: false, raw: '.ssh/**' })
-  assert.equal(checkPath(BASE, '.dsh/skills/SKILL.md', false, false, RULES), null)
-})
-
-test('checkPath: range-B credential targets (hive files, browser/DPAPI paths)', () => {
-  assert.equal(checkPath(BASE, 'C:/Users/me/.git-credentials', false, false, RULES)?.category, 'credentials')
-  assert.equal(checkPath(BASE, 'C:/Users/me/ntuser.dat.LOG1', false, false, RULES)?.category, 'credentials')
-  assert.equal(checkPath(BASE, 'C:/Windows/System32/config/SAM', false, false, RULES)?.category, 'credentials')
-  assert.equal(checkPath(BASE, 'C:/Users/me/AppData/Local/Google/Chrome/User Data/Default/Cookies', false, false, RULES)?.category, 'credentials')
-  assert.equal(checkPath(BASE, 'C:/Users/me/AppData/Local/Microsoft/Credentials/a', true, false, RULES)?.category, 'credentials')
-  assert.equal(checkPath(BASE, 'C:/Users/me/AppData/Roaming/Mozilla/Firefox/Profiles/x.default/cookies.sqlite', false, false, RULES)?.category, 'credentials')
-})
-
-test('checkPath: system category blocks writes only (W0)', () => {
-  assert.deepEqual(checkPath(BASE, 'C:/Windows/System32/drivers/etc/hosts', true, false, RULES), { category: 'system', modifying: true, raw: 'C:/Windows/System32/drivers/etc/hosts' })
-  assert.equal(checkPath(BASE, 'C:/Windows/System32/drivers/etc/hosts', false, false, RULES), null)
-  assert.equal(checkPath(BASE, 'C:/Windows/**', false, true, RULES), null)
-  assert.equal(checkPath(BASE, 'C:/Program Files (x86)/x', true, false, RULES)?.category, 'system')
-  assert.equal(checkPath(BASE, 'C:/Users/me/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.ps1', true, false, RULES)?.category, 'system')
-  assert.equal(checkPath(BASE, 'C:/Users/me/Documents/PowerShell/Microsoft.PowerShell_profile.ps1', true, false, RULES)?.category, 'system')
-  assert.equal(checkPath(BASE, 'E:/repo/docs/powershell/x.ps1', true, false, RULES), null)
-})
-
-test('checkPath: system switch disables the check', () => {
-  const off = evaluateRules({ system: false })
-  assert.equal(checkPath(BASE, 'C:/Windows/x', true, false, off), null)
-  assert.equal(checkPath(BASE, 'C:/Users/me/ntuser.dat', false, false, off)?.category, 'credentials') // credentials unaffected
-})
-
-test('checkPath: category switches disable checks', () => {
-  const off = evaluateRules({ env: false })
-  assert.equal(checkPath(BASE, '.env', false, false, off), null)
-  assert.equal(checkPath(BASE, '.dsh/sessions/x', false, false, off), null)
-  assert.deepEqual(checkPath(BASE, '.ssh/id_rsa', false, false, off), { category: 'credentials', modifying: false, raw: '.ssh/id_rsa' })
-})
-
-test('checkPath: empty or non-string raw is allowed', () => {
-  assert.equal(checkPath(BASE, '', false, false, RULES), null)
-  assert.equal(checkPath(BASE, undefined, false, false, RULES), null)
+test('checkSensitiveRead: marked beats nothing but credentials wins ties', () => {
+  // A marked file that also matches the builtin list reports 'credentials'.
+  const both = evaluateRules({ sensitiveFiles: ['C:/Users/me/.ssh/id_rsa'] })
+  assert.equal(checkSensitiveRead('C:/Users/me/.ssh/id_rsa', both), 'credentials')
 })

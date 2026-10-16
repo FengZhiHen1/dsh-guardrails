@@ -1,226 +1,81 @@
-// rules — sensitive-target denylist data, text-reference regexes, category switches.
+// rules — V2 sensitive-target model (narrow builtin list + user-marked paths)
+// for the pre-execute `ask` gate.
 //
-// Boundary: the single maintenance point for every denylist change; must stay
-// dependency-free (no imports from other core modules).
-// Reference: docs/technical-details/规则模型.md; DSR-001/003/004/006.
+// Boundary: the single maintenance point for every target-list change; must
+// stay dependency-free (no imports from other core modules).
+// Reference: docs/decisions/DSR-015; references/dsh-guardrails design baseline
+// (B/B-2/C/A, 2026-10-16).
+//
+// V2 semantic shift (DSR-015): this plugin no longer DENIES anything. It asks
+// for a native one-shot approval on content reads of (a) a narrow builtin list
+// of well-known credential files and (b) files the user explicitly marked
+// sensitive in the profile settings. Everything else — including the retired
+// `.env`/`.git`/system-area/destructive-command categories — is left to DSH's
+// native Auto Review.
 
-/** Safe `.env.*` suffixes: non-secret variants that stay readable. */
-export const SAFE_ENV_SUFFIXES = new Set(['example', 'sample', 'template', 'dist', 'default'])
-
-// R0 credential targets (range B of DSR-001): private keys, package/registry
-// tokens, secret stores, Windows credential stores / DPAPI / hives, browser
-// profiles, memory-dump and hibernation files.
+/**
+ * Builtin high-confidence credential targets (DSR-015, narrow list).
+ *
+ * Deliberately NARROW: only named credential FILES whose content is key
+ * material. The V1 directory-segment rules (`.ssh`/`.aws`/`.kube`/…), file
+ * suffixes (`.pem`/`.key`/…) and browser/DPAPI directory combos are retired —
+ * they matched mixed-use and non-credential files (the known V1 false-positive
+ * surface) and the whole-directory matches also blocked legal routing files.
+ * Mixed-use carriers that *can* hold tokens (`.kube/config`, `.config/gcloud/…`,
+ * browser profiles) are NOT builtin: the user marks them explicitly via
+ * `sensitiveFiles` when their own workflow needs the extra approval.
+ */
 export const CRED_BASENAMES = new Set([
   'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', 'id_ed25519_sk', 'id_ecdsa_sk',
-  '.npmrc', '.pypirc', '.netrc', '.pgpass', '.credentials.yaml', '.auteur-media-secret',
-  '.git-credentials', 'ntuser.dat', 'usrclass.dat', 'pagefile.sys', 'hiberfil.sys',
+  '.npmrc', '.pypirc', '.netrc', '.pgpass', '.git-credentials',
+  '.credentials.yaml', '.auteur-media-secret',
+  'ntuser.dat', 'usrclass.dat', 'pagefile.sys', 'hiberfil.sys',
 ])
-// Hive basenames whose transaction logs (.LOG1/.LOG2/.regtrans-ms) carry the
-// same sensitive data; matched as basename === prefix or basename startsWith
-// prefix + '.'.
-export const CRED_BASENAME_PREFIXES = ['ntuser.dat', 'usrclass.dat']
-export const CRED_SUFFIXES = ['.pem', '.key', '.p12', '.pfx', '.ppk']
-export const CRED_DIR_SEGMENTS = new Set(['.ssh', '.aws', '.azure', '.gnupg', '.kube', '.pki'])
-// DSR-013: named exceptions inside a credential directory. A credential dir is
-// blocked as a whole because its *contents* are key material, but a routing
-// table is not key material: `~/.ssh/config` maps Host aliases to host/user/key
-// file and holds no secret. Blocking it made the sanctioned path
-// (`ssh <alias>`) unreachable for an agent — the alias list could only come from
-// the user, and `glob ~/.ssh` is blocked too, so discovery was impossible.
-//
-// Keyed by directory segment so the relaxation is enumerable and stays narrow:
-// the file must sit DIRECTLY in that directory and be the final segment
-// (`~/.ssh/sub/config` and `~/.ssh/config.bak` stay blocked), and the exception
-// is per directory — `.kube/config` is a real token/certificate store and is
-// deliberately NOT exempt, because the exception is a name inside one known
-// directory, not the name `config` everywhere. Single maintenance point
-// (DSR-004): CRED_DIR_PATTERN is derived from this map below, never hand-written.
-export const SAFE_CRED_DIR_FILES = new Map([['.ssh', new Set(['config'])]])
-// Adjacent segment combos (username-independent path shapes):
-// cloud CLIs, container auth, browser profiles, Windows credential stores /
-// DPAPI, and the system hive files.
+
+/**
+ * Adjacent-segment combos kept in V2: the AWS shared-credentials file (not
+ * named `credentials` — it is `<dir>/credentials` inside `~/.aws`) and the
+ * three Windows system hives (SAM/SECURITY/SYSTEM under system32\config).
+ * Everything else from V1 — cloud CLIs, container auth, browser profiles,
+ * DPAPI stores — is retired: mixed-use or high-false-positive; the user marks
+ * individual files via `sensitiveFiles` when needed.
+ */
 export const CRED_COMBOS = [
-  ['.config', 'gcloud'],
-  ['.docker', 'config.json'],
-  ['google', 'chrome', 'user data'],
-  ['microsoft', 'edge', 'user data'],
-  ['mozilla', 'firefox', 'profiles'],
-  ['microsoft', 'credentials'],
-  ['microsoft', 'protect'],
+  ['.aws', 'credentials'],
   ['system32', 'config', 'sam'],
   ['system32', 'config', 'security'],
   ['system32', 'config', 'system'],
 ]
 
-// W0 system area (DSR-001/DSR-005): absolute prefixes of the Windows system
-// drive (covered: Windows dir incl. System32/Tasks/hosts/drivers, Program
-// Files, ProgramData incl. the certificate stores), plus username-independent
-// segment combos for the user startup folder and PowerShell profiles. Reads
-// and listings of these are allowed; only writes are blocked.
-export const SYSTEM_PREFIXES = [
-  'c:/windows',
-  'c:/program files',
-  'c:/program files (x86)',
-  'c:/programdata',
-  'c:/recovery',
-]
-export const SYSTEM_COMBOS = [
-  ['appdata', 'roaming', 'microsoft', 'windows', 'start menu', 'programs', 'startup'],
-  ['documents', 'windowspowershell'],
-  ['documents', 'powershell'],
-]
+// Windows hive transaction logs (.LOG1/.LOG2/.regtrans-ms) carry the same data
+// as the hive itself: matched as basename === prefix or basename startsWith
+// prefix + '.'.
+export const CRED_BASENAME_PREFIXES = ['ntuser.dat', 'usrclass.dat']
+
+/** Filename `.pub` stays free (public half of a key pair). */
+export const PUBLIC_KEY_SUFFIX = '.pub'
+
+// ---------- V2 config evaluation ----------
+
+/** Every valid top-level config key. */
+export const RULE_KEYS = ['sensitiveFiles', 'credentialsReadAsk']
+
+/** Whether a path is absolute (`C:/x`, `C:\x`, or POSIX `/x`). Local copy:
+ * rules.js stays dependency-free (no imports from other core modules). */
+const absolutePath = (p) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('/')
 
 /**
- * Whether a basename is a sensitive `.env` file.
- * `.env` exactly → true; `.env.<suffix>` → true unless the suffix is a known
- * non-secret variant ({@link SAFE_ENV_SUFFIXES}). Case-insensitive.
- */
-export function isSensitiveEnvName(name) {
-  const lower = name.toLowerCase()
-  if (lower === '.env') return true
-  if (!lower.startsWith('.env.')) return false
-  return !SAFE_ENV_SUFFIXES.has(lower.slice(5))
-}
-
-// .env reference detection; $env:NAME (PowerShell environment variable) excluded.
-export const ENV_REFERENCE = /(?:^|[^A-Za-z0-9_.$-])(\.env(?:\.[A-Za-z0-9_-]+)*)(?![A-Za-z0-9_-])/gi
-export const GIT_DIR_REFERENCE = /(?:^|[\s;|&'"`()\[\]{}<>=:\\/])\.git(?:$|[\/\\\s;|&'"`()\[\]{}<>])/
-// Command-text references to credential files/dirs. Public keys (.pub) are
-// excluded; $env:NAME is not a file path. `.dsh` (incl. session history) is
-// intentionally absent: it is not a credential directory and carries no
-// sensitive-target rule (see DSR-003 revisit), so its references are allowed.
-// The name/dir/combo alternatives mirror the path-level lists above so the
-// pwsh channel cannot bypass them (DSR-004: single maintenance point).
-const CRED_NAME_PATTERN =
-  '(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.npmrc|\\.pypirc|\\.netrc|\\.pgpass|\\.credentials\\.yaml|\\.auteur-media-secret|\\.git-credentials|ntuser\\.dat|usrclass\\.dat|pagefile\\.sys|hiberfil\\.sys)'
-// DSR-014: private-key SUFFIXES in the command-text channel. Derived from
-// CRED_SUFFIXES minus `.key`, so the two layers cannot drift on the shared part
-// while the deliberate exclusion stays visible and commented.
-//
-// Why `.key` is excluded from the TEXT layer only: `.key` is an extremely common
-// property/identifier name, so a text match cannot tell the file `event.key`
-// from the expression `event.key`. Measured on 26,870 real commands, adding
-// `.key` here blocked 24 commands and every distinct match was a property access
-// (`$_.Key`, `event.key`, `i.key`, `[section.key`); adding the other four
-// suffixes blocked 7 and every match was a genuine key/cert path (`cert.pem`,
-// `admin-singapore.pem`). The path layer keeps `.key` — there the name is known
-// to be a path.
-export const CRED_TEXT_SUFFIXES = CRED_SUFFIXES.filter((s) => s !== '.key')
-const CRED_TEXT_SUFFIX_PATTERN = `[\\w.-]+(?:${CRED_TEXT_SUFFIXES.map((s) => `\\${s}`).join('|')})`
-// Derived from CRED_DIR_SEGMENTS + SAFE_CRED_DIR_FILES rather than hand-written,
-// so the path channel and the command-text channel cannot drift apart (DSR-004:
-// `rules.js` is the single maintenance point, and `CRED_DIR_PATTERN` mirrors the
-// path-level lists so the pwsh channel cannot bypass them).
-//
-// A directory with named safe files carries its own exclusion lookahead. The
-// exclusion applies only when the safe name is the FINAL path segment: `/config`
-// followed by neither a name character nor another separator. Hence
-// `~/.ssh/config` stops matching while `~/.ssh/config.bak` and
-// `~/.ssh/sub/config` keep matching (the latter because the trailing `(?![\\/])`
-// fails). A real filesystem cannot nest under a `config` file, but the text
-// channel must not be more permissive than the path channel on principle.
-const SEP = '[\\\\/]'
-const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-const dirAlternative = (dir, allowSafeFiles) => {
-  const safeFiles = allowSafeFiles ? SAFE_CRED_DIR_FILES.get(dir) : undefined
-  if (safeFiles === undefined || safeFiles.size === 0) return escapeRegex(dir)
-  const names = [...safeFiles].map(escapeRegex).join('|')
-  return `${escapeRegex(dir)}(?!${SEP}(?:${names})(?![A-Za-z0-9_.-])(?!${SEP}))`
-}
-const buildCredDirPattern = (allowSafeFiles) =>
-  `(?:${[...CRED_DIR_SEGMENTS].map((dir) => dirAlternative(dir, allowSafeFiles)).join('|')})`
-// Read/list form: honours the DSR-013 named exceptions.
-const CRED_DIR_PATTERN = buildCredDirPattern(true)
-// Modify form: no exceptions at all. The relaxation is read-only (DSR-013), and
-// the two channels must agree — otherwise `Set-Content ~/.ssh/config` would slip
-// through the pwsh channel while `write` is blocked on the path channel, which is
-// exactly the bypass DSR-004's mirrored pattern exists to prevent.
-const CRED_DIR_PATTERN_STRICT = buildCredDirPattern(false)
-const CRED_COMBO_PATTERN =
-  '(?:\\.config[\\\\/]gcloud|system32[\\\\/]config[\\\\/](?:sam|security|system)|google[\\\\/]chrome[\\\\/]user data|microsoft[\\\\/]edge[\\\\/]user data|mozilla[\\\\/]firefox[\\\\/]profiles|microsoft[\\\\/]credentials|microsoft[\\\\/]protect)'
-const buildCredTextReference = (dirPattern) =>
-  new RegExp(
-    `(?:^|[^\\w.-])${CRED_NAME_PATTERN}(?![A-Za-z0-9_-]|\\.pub\\b)` +
-      // Private-key suffixes (DSR-014). Present in BOTH the relaxed and strict
-      // forms: a suffix hit means "this command names key material", which is
-      // independent of the read/write split that DSR-013's exception governs.
-      // `.pub` is excluded so public keys stay free, matching the path layer.
-      `|(?:^|[^\\w.-])${CRED_TEXT_SUFFIX_PATTERN}(?![A-Za-z0-9_.-])` +
-      `|(?:^|[^\\w.-])${dirPattern}(?![A-Za-z0-9_.-])` +
-      `|(?:^|[^\\w.-])${CRED_COMBO_PATTERN}(?![A-Za-z0-9_.-])`,
-    'i',
-  )
-export const CRED_TEXT_REFERENCE = buildCredTextReference(CRED_DIR_PATTERN)
-/**
- * Same reference check WITHOUT the DSR-013 named exceptions, for commands that
- * modify: a config file may be read (the alias table is not key material) but
- * never written, since rewriting it silently redirects where connections go.
- * Exported so `check-command.js` can pick the form matching the operation class;
- * both forms are built here from the shared lists (DSR-004 single source).
- */
-export const CRED_TEXT_REFERENCE_STRICT = buildCredTextReference(CRED_DIR_PATTERN_STRICT)
-
-/** Every valid top-level config key, in README order. */
-export const RULE_KEYS = ['env', 'git', 'credentials', 'destructive', 'system', 'unverifiable']
-
-// Per-category leaf keys (DSR-006): operation-level granularity. A category
-// config accepts a boolean (whole category on/off) or an object of these
-// leaves; subkeys default to true when absent.
-export const CATEGORY_LEAF_KEYS = {
-  env: ['read', 'modify'],
-  git: ['read', 'modify'],
-  credentials: ['read', 'modify', 'list'],
-  system: ['write'],
-  destructive: ['git', 'machine', 'eval', 'cli', 'bulk', 'target', 'chain', 'misuse'],
-}
-
-const CATEGORY_KEYS = ['env', 'git', 'credentials', 'destructive', 'system']
-
-// Evaluate one category value into its leaf object. undefined → all on;
-// boolean → all equal to it; object → per-leaf, missing leaves default true.
-function evaluateCategory(value, leafKeys, category) {
-  if (value === undefined) return Object.fromEntries(leafKeys.map((key) => [key, true]))
-  if (typeof value === 'boolean') return Object.fromEntries(leafKeys.map((key) => [key, value]))
-  if (typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(
-      `dsh-guardrails: config "${category}" must be a boolean or an object with keys: ${leafKeys.join(', ')}`,
-    )
-  }
-  const unknownSub = Object.keys(value).filter((key) => !leafKeys.includes(key))
-  if (unknownSub.length > 0) {
-    throw new Error(
-      `dsh-guardrails: unknown "${category}" config key(s): ${unknownSub.join(', ')} — valid keys: ${leafKeys.join(', ')}`,
-    )
-  }
-  for (const key of leafKeys) {
-    const v = value[key]
-    if (v !== undefined && typeof v !== 'boolean') {
-      throw new Error(
-        `dsh-guardrails: config "${category}.${key}" must be a boolean, got ${JSON.stringify(v)}`,
-      )
-    }
-  }
-  return Object.fromEntries(leafKeys.map((key) => [key, value[key] !== false]))
-}
-
-/**
- * Evaluate the per-row config into op-level leaves; every defense layer defaults on.
- * v1 five-boolean categories remain valid (equivalent to whole category on/off).
+ * Evaluate the per-row config into plain data.
  *
  * @param config - raw plugin-row config (or settings-resolved value).
- * @returns `{ unverifiable, env, git, credentials, destructive, system }` leaf object.
- * @throws {Error} on unknown keys, non-boolean leaves, or non-object category
- *   values — the mount fails with an actionable error instead of silently degrading.
+ * @returns `{ sensitiveFiles: string[], credentialsReadAsk: boolean }`.
+ * @throws {Error} on unknown keys or malformed values — the mount fails with
+ *   an actionable error instead of silently degrading.
  */
 export function evaluateRules(config = {}) {
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw new Error(
       `dsh-guardrails: plugin config must be an object, got ${config === null ? 'null' : Array.isArray(config) ? 'array' : typeof config}`,
-    )
-  }
-  if (config.unverifiable !== undefined && typeof config.unverifiable !== 'boolean') {
-    throw new Error(
-      `dsh-guardrails: config "unverifiable" must be a boolean, got ${JSON.stringify(config.unverifiable)}`,
     )
   }
   const unknown = Object.keys(config).filter((key) => !RULE_KEYS.includes(key))
@@ -229,9 +84,38 @@ export function evaluateRules(config = {}) {
       `dsh-guardrails: unknown config key(s): ${unknown.join(', ')} — valid keys: ${RULE_KEYS.join(', ')}`,
     )
   }
-  const rules = { unverifiable: config.unverifiable !== false }
-  for (const key of CATEGORY_KEYS) {
-    rules[key] = evaluateCategory(config[key], CATEGORY_LEAF_KEYS[key], key)
+  const { sensitiveFiles, credentialsReadAsk } = config
+  if (credentialsReadAsk !== undefined && typeof credentialsReadAsk !== 'boolean') {
+    throw new Error(
+      `dsh-guardrails: config "credentialsReadAsk" must be a boolean, got ${JSON.stringify(credentialsReadAsk)}`,
+    )
   }
-  return rules
+  if (sensitiveFiles !== undefined) {
+    if (!Array.isArray(sensitiveFiles)) {
+      throw new Error(
+        `dsh-guardrails: config "sensitiveFiles" must be an array of absolute file paths, got ${JSON.stringify(sensitiveFiles)}`,
+      )
+    }
+    for (const entry of sensitiveFiles) {
+      if (typeof entry !== 'string' || entry.trim() === '') {
+        throw new Error(
+          `dsh-guardrails: config "sensitiveFiles" entries must be non-empty strings, got ${JSON.stringify(entry)}`,
+        )
+      }
+      if (!absolutePath(entry)) {
+        throw new Error(
+          `dsh-guardrails: config "sensitiveFiles" only accepts absolute file paths (no recursion), got ${JSON.stringify(entry)}`,
+        )
+      }
+      if (/[*?]/.test(entry)) {
+        throw new Error(
+          `dsh-guardrails: config "sensitiveFiles" does not support globs or wildcards (exact file paths only), got ${JSON.stringify(entry)}`,
+        )
+      }
+    }
+  }
+  return {
+    sensitiveFiles: sensitiveFiles ?? [],
+    credentialsReadAsk: credentialsReadAsk !== false,
+  }
 }

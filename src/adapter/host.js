@@ -1,101 +1,63 @@
 // host — DSH adapter entry (Host plane): Config schema, settings page policy,
-// base-directory resolution, and the tools.guard hook.
+// base-directory resolution, and the tools/pre-execute `ask` gate.
 //
 // Boundary: only DSH wiring lives here (schemastery schema, settings.configure,
-// sandboxPolicy, tools.guard); all judgment logic is in src/core/ (testable
-// under bare node). The guard is a hard block with no runtime approval
-// channel; the decision layer is fail-closed, the hook layer is fail-open.
-// Reference: docs/decisions/DSR-006/DSR-007; README「已知限制与边界」.
+// pre-execute listener); all judgment logic is in src/core/ (testable under
+// bare node). V2 (DSR-015): the listener never denies — it returns
+// `{ kind: 'ask' }` on sensitive content reads so DSH's native one-shot
+// approval channel decides; every other decision is passed through untouched.
+// The listener is fail-open: an internal error logs loud and returns undefined
+// (no decision), never breaking the waterfall.
 //
-// v0.1.7 settings model (knowledge `host/07` §1-§3): the configuration truth is
-// this entry's Cordis Config. `settings.yaml`, the settings-file provider and
-// `settings.installSection` no longer exist — a field is editable only when its
-// schema node is `.volatile()`, the settings service merely enumerates and
-// generates forms, and a profile-patch edit commits into the live Config. The
-// guard therefore reads the volatile refs AT OPERATION TIME instead of caching
-// a snapshot pushed by a settings callback: no remount, no onChange wiring.
+// Reference: knowledge v0.2.0-rc.2 `host/07` §1-§3 (settings model unchanged
+// from v0.1.7) and `host/09` §2 (PreToolDecision ask / ctx.approval bridge);
+// docs/decisions/DSR-015.
+//
+// Why pre-execute and not ctx.tools.guard: the guard is a monotonic
+// post-review refusal with no approval channel — a user-approved ask would
+// still die at the guard. `ask` composes with native Auto Review (which
+// registers `{ prepend: true }` and re-emits its own ask ahead of us) and
+// degrades to a denial when no approval service is composed (fail-closed).
 
 import z from '@deepseek-ai/schemastery'
-import { CATEGORY_LEAF_KEYS, evaluateRules } from '../core/rules.js'
-import { checkPath, resolvePath } from '../core/path-check.js'
-import { checkCommand } from '../core/check-command.js'
-import { PATH_REASON_BY_CATEGORY } from '../core/deny-messages.js'
-
-// Audit-line budget. The deny renderers already bound the command preview they
-// embed to 200 characters (`core/deny-messages.js`), so this cap must clear that
-// preview plus the longest rationale — otherwise the logged command is cut off
-// while the message reads as if it were complete. The previous 140 cap left only
-// 28 characters of command, which made 2026-09-29's false-positive hunt
-// impossible from logs alone: every entry looked like it began with an
-// assignment purely because the truncation landed there.
-const AUDIT_LINE_MAX = 400
+import { evaluateRules } from '../core/rules.js'
+import { checkSensitiveRead, resolvePath } from '../core/path-check.js'
+import { askMessage } from '../core/ask-messages.js'
 
 /**
- * Render one deny reason as a single bounded audit line.
- * Only the FIRST line is logged: it carries the rationale and, for the classes
- * that embed one, the command preview; the remaining lines are the fixed
- * pass-through guidance that the model still receives in the returned message.
+ * Render one audit line, bounded. Only the first line of a reason is logged;
+ * the full text still reaches the model through the ask reason.
  */
-const auditLine = (reason) => {
+const auditLine = (reason, max = 300) => {
   const line = reason.split('\n', 1)[0].trim()
-  return line.length > AUDIT_LINE_MAX ? `${line.slice(0, AUDIT_LINE_MAX)}…` : line
-}
-
-/**
- * Render the judged input as a single bounded audit field.
- *
- * Only the pwsh channel needs this. The command-text reference classes (`.env` /
- * `.git` / credential text hits) name the *category* but never quote the
- * command that triggered it, so without this field those denials cannot be
- * attributed after the fact — the 2026-09-29 false-positive assessment had to
- * re-read session logs to recover what the live audit line had dropped. Path
- * classes are deliberately excluded because their reasons already quote the
- * offending path.
- */
-const renderAuditInput = (command) => {
-  const text = command.replace(/\s+/g, ' ').trim()
-  return text.length > AUDIT_LINE_MAX ? `${text.slice(0, AUDIT_LINE_MAX)}…` : text
+  return line.length > max ? `${line.slice(0, max)}…` : line
 }
 
 // ---------- config schema (official DSH config boundary) ----------
-// Every cordis config entry may carry a `config` block; the plugin declares a
-// Schemastery schema that the loader validates BEFORE apply and fills in with
-// defaults: `apply` always receives a complete validated config, and a wrong
-// config fails the mount with the loader's actionable ValidationError (fiber
-// FAILED) — no hand-rolled silent degradation. Category keys accept a boolean
-// (whole category on/off, v1-compatible) or an object of op-level leaves;
-// `evaluateRules` then normalizes to leaves.
-//
 // Every field carries `.volatile()`: that marker is what makes the field (a)
 // writable through the settings page and (b) committed into the RUNNING fiber
 // without a remount (knowledge `host/07` §2 — a non-volatile path throws
-// `Config field "x" is not volatile` on write and never reaches a settings
-// page). The settings service's `volatileForm()` walk keeps only volatile
-// subtrees, so a field without the marker silently disappears from the page.
-const leafObject = (keys) =>
-  z.object(Object.fromEntries(keys.map((key) => [key, z.boolean().default(true)])))
-const categorySchema = (keys) =>
-  z.union([z.boolean(), leafObject(keys)]).default(true).volatile()
-
+// `Config field "x" is not volatile` on write).
 export const Config = z.object({
-  env: categorySchema(CATEGORY_LEAF_KEYS.env),
-  git: categorySchema(CATEGORY_LEAF_KEYS.git),
-  credentials: categorySchema(CATEGORY_LEAF_KEYS.credentials),
-  system: categorySchema(CATEGORY_LEAF_KEYS.system),
-  destructive: categorySchema(CATEGORY_LEAF_KEYS.destructive),
-  unverifiable: z.boolean().default(true).volatile(),
+  // Explicitly marked sensitive files: exact absolute file paths, one per
+  // entry. A mark means "reads of this file ask for approval" — it is NOT a
+  // pre-approval. No globs, no recursion, no directory inheritance (DSR-015).
+  sensitiveFiles: z.array(z.string()).default([]).volatile(),
+  // Builtin narrow credential list (SSH key files, registry tokens, hive and
+  // dump files — see core/rules.js). Off only to hand the whole category to
+  // Auto Review.
+  credentialsReadAsk: z.boolean().default(true).volatile(),
 })
 
 export const name = 'dsh-guardrails'
 export const inject = ['tools']
 
 /**
- * Settings namespace this plugin owns. ⚠ v0.1.7 semantics: a namespace IS the
- * local loader entry id of the plugin row (`host/07` §1 — the old
- * `NAMESPACE_PATTERN` and the plugin-chosen kebab-case name are gone). The
- * bundle patch inserts the row as `id: guardrails`, so the browser card must
- * bind THIS value, not the package name `dsh-guardrails`. Renaming the row in a
- * profile patch moves the namespace and detaches the card.
+ * Settings namespace this plugin owns. ⚠ semantics (v0.1.7+, unchanged in
+ * 0.2.0): a namespace IS the local loader entry id of the plugin row
+ * (`host/07` §1). The bundle patch inserts the row as `id: guardrails`, so the
+ * browser card must bind THIS value, not the package name. Renaming the row in
+ * a profile patch moves the namespace and detaches the card.
  */
 export const SETTINGS_NS = 'guardrails'
 
@@ -121,65 +83,36 @@ function readConfig(config) {
 }
 
 /**
- * Judge one tool execution against the guard rules.
- * The base directory comes from `sandboxPolicy.resolve({ session })` — the
- * same identity the official tool chain enforces against (DSR-007); without
- * the sandbox-policy service the base is `''` (defensive degradation: only
- * absolute-prefix rules can still match).
+ * The content-read tools V2 covers, and where their target path lives.
+ * `grep` is judged through exact-path equality like the other tools: its
+ * `path` only asks when it names the sensitive file itself, so a directory or
+ * workspace search never matches a marked FILE path — wide searches stay with
+ * Auto Review by construction (DSR-015).
+ */
+const READ_TOOLS = new Set(['read', 'read_image', 'grep'])
+
+/**
+ * Judge one tool execution for a sensitive content read.
  *
- * @returns the deny reason (a string is a monotonic refusal), or `undefined`.
- *   A guard bug must not deadlock the session: internal errors are logged
- *   loud and the call is allowed (fail-open hook layer).
+ * @returns `{ kind: 'ask', reason }` on a hit, `undefined` otherwise.
+ *   An internal error must not deadlock the tool waterfall: it is logged loud
+ *   and swallowed (fail-open listener layer).
  */
 function judgeExecution(execution, rawConfig, sandboxPolicy) {
   try {
-    if (!execution || typeof execution.name !== 'string' || !execution.arguments) {
-      return undefined
-    }
-    // Live read: a settings-page edit lands in the volatile refs, so the next
-    // judgment already sees it — no rebuild hook, no stale snapshot window.
+    if (!execution || typeof execution.name !== 'string' || !execution.arguments) return undefined
+    if (!READ_TOOLS.has(execution.name)) return undefined
+    const args = execution.arguments
+    const raw = args.file_path ?? args.path
+    if (typeof raw !== 'string' || raw.length === 0) return undefined
     const rules = evaluateRules(readConfig(rawConfig))
     const session = execution.agent?.session
     const base = sandboxPolicy?.resolve(session ? { session } : {}).workspaceRoot ?? ''
-    const toolName = execution.name
-    const args = execution.arguments
-    let reason
-    /** Bounded command text to log alongside a pwsh denial; unset for other tools. */
-    let deniedInput
-    if (toolName === 'read' || toolName === 'write' || toolName === 'edit' || toolName === 'read_image') {
-      const hit = checkPath(
-        base,
-        args.file_path,
-        toolName === 'write' || toolName === 'edit',
-        false,
-        rules,
-      )
-      if (hit) reason = PATH_REASON_BY_CATEGORY[hit.category](hit)
-    } else if (toolName === 'grep' || toolName === 'glob') {
-      // grep reads content; glob only enumerates names.
-      const hit = checkPath(base, args.path, false, toolName === 'glob', rules)
-      if (hit) reason = PATH_REASON_BY_CATEGORY[hit.category](hit)
-    } else if (toolName === 'pwsh') {
-      const command = args.command
-      if (typeof command === 'string' && command) {
-        const workdir =
-          typeof args.workdir === 'string' && args.workdir ? args.workdir : undefined
-        reason = checkCommand(workdir ? resolvePath(base, workdir) : base, command, rules)
-        // The command-text reference classes name a category without quoting the
-        // command, so the judged input is logged separately for the pwsh
-        // channel; the path classes already quote their offending path.
-        if (reason) deniedInput = renderAuditInput(command)
-      }
-    }
-    if (reason) {
-      console.log(
-        `[guardrails] denied ${toolName}: ${auditLine(reason)}` +
-          (deniedInput === undefined ? '' : `\n[guardrails] denied input: ${deniedInput}`),
-      )
-    }
-    return reason
+    const hit = checkSensitiveRead(resolvePath(base, raw), rules)
+    if (hit === null) return undefined
+    return { kind: 'ask', reason: askMessage(hit, raw, execution.name) }
   } catch (error) {
-    // Fail-open with a loud log: a guard bug must not deadlock the session.
+    // Fail-open with a loud log: a listener bug must not wedge the waterfall.
     console.error(
       '[guardrails] internal error (fail-open):',
       error && error.message ? error.message : String(error),
@@ -189,9 +122,9 @@ function judgeExecution(execution, rawConfig, sandboxPolicy) {
 }
 
 /**
- * Plugin entry: declare the configuration page policy and install the global
- * monotonic guard. The guard stays active even with no settings service — the
- * source then reads the composition entry exactly as composed.
+ * Plugin entry: declare the configuration page policy and install the
+ * pre-execute ask gate. The gate stays active even with no settings service —
+ * the source then reads the composition entry exactly as composed.
  */
 export function apply(ctx, config = {}) {
   // Mount-time validation. The loader already validated the row's config, but
@@ -207,5 +140,11 @@ export function apply(ctx, config = {}) {
   })
 
   const sandboxPolicy = ctx.get('sandboxPolicy')
-  ctx.effect(() => ctx.tools.guard((execution) => judgeExecution(execution, config, sandboxPolicy)))
+  ctx.effect(() =>
+    ctx.on('tools/pre-execute', async (execution, next) => {
+      const decision = judgeExecution(execution, config, sandboxPolicy)
+      if (decision !== undefined) return decision
+      return next()
+    }),
+  )
 }

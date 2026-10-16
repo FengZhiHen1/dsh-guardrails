@@ -1,19 +1,14 @@
-// path-check — path normalization and the path-level rule check.
+// path-check — path normalization and the V2 sensitive-read match.
 //
 // Boundary: pure synchronous helpers (no fs, no async); depends on
-// core/rules.js for denylist data and category switches only.
-// Reference: docs/technical-details/规则模型.md; DSR-005.
+// core/rules.js for the target lists only.
+// Reference: docs/decisions/DSR-015.
 
 import {
   CRED_BASENAME_PREFIXES,
   CRED_BASENAMES,
   CRED_COMBOS,
-  CRED_DIR_SEGMENTS,
-  CRED_SUFFIXES,
-  SAFE_CRED_DIR_FILES,
-  SYSTEM_COMBOS,
-  SYSTEM_PREFIXES,
-  isSensitiveEnvName,
+  PUBLIC_KEY_SUFFIX,
 } from './rules.js'
 
 /** Replace backslashes with forward slashes (Windows paths accept both). */
@@ -48,53 +43,21 @@ export const baseNameOf = (p) => {
 /** Lowercase slash-normalized form for case-insensitive comparison. */
 export const normCompare = (p) => slash(p).toLowerCase()
 
-/** Whether a resolved path enters a `.git` directory at any depth. */
-export function entersGitDir(resolved) {
-  return segmentsOf(resolved).includes('.git')
-}
-
 /**
- * Whether a resolved path targets a credential file, directory, or combo.
- * Matches basenames (incl. hive transaction-log prefixes), suffixes
- * (.pem/.key/...), credential directory segments, and username-independent
- * adjacent segment combos (browser profiles, Windows stores, system hives).
- *
- * DSR-013: a directory segment may carry named exceptions (see
- * {@link SAFE_CRED_DIR_FILES}). An excepted NAME is not automatically allowed —
- * it only escapes the directory-segment hit, and only as the final segment
- * directly inside that directory, so every remaining rule (suffix, basename,
- * combo, a deeper or differently-named sibling) still applies. That is what
- * keeps `~/.ssh/config` readable while `~/.ssh/config.bak` and
- * `~/.ssh/sub/config` stay blocked.
+ * Whether a resolved path targets a builtin credential file.
+ * Narrow V2 list: named credential basenames (incl. hive transaction-log
+ * prefixes), `.pub` excluded, and the single `~/.aws/credentials` combo.
  *
  * @param resolved - slash-normalized path.
- * @param allowSafeDirFiles - whether the DSR-013 exceptions apply. True for
- *   reads and listings; false for writes/edits, because the relaxation is
- *   read-only (a rewritten alias table silently redirects connections, and the
- *   command-text channel applies the same split via
- *   `CRED_TEXT_REFERENCE_STRICT`). Defaults to true so path-shape callers that
- *   only ask "is this a credential target at all" keep the read semantics.
  */
-export function pathTargetsCredentials(resolved, allowSafeDirFiles = true) {
+export function pathTargetsCredentials(resolved) {
   const segs = segmentsOf(resolved)
   const lowerSegs = segs.map((s) => s.toLowerCase())
   const base = lowerSegs.length ? lowerSegs[lowerSegs.length - 1] : ''
+  if (base.endsWith(PUBLIC_KEY_SUFFIX)) return false
   if (CRED_BASENAMES.has(base)) return true
-  // Windows hive transaction logs carry the same data as the hive itself.
   for (const prefix of CRED_BASENAME_PREFIXES) {
     if (base === prefix || base.startsWith(prefix + '.')) return true
-  }
-  for (const suffix of CRED_SUFFIXES) {
-    if (base.endsWith(suffix)) return true
-  }
-  for (let i = 0; i < lowerSegs.length; i += 1) {
-    if (!CRED_DIR_SEGMENTS.has(lowerSegs[i])) continue
-    // The exception needs the safe name to BE the final segment of THIS
-    // directory: an inner hit (`~/.ssh` in `~/.ssh/sub/config`) has a following
-    // segment, so it does not qualify and is judged as a credential dir.
-    const safeFiles = allowSafeDirFiles ? SAFE_CRED_DIR_FILES.get(lowerSegs[i]) : undefined
-    if (safeFiles?.has(base) && i === lowerSegs.length - 2) continue
-    return true
   }
   for (const combo of CRED_COMBOS) {
     for (let i = 0; i + combo.length <= lowerSegs.length; i += 1) {
@@ -105,58 +68,19 @@ export function pathTargetsCredentials(resolved, allowSafeDirFiles = true) {
 }
 
 /**
- * Whether a resolved path is inside a W0 system area (DSR-001/DSR-005):
- * absolute drive prefixes (the rule model targets the C: system drive) or
- * username-independent segment combos for startup folders / PowerShell profiles.
- */
-export function isSystemAreaPath(resolved) {
-  const lower = slash(resolved).toLowerCase()
-  if (SYSTEM_PREFIXES.some((p) => lower === p || lower.startsWith(p + '/'))) return true
-  const segs = segmentsOf(resolved).map((s) => s.toLowerCase())
-  for (const combo of SYSTEM_COMBOS) {
-    for (let i = 0; i + combo.length <= segs.length; i += 1) {
-      if (combo.every((s, j) => segs[i + j] === s)) return true
-    }
-  }
-  return false
-}
-
-/**
- * Path-level rule check for the read/write/edit/read_image/grep/glob tools.
- * `metadataOnly` marks name-enumerating calls (glob): only pure credential
- * targets are sensitive at that level. Each category gate reads its
- * read/modify/list leaf according to this call's operation (DSR-006 leaves).
+ * V2 sensitive-read match for one resolved path.
  *
- * @param base - judgment base directory (resolved workspace root; DSR-007).
- * @param raw - raw path argument from the tool call.
- * @param modifying - whether the call mutates the target.
- * @param metadataOnly - whether the call only enumerates names.
- * @param rules - op-level leaves from {@link evaluateRules}.
- * @returns `null` when allowed, else `{ category, modifying, raw }` for the
- *   caller (adapter) to render the deny message.
+ * Builtin list first (when enabled), then the user-marked list. `glob` and
+ * other metadata enumeration never reach this function (the adapter only calls
+ * it for content reads); writes/edits/deletes are out of V2 scope entirely.
+ *
+ * @param resolved - slash-normalized absolute path.
+ * @param rules - `{ sensitiveFiles, credentialsReadAsk }` from {@link evaluateRules}.
+ * @returns `'credentials'` | `'marked'` | `null`.
  */
-export function checkPath(base, raw, modifying, metadataOnly = false, rules) {
-  if (typeof raw !== 'string' || raw.length === 0) return null
-  const resolved = resolvePath(base, raw)
-  if (!metadataOnly) {
-    if ((modifying ? rules.env.modify : rules.env.read) && isSensitiveEnvName(baseNameOf(resolved))) {
-      return { category: 'env', modifying, raw }
-    }
-    if ((modifying ? rules.git.modify : rules.git.read) && entersGitDir(resolved)) {
-      return { category: 'git', modifying, raw }
-    }
-  }
-  const credentialsOn = metadataOnly
-    ? rules.credentials.list
-    : modifying
-      ? rules.credentials.modify
-      : rules.credentials.read
-  if (credentialsOn && pathTargetsCredentials(resolved, !modifying)) {
-    return { category: 'credentials', modifying, raw }
-  }
-  // W0: writes into system areas only; reads and listings stay allowed (DSR-005).
-  if (rules.system.write && modifying && isSystemAreaPath(resolved)) {
-    return { category: 'system', modifying: true, raw }
-  }
+export function checkSensitiveRead(resolved, rules) {
+  if (rules.credentialsReadAsk && pathTargetsCredentials(resolved)) return 'credentials'
+  const lower = normCompare(resolved)
+  if (rules.sensitiveFiles.some((p) => normCompare(p) === lower)) return 'marked'
   return null
 }

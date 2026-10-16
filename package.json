@@ -1,6 +1,6 @@
 {
   "name": "dsh-guardrails",
-  "version": "1.7.0",
+  "version": "2.0.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -19,7 +19,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-settings": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.2.0-rc.2",
     "@deepseek-ai/schemastery": "^3.18.4"
   },
   "devDependencies": {
@@ -27,9 +27,8 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --check index.js && node --check src/core/rules.js && node --check src/core/path-check.js && node --check src/core/command.js && node --check src/core/destructive.js && node --check src/core/deny-messages.js && node --check src/core/check-command.js && node --check src/adapter/host.js && node --check src/client/card.js && node --test test/*.test.mjs",
-    "verify": "node verify/run-verify.mjs",
-    "corpus": "node tools/corpus-replay.mjs"
+    "check": "node --check index.js && node --check src/core/rules.js && node --check src/core/path-check.js && node --check src/core/ask-messages.js && node --check src/adapter/host.js && node --check src/client/card.js && node --test test/*.test.mjs",
+    "verify": "node verify/run-verify.mjs"
   },
   "engines": {
     "node": "^22.19.0 || >=24"

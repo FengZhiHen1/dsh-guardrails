@@ -307,7 +307,7 @@ if (!existsSync(NPM_CLI)) {
       const filesOk =
         existsSync(join(installedRoot, 'index.js')) &&
         existsSync(join(installedRoot, 'src', 'client', 'card.js')) &&
-        existsSync(join(installedRoot, 'src', 'core', 'command.js')) &&
+        existsSync(join(installedRoot, 'src', 'core', 'path-check.js')) &&
         existsSync(join(installedRoot, 'cordis.patch.yml'))
       const importRun = run(
         [

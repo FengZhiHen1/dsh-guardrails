@@ -1,160 +1,77 @@
-# dsh-guardrails — DSH 权限守护层
+# dsh-guardrails — DSH 敏感读审批层
 
-对 AI 发起的工具调用做**硬阻断**（不弹确认框）的 Host 插件：
+对 AI 发起的**敏感文件内容读取**请求 DSH 原生一次性审批（ask / allow-once）的 Host 插件：
 
-1. 访问敏感 `.env` 文件（read/write/edit/grep/pwsh）
-2. 访问 `.git` 目录内部（read/write/edit/grep/glob/pwsh）
-3. 访问凭据文件（SSH 私钥、云/注册表 token、密钥存储、浏览器资料、Windows 凭据/DPAPI、系统 Hive、转储文件）
-4. 写入 Windows 系统区（W0：**只拦写**，读与列举放行）
-5. 执行高风险破坏性命令（PowerShell 方言静态分析）
+1. **内置凭据名单**：SSH 具名私钥（`id_rsa`/`id_ed25519`/…）、注册表/命令行令牌文件（`.npmrc`/`.pypirc`/`.netrc`/`.pgpass`/`.git-credentials`）、DSH 凭据文件（`.credentials.yaml`/`.auteur-media-secret`）、`~/.aws/credentials`、Windows Hive（`NTUSER.DAT` 等，含事务日志）与转储文件（`pagefile.sys`/`hiberfil.sys`）、system32 hive 组合
+2. **用户标记的敏感文件**：在插件设置页按绝对路径精确列出（如 `E:/Project/app/.env.production`、`~/.kube/config`）；标记只在读取时触发审批，不是预先批准
 
-仅拦截 AI 工具调用，不拦截用户自己的命令；纯静态分析，不产生子进程。
+**本插件不再拒绝（deny）任何调用。** 旧 v1 的硬阻断（`.env` 全局拦截、`.git` 内部拦截、系统区写、PowerShell 破坏性命令静态分析）在 v2.0.0 全部退役——这些上下文相关的判断交给 DSH 原生 Auto Review 与 OS 权限。设计依据：`docs/decisions/DSR-015-审批式敏感读与职责收缩.md`。
 
-**覆盖的工具名是固定的**：`read` / `write` / `edit` / `read_image` / `grep` / `glob` / `pwsh`。
-其他工具不在此插件的规则范围内（harness 自身的权限管线仍对它们生效）。
+## 拦截语义
 
-## 拦截语义：敏感类别 × 操作类型
+- **触发面**：`read` / `read_image` / `grep`（显式单文件路径）对命中目标的内容读取 → `{ kind: 'ask' }` → DSH 原生一次性审批。
+- **批准一次只放行对应调用**；再次读取重新审批。拒绝/取消/不可用（无审批通道、`never` 策略）一律不执行。
+- **不触发**：普通文档与代码读取、`.env.example` 等模板、`*.pub` 公钥、`~/.ssh/config`（路由表）、`.git` 正常读取、元数据列举（`glob`）、目录级/工作区级 grep 搜索、一切写/改/删、pwsh/bash 命令。
+- 审批提示只含动作与目标路径，**绝不读取或记录文件内容**。
+- 未挂载 approval 服务时 `ask` 退化为拒绝（fail-closed，DSH 原生语义）；插件自身判定层异常时放行并大声记日志（fail-open）。
 
-访问按操作分类，不是"提及即拦"：
+## 有限覆盖声明（重要）
 
-| 敏感类别 | 内容读/写 | 元数据列举 |
-|---|---|---|
-| 凭据（`.ssh`/`.aws`/`.gnupg`/`.kube`/`.pki`、`id_rsa`/`.npmrc`/`.credentials.yaml`/`.auteur-media-secret`、范围 B：`.git-credentials`/`NTUSER.DAT`/`pagefile.sys`/`SAM`/浏览器资料/DPAPI 等） | 拦（**例外**：`~/.ssh/config` 的读放行，见下） | 拦（文件存在性本身敏感） |
-| `.env` 文件 | 拦 | 放行 |
-| `.git` 目录 | 拦 | 放行 |
-| 系统区（`C:\Windows`/`C:\Program Files`/`C:\Program Files (x86)`/`C:\ProgramData`/`C:\Recovery`、用户启动目录、PowerShell Profile） | 只拦写 | 放行 |
+本插件是**降低误操作概率的审批触发器，不是机密性边界**。以下路径不经过或不能被它识别：shell/脚本间接读取、目录级搜索间接命中、符号链接别名、PTC `run_code` 内的直接 Node 操作、同权限其他进程/插件。需要真实强隔离时使用 OS 账户权限/沙箱（DSH `workspace-write`、Windows ACL runner 等），不要依赖本插件兜底。宽范围搜索能否命中标记文件由 Auto Review 的模型审查把关。
 
-- 命令文本：整条命令全部由元数据动词组成（`Get-ChildItem`/`ls`/`dir`/`Get-Item`/`Test-Path`/`Resolve-Path`/`Split-Path` 等，以及格式化/过滤动词 `Select-Object`/`Sort-Object`/`Where-Object`，且无 `$()` 子表达式、无重定向）才按"列举"处理；否则按内容访问走全规则（未识别命令保持保守）。
-- 命令文本先经**字面量重建**：可静态求值的 `$()`（如 `$('nv')`）与同命令内的赋值变量（`$p='.env'`）会先还原为字面量，再跑全部规则——`$()` 拼接、变量间接调用无法再隐藏敏感名（每次 pwsh 调用都是全新进程，变量无法跨调用持久）。
-- **语句位置按 PowerShell 语法判定**（DSR-012）：词首为引号的语句是**输出**（裸字符串），不是被调用的命令（`"cmd" arg` 是语法错误，`$(...) arg` 是运行时错误）；只有前置 `&`/`.` 才是显式调用。"命令本身是动态的"因此只在**词首是 `$(`** 时成立——`$n=1; "total: $($n.Count)"` 这类合法插值输出不再被误拦（实测真实语料中被拦总数 478 → 76 即由此而来）。
-- 重建后仍含动态 `$()` 的命令：若命令本身或**内容/删除类动词**（`Get-Content`/`Set-Content`/`Remove-Item`/`Copy-Item`/`Out-File`/`New-Item` 等）的参数由动态表达式构成，目标无法静态验证，一律保守拦截（与类别开关无关的 fail-safe 层，受 `unverifiable` 键控制，缺省开）。
-- **双引号插值的子表达式会作为命令被判定**（DSR-012）：`"$(...)"` 在 PowerShell 中**真的执行**，故其内容递归跑全部规则——`Write-Output "$(Get-Content .env)"`、`"$(Remove-Item C:\Windows\x -Recurse)"`、`"$(git reset --hard)"` 全部拦截（此前这三类同时逃过内容引用、系统区写、破坏性三层）。单引号不插值，维持字面量。
-- 工具层：`read`/`grep`/`write`/`edit` 是内容访问（全规则）；`glob` 只列举（仅凭据目标拦截）。
-- **系统区写检测**（W0）：写类动词（`Set-Content`/`Remove-Item`/`New-Item`/`Copy-Item`/`Move-Item`/`Out-File` 等）的静态目标、重定向目标（`>`/`>>`/`2>`）命中系统区前缀即拦；带 cd 链模拟（`cd C:\Windows; Set-Content x y` 同样被拦）。读与列举始终放行（DSR-005）。
-- 破坏性分析（`rm -rf`、`Get-ChildItem | Remove-Item`——含中间夹过滤/格式化动词或 `%`/`ForEach-Object` 脚本块的管道、`git reset --hard`、机器级命令、**绝对盘根删除**（`Remove-Item C:\`/`D:\`/`/` 及 `C:\*` 通配形态）、**无门控链删**（同调用内 move/copy/rename 之后经 `;`/换行/裸`&` 接带 `-Recurse`/`-Force`/`-r`/`-f`/`/s` 的删除；`&&` 或 `-ErrorAction Stop` 视为错误门）、**参数误用**（`-LiteralPath` 等携带 `*`/`?`——必败且静默；removal/mutator 的通配解析目标携带 `[ ]`——会命中未指名文件）等）逐子族受 `destructive` 配置控制（八子族缺省全开，DSR-006/009）；其中删除目标分析（盘根/工作区根）属 `target` 子族，关闭对应拦截即放行。
-- 混合目录说明：`.dsh`（含 `sessions/` 会话历史、skills/attachments/profiles 等）不是敏感类别，读/写/列举均放行（见 DSR-003 重访注记）；`.dsh` 下的凭据文件（`.credentials.yaml`、`.auteur-media-secret`）仍按凭据名单拦截。
-- **SSH 别名例外**（DSR-013）：`~/.ssh/config` 的**读与列举放行、写仍拦**。该文件是 `Host` 别名到主机/用户/密钥文件的路由表，不含密钥材料；拦住它会让"`ssh <别名>`"这条正路对 Agent 不可达（别名无从发现、`glob ~/.ssh` 又被拦），而守卫本来就只守密钥**物质**（`ssh <别名>` 用着私钥却放行，`ssh -i <key>` 才拦）。例外是**具名且极窄**的：只有 `.ssh` 直接子级、文件名恰为 `config` 的那一个文件，且仅在读/列举通道——`id_rsa`、`*.pem`、`known_hosts`、`config.bak`、`sub/config`、`glob ~/.ssh`、`write ~/.ssh/config`、`.kube/config`（真令牌存储）全部维持拦截。凭据拒绝文案会引导走别名（`ssh <别名>`；`ssh -G <别名>` 查生效的主机/用户/密钥），且该文案引用 config 路径不会被自己拦（DSR-010 的误伤形态）。
+## 已知边界
+
+- 覆盖工具固定为 `read`/`read_image`/`grep` 的**确定单文件目标**；目录级 `grep` 按精确路径等值判断，不会因项目里存在标记文件而升级。
+- 内置名单只按文件 basename / 固定段组合匹配：`.pem`/`.key` 等后缀**不再拦截**（v1 实测 24/24 为属性访问误报）；`.ssh`/`.aws` 等目录本身、浏览器资料、DPAPI、`.docker/config.json`、`.kube/config` 等混合载体**不再默认拦截**——需要时在设置页自行标记。
+- 判定基准目录来自 `sandboxPolicy.resolve({ session })`；无该服务时绝对路径目标仍可判定。
+- Windows 大小写不敏感、分隔符统一（`\`→`/`）；不做 fs 探测，不解析符号链接。
+
+## 配置
+
+全部字段 `.volatile()`：设置页修改即写入本 profile 的 `cordis.patch.yml` 并立即生效，无需重启。
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `sensitiveFiles` | `string[]` | `[]` | 精确绝对路径清单；相对路径、通配符挂载即失败 |
+| `credentialsReadAsk` | `boolean` | `true` | 内置凭据名单开关；关闭后整类交 Auto Review |
+
+**配置入口**：侧栏「插件」→ dsh-guardrails → 行内「配置」——内置名单开关 + 标记文件路径编辑器（每行一个绝对路径），由官方 `SettingsForm` 呈现。命名空间 = loader 条目 id `guardrails`（改名即脱钩）。
+
+profile 覆盖形态示例：
+
+```yaml
+- id: guardrails
+  config:
+    credentialsReadAsk: true
+    sensitiveFiles:
+      - E:/Project/app/.env.production
+      - C:/Users/me/.kube/config
+```
 
 ## 包形态（DSH 官方 Bundle 范式）
 
-- `package.json` 声明 `dsh.bundle.patch: ./cordis.patch.yml`，`files` 包含
-  `index.js`（薄转发）、`src/`（core/adapter/client 三层）与
-  `cordis.patch.yml`；
-- `cordis.patch.yml` 是随包分发的安装层：`insert` 一行
-  `{ id: guardrails, name: dsh-guardrails }`，行名与包名一致，
-  供 Node 模块解析；行 `id` 同时就是该插件的 **settings 命名空间**
-  （v0.1.7 起命名空间 = loader 条目 id）；
-- profile 通过 `dsh plugin --profile <name> add <包>` 安装：pnpm 写入依赖，
-  CLI 自动把声明了 `dsh.bundle` 的包追加进 `dsh.profile.bundles`。
+- `package.json` 声明 `dsh.bundle.patch: ./cordis.patch.yml`，`files` 包含 `index.js`（薄转发）、`src/`（core/adapter/client 三层）与 `cordis.patch.yml`；
+- `cordis.patch.yml` `insert` 一行 `{ id: guardrails, name: dsh-guardrails }`；行 `id` 同时是该插件的 settings 命名空间；
+- profile 通过 `dsh plugin --profile <name> add <包>` 安装。
 
 ## 部署形态（单一源码）
 
 本目录是**唯一源码**，按 AGENTS.md 红线分 profile 挂载：
 
-- **test（试验）profile**：允许源码直挂。`dsh plugin --profile test add`
-  指向本目录，得到 `link:` 依赖（node_modules 中是符号链接，源码改动
-  **重启即生效**，无需重新安装）。插件行由 bundle 层提供，test 的用户层
-  patch 不得再 insert 同一行。
-- **web（稳定）profile**：只吃发布物。当前形态为 **`github:` git 依赖**（manifest 未钉 ref，lockfile 的 resolution 钉 commit——钉 ref 非硬性要求；发布/挂载 web 前必须过 **test 实测门禁**，见 AGENTS.md「发布前置门禁」与 `verify/run-verify.mjs` 第 4 步启动冒烟）。`npm publish` 发布后切换为 `dsh plugin --profile web add dsh-guardrails`（registry 版本）。每次源码更新需 push 到该仓库，并（推荐）以新 commit ref 重新 `add` 以固定 lockfile 基线。
+- **test（试验）profile**：允许 `link:` 源码直挂，源码改动重启即生效；
+- **web（稳定）profile**：只吃发布物——当前为 `github:` git 依赖（lockfile 承载 resolution；推荐钉 ref），发布 npm 后切换 registry 版本。**挂载/更新 web 前必须过 test 实测门禁**（AGENTS.md「发布前置门禁」）。
 
-## 配置覆盖
+> ⚠️ **基线要求（硬性）**：v2.0.0 适配 **DSH `0.2.0-rc.2` 及以后**（peer `@deepseek-ai/dsh-settings ^0.2.0-rc.2`）。在 `0.1.7-rc.2` 等旧运行时上，peer 门禁会把该行**静默禁用**（stderr 一行 `disabling profile plugin`，实例照常启动、守护消失）——**升级顺序：先把实例升到 `0.2.0-rc.2`，再挂载/更新本插件**。旧实例继续用 v1.7.0 发布物（`ctx.tools.guard` 硬阻断模型）。
 
-防御层全量配置化（DSR-006）：每个防御层都是独立开关，缺省全开（关闭必须显式写 `false`，子键缺省继承 `true`）。类别键接受布尔（= 整类开/关）或对象（= 按操作细分）。
+## 审批超时（T-A 结论，2026-10-16 源码核查）
 
-**配置入口（DSH 官方范式）**：
-
-1. **插件页（推荐）**：侧栏「插件」→ 找到 **dsh-guardrails** → 展开其组件行 `guardrails` → 点「配置」——每个防御层叶子开关 + 重置。修改在页面内**本地暂存**，点「保存」统一写入**本 profile 的 `cordis.patch.yml`**（单次原子 mutation）并立即生效于后续判定；「重置」清除对应项的用户覆盖、回落插件行默认。卡片随包分发（浏览器半侧 `src/client/card.js`，`dsh.client` 声明），经 `ctx.configForms` 读 Host 提供的 `guardrails` 命名空间（v0.1.7 模型：命名空间 = loader 条目 id；配置真相 = 该条的 Cordis `Config`，六个字段全部 `.volatile()`，保存即提交进运行中的 fiber——无重挂载、无 `onChange`）。
-2. **插件行 config（部署层）**：作为设置分节的 **base 层**，被设置页写入覆盖；settings 服务不可用时插件完全按行配置工作。默认值只属于导出的 Schemastery `Config` schema（loader 在 `apply` 前验证并填充默认值；非法类型加载期报 `ValidationError` 挂载失败；未知键/未知子键由 `evaluateRules` 拒绝）。
-
-> ⚠️ **基线要求（硬性）**：本插件（v1.6.0 起）适配 **DSH `0.1.7-rc.2` 及以后**。在 `0.1.2-rc.1` 等旧运行时上，**插件整行不会加载**——`Config` 在 import 期即调用 `.volatile()`，而旧版携带的 schemastery 3.18.2 没有该方法（实测抛 `TypeError: s.volatile is not a function`），**硬拦截随之失效**。⇒ **升级顺序：先把实例升到 `0.1.7-rc.2`，再挂载/更新本插件**；反向操作会静默失去守护。
-
-profile 覆盖形态示例（部署基线）：
-
-```yaml
-- id: guardrails
-  config:
-    env:          { read: true, modify: true }   # .env 路径内容访问（读/写）
-    git:          { read: true, modify: true }   # .git 内部内容访问（读/写）
-    credentials:  { read: true, modify: true, list: true }  # 凭据 读/写/列举
-    system:       { write: true }                 # 系统区写入（W0）
-    destructive:
-      git: true      # git reset --hard / clean -f / force push / branch -D ...
-      machine: true  # 关机/磁盘/net user/杀进程/清空等机器级命令
-      eval: true     # 不可信内容执行（curl|bash、.NET 直调）
-      cli: true      # docker prune / terraform / kubectl / aws s3 rm / dropdb ...
-      bulk: true     # Get-ChildItem | Remove-Item 管道批删
-      target: true   # 盘根/工作区根/动态 cd 删除目标分析（绝对破坏层，慎关）
-      chain: true    # 无错误门的"移动/复制 → 递归强删"同调用串联（DSR-009）
-      misuse: true   # -Literal* 带通配符 / [ ] 通配字符类命中删除与搬移动词（DSR-009）
-    unverifiable: true  # 动态 $() 目标 fail-safe（慎关：检测力下降）
-
-# 例：test 环境放松——只对 CLI 数据破坏器降级：
-- id: guardrails
-  config:
-    destructive: { cli: false }
-```
-
-- 非法配置（未知键、非布尔、非对象）挂载即失败，不会静默降级。
-- 关闭任意一个防御层前，请先阅读上方"已知限制与边界"中对应条目的风险标注；`destructive.target` 与 `unverifiable` 关闭后对应拦截**完全放行**。
-- v1 五键布尔写法依然有效（等价于对应类别全开/全关）。
-- 若要改某 profile 的配置，在**该 profile 自己的 `cordis.patch.yml`** 里按 `id: guardrails` 做 id-targeted override，而不要再次 insert 同一行。
-  - ⚠️ **重复 insert 不再报错**：旧基线会以 `duplicate loader entry id` 让整个 profile 启动失败，但该守卫**已被上游 revert 删除**（`dsh-v0.1.7-rc.2` 起），重复 id 改为**静默后者胜出**——排查冲突不能再指望报错，只能人工核对各层行清单。`--dump-config` 层两代都不做重复 id 判别。
-- ⚠️ 设置页保存的**优先级低于** home 级 `cordis.patch.yml` 与命令行 overlay：会被遮蔽的写入在持久化前即被拒绝（不落盘，也不静默丢弃）。
-
-## 已知限制与边界
-
-- 覆盖工具固定为 `read`/`write`/`edit`/`read_image`/`grep`/`glob`/`pwsh`；
-  其他具备文件能力的工具（如 `bash`、`git` 工具等）不在本插件规则内。
-- 纯静态文本分析：符号链接/junction 指向敏感目标的逃逸无法探测（插件
-  不做 fs 探测）；`$env:` 环境变量路径（如 `$env:windir\x`）无法静态解析，
-  不命中前缀规则（动态 `$()` 目标另有 fail-safe 拦截）。
-- 文本引用规则对"提及"敏感：在模式/字符串里**提到**凭据名或 `.env`
-  （如 `Select-String -Pattern "\.env"`）的只读元数据命令也会被拦——
-  保守取舍，避免文本混淆绕过；`git` 等常见只读命令不在列举白名单中，
-  只能走全规则。
-- **`& $var`（变量作命令名）不拦**（DSR-012 显式接受的边界）：真解析需完整 PowerShell 语法。该形态在 DSH 的实际调用方式（新进程 + `-NoProfile -NonInteractive`）下无可利用性——未赋值的 `& $exe --help` 抛 `InvalidOperation` 且**不执行任何命令**；已赋值的合法写法由字面量重建还原为字面量（实测语料 53 处 `& $var` 全部还原，0 处残留动态）。
-- **子表达式深度上界 8，到界 fail-closed**（2026-10-06 补修）：`MAX_SUBEXPRESSION_DEPTH` 是**工作量**界而非信任界——嵌套深度由命令作者决定，故到界且仍有未展开的子表达式时**拒绝**，由 `unverifiable` 键门控。⚠️ 旧实现到界放行，理由是"外层已看见文本"；该理由只对全文本正则类成立，`system.write` 需片段+路径解析 ⇒ 实测 9 层嵌套的系统区写曾**放行**（PowerShell 真的执行）。真实语料深度最大为 2（26,834 条中 ≥8 的 0 条），故 fail-closed 不产生误伤。
-- **`.key` 后缀只在路径通道生效**（DSR-014 显式接受的代价）：`.pem`/`.p12`/`.pfx`/`.ppk` 已在文本通道拦截（含 `ssh -i C:/keys/prod.pem` 这类凭据目录外的引用）；`.key` 因实测 24/24 全为属性访问误报（`$_.Key`/`event.key`）而**有意只留路径层**——`read C:/keys/prod.key` 仍拦，pwsh 文本里提到 `.key` 不拦。
-- **不是解析器，仍是文本启发式**：`tree-sitter-powershell` 类真解析器已评估（DSR-012 方向 B），在 **34.4%** 的真实命令上报语法错误（最大单因 `--`），parse 覆盖率不足以支撑整体替换；在无法解析处回退启发式会重新引入误伤。重访条件见 DSR-012。
-- 系统区前缀按 C: 系统盘建模；Linux/macOS 清单与注册表类命令
-  （`reg`/`HKCU:`）不在 v1 范围（见 DSR-001）。
-- **DSH 自管理面不拦截**（DSR-008）：对 `$DSH_HOME` 配置面（本 profile 的
-  `cordis.patch.yml`、`profiles/*/package.json`、遗留 `settings.yaml`）、DSH
-  安装目录与会话日志的读写一律放行——AI 协助修改 DSH 配置是预期用法。推论
-  （显式接受的边界）：`danger-full-access` 模式下 AI 可经该 profile 的
-  `cordis.patch.yml` 调整本插件自身规则（自我解除通道；v0.1.7 起设置页的写入
-  也落在该文件）；`workspace-write` 模式下该通道已由沙箱围栏关闭（工作区
-  外写被拒）。进程级保护仍在：按名杀 `dsh`/`node`/`pwsh` 等进程被
-  `destructive.machine` 拦截（按 PID 杀不在覆盖内）。
-- **链删/误用规则的无状态边界（DSR-009，显式接受的缺口）**：`chain` 只判**同一命令调用内**的
-  "移动/复制 → 无门控 → 递归强删"串联；move 与删除分属**两次调用**时（即使相隔只有一个回合）
-  判定层没有任何上下文，唯一副本删除不拦——跨调用状态方案已评估并否决（见 DSR-009），该缺口由
-  顶层仓库 AGENTS.md 的"破坏性命令纪律"规程补偿，**勿依赖本插件兜底**。控制流级错误门
-  （`try/catch`、`if ($?)`、`$ErrorActionPreference`）不识别，此类串联按误伤方向拦。
-- 先写脚本文件（`.ps1`）再执行、`-EncodedCommand` 等形态对文本层不可见：静态守卫防 AI 的
-  意外，不防对抗性绕道（定义性边界）。
-- `[ ]` 通配字符类判定按 Windows FileSystem provider 语义建模（与 C-05 运行环境假设一致）。
-- 判定层 fail-closed（无法分类的命令按全规则处理），钩子层 fail-open
-  （guard 内部异常记录并放行，防止死锁会话）——两层语义不可互换。
-
-## 常见错误与排查
-
-- **合法操作被拦**：拒绝消息会说明命中的类别与替代方案。属保守取舍（见"已知限制与边界"）时，可让用户手动执行该操作，或在 profile 自己的 `cordis.patch.yml` 中按 `id: guardrails` 关闭对应规则（`env: false` 等），重启 profile 生效。
-- **profile 启动失败，报 `unknown config key` / `must be a boolean`**：插件行的 `config` 有非法键或非法值；按错误信息修正 profile 的 patch 层。
-- **同一 `guardrails` 行被 insert 两次**：bundle 层已 insert，用户 patch 层又 insert 了一次。⚠️ **不会报错**：旧基线的 `duplicate loader entry id` 守卫已被上游删除（`dsh-v0.1.7-rc.2` 起），现为**后者静默胜出**——只能人工核对各层行清单（`--dump-config` 也不做重复 id 判别）；正确做法是删除用户层的重复行、改用 id-targeted override。
-- **插件页里看不到配置卡片**：① 该 profile 的运行时是否 ≥ `0.1.7-rc.2`（旧运行时无 `configForms`，卡片不会出现）；② `--dump-config` 里 `guardrails` 行是否真的激活（行被 peer 门禁改成 `disabled: true` 时不加载，启动日志只有一行 `dsh: disabling profile plugin …`）；③ 行是否被改名（命名空间 = 条目 id，改名即脱钩）。
-- **保存被拒绝**：设置页写入的优先级**低于** home 级 `cordis.patch.yml` 与命令行 overlay；会被遮蔽的写入在持久化前被拒绝（草稿会保留在页面上）。另：只有 `.volatile()` 字段可写，非 volatile 路径的写入直接抛 `Config field "x" is not volatile`。
-- **guard 内部异常**：控制台出现 `[guardrails] internal error (fail-open)`——插件判定层出错但已放行（防死锁），收集错误信息反馈修复。
+DSH `0.2.0-rc.2` 的原生审批链**没有任何等待超时**：`@deepseek-ai/dsh-user-approval` 只提供 `policy: 'ask' | 'never'`（`never` 为立即确定性拒绝，适合无人值守/CI）；answerer pending 时审批会一直等待。无人值守场景的当前姿态：把会话审批策略设为 `never`（需要审批的操作立即拒绝），不新造定时器。统一等待上限属 DSH Approval Service / Host answerer 的公共边界，本插件不实现（设计基线 T-A 的职责划分）。
 
 ## 测试
 
-`node --test test/`（Node ≥20）：mock ctx 直接驱动 `tools.guard` 钩子，
-覆盖误伤消除与防护保持矩阵、生命周期（mount/dispose/remount ×20、HMR
-重放、双挂载不静默去重、非法配置挂载失败），不触碰文件系统。
+`node --test test/`（Node ≥20）：mock ctx 直接驱动 `tools/pre-execute` 监听器，覆盖目标匹配、配置校验、生命周期、设置接缝与客户端布线，不触碰文件系统。
 
-`node verify/run-verify.mjs` 全量验证：单元/集成/生命周期测试、覆盖率门禁
-（行覆盖 ≥80%）、test/web 组合断言（每 profile 恰一行、web 依赖为发布物
-形态）、tarball 干净目录安装 + 导入冒烟。
+`node verify/run-verify.mjs` 全量验证：单元/集成/生命周期测试、覆盖率门禁（行覆盖 ≥80%）、test/web 组合断言（每 profile 恰一行、web 依赖为发布物形态）、tarball 干净目录安装 + 导入冒烟。第 4 步启动冒烟会 spawn 真实实例，须由用户在启动器侧执行（或 `DSH_VERIFY_SKIP_BOOT_SMOKE=1` 跳过并明确登记）。
 
 ## 开源协议
 

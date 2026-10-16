@@ -1,14 +1,15 @@
-// Integration matrix: drives the plugin's tools.guard hook through a mock ctx
-// (no filesystem, no network). This is the semantic-preservation anchor for
-// the lib/ refactor — every case must behave identically to the pre-refactor
-// single-file implementation. Run with: node --test test/
+// Integration matrix: drives the plugin's tools/pre-execute listener through a
+// mock ctx (no filesystem, no network). This is the V2 semantic anchor: the
+// listener never denies — it returns `{ kind: 'ask', reason }` on sensitive
+// content reads and passes everything else through with `next()`.
+// Run with: node --test test/
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import * as guardrails from '../index.js'
 
-function makeGuard(config = {}, settings) {
-  let handler
+function makeGate(config = {}, settings) {
+  let listener
   // Mirror the real ctx.sandboxPolicy shape (DSR-007): resolve() derives the
   // workspace root from the calling session's immutable header.cwd.
   const sandboxPolicy = {
@@ -16,380 +17,156 @@ function makeGuard(config = {}, settings) {
   }
   const ctx = {
     get: (key) => (key === 'sandboxPolicy' ? sandboxPolicy : undefined),
+    // The adapter registers the listener inside an effect and returns the
+    // listener's disposer; keep the registration alive (disposal is lifecycle
+    // territory, covered by lifecycle.test.mjs).
     effect: (fn) => fn(),
+    on: (event, handler) => {
+      assert.equal(event, 'tools/pre-execute', 'the plugin must register tools/pre-execute')
+      listener = handler
+      return () => { listener = undefined }
+    },
     inject: (name, consumer) => {
       const deps = Array.isArray(name) ? name : [name]
       if (deps.includes('settings') && settings !== undefined) consumer({ ...ctx, settings })
     },
-    tools: {
-      guard: (h) => {
-        handler = h
-      },
-    },
   }
   guardrails.apply(ctx, config)
-  return (name, args, cwd = 'E:/Project/DSH_Plugins') =>
-    handler({ name, arguments: args, agent: { session: { header: { cwd } } } })
+  return {
+    /** Drive the registered listener: (name, args) → Promise<PreToolDecision | undefined>. */
+    call: (name, args, cwd = 'E:/Project/DSH_Plugins') =>
+      listener({ name, arguments: args, agent: { session: { header: { cwd } } } }, async () => ({ kind: 'allow' })),
+  }
 }
 
-const guard = makeGuard()
-const blocked = (r) => typeof r === 'string' && r.startsWith('[guardrails] Blocked')
-const allowed = (r) => r === undefined
-const pwsh = (command) => guard('pwsh', { command })
-const read = (file_path) => guard('read', { file_path })
-const write = (file_path) => guard('write', { file_path })
-const glob = (path) => guard('glob', { path })
-const grep = (path) => guard('grep', { path })
+const isAsk = (r) => r !== undefined && r.kind === 'ask' && typeof r.reason === 'string'
+const passedThrough = (r) => r !== undefined && r.kind === 'allow'
+const read = (gate, file_path) => gate.call('read', { file_path })
+const readImage = (gate, file_path) => gate.call('read_image', { file_path })
+const grep = (gate, path) => gate.call('grep', { path })
+const glob = (gate, path) => gate.call('glob', { path })
+const write = (gate, file_path) => gate.call('write', { file_path })
+const pwsh = (gate, command) => gate.call('pwsh', { command })
 
-test('listing .dsh is allowed (mixed directory, not a credential dir)', () => {
-  assert.equal(allowed(pwsh('Get-ChildItem .dsh')), true)
-  assert.equal(allowed(pwsh('ls ~/.dsh')), true)
-  assert.equal(allowed(pwsh('Test-Path .dsh')), true)
-  assert.equal(allowed(pwsh('Get-ChildItem .dsh/sessions')), true)
+test('gate registers exactly one pre-execute listener', async () => {
+  const gate = makeGate()
+  assert.equal(typeof gate.call, 'function')
 })
 
-test('listing .git / .env is allowed (metadata does not leak content)', () => {
-  assert.equal(allowed(pwsh('Get-ChildItem .git')), true)
-  assert.equal(allowed(pwsh('dir .env')), true)
+test('builtin credential reads ask; ordinary reads pass through', async () => {
+  const gate = makeGate()
+  assert.equal(isAsk(await read(gate, 'C:/Users/me/.ssh/id_rsa')), true)
+  assert.equal(isAsk(await read(gate, 'C:/Users/me/.npmrc')), true)
+  assert.equal(isAsk(await read(gate, 'C:/Users/me/.aws/credentials')), true)
+  assert.equal(passedThrough(await read(gate, 'src/core/rules.js')), true)
+  assert.equal(passedThrough(await read(gate, '.env')), true, 'plain .env is Auto-Review territory (decision C)')
+  assert.equal(passedThrough(await read(gate, '.env.example')), true)
+  assert.equal(passedThrough(await read(gate, '.git/config')), true)
+  assert.equal(passedThrough(await read(gate, 'C:/Users/me/.ssh/config')), true, 'routing table stays free')
+  assert.equal(passedThrough(await read(gate, 'C:/keys/prod.pem')), true, 'suffix rules are retired')
 })
 
-test('listing pure credential dirs stays blocked (existence is sensitive)', () => {
-  assert.equal(blocked(pwsh('Get-ChildItem .ssh')), true)
-  assert.equal(blocked(pwsh('Get-ChildItem ~/.aws')), true)
-  assert.equal(blocked(pwsh('Get-ChildItem .kube/config')), true)
+test('read_image and single-file grep are judged; glob never is', async () => {
+  const gate = makeGate()
+  assert.equal(isAsk(await readImage(gate, 'C:/Users/me/.ssh/id_rsa')), true)
+  assert.equal(passedThrough(await readImage(gate, 'E:/shot.png')), true)
+  assert.equal(isAsk(await grep(gate, 'C:/Users/me/.ssh/id_rsa')), true)
+  assert.equal(passedThrough(await grep(gate, 'E:/Project/DSH_Plugins/src')), true, 'directory grep cannot name a marked file')
+  assert.equal(passedThrough(await glob(gate, '.ssh/**')), true)
+  assert.equal(passedThrough(await glob(gate, 'C:/Users/me/.ssh')), true)
 })
 
-test('content reads of sensitive targets stay blocked', () => {
-  assert.equal(blocked(pwsh('Get-Content .env')), true)
-  assert.equal(blocked(pwsh('cat .git/config')), true)
-  assert.equal(blocked(pwsh('Get-Content .ssh/id_rsa')), true)
-  assert.equal(blocked(pwsh('Select-String .env -Pattern "TOKEN"')), true)
-})
-
-test('writes and deletes of sensitive targets stay blocked', () => {
-  assert.equal(blocked(pwsh('Set-Content .env TOKEN=1')), true)
-  assert.equal(blocked(pwsh('rm -rf .')), true)
-})
-
-test('list piped to remove is blocked (destructive rule, target-independent)', () => {
-  assert.equal(blocked(pwsh('Get-ChildItem .dsh | Remove-Item')), true)
-  assert.equal(blocked(pwsh('Get-ChildItem .dsh -Recurse | Remove-Item')), true)
-})
-
-test('redirect to a sensitive file keeps full rules', () => {
-  assert.equal(blocked(pwsh('Get-ChildItem .dsh > .env')), true)
-})
-
-test('mixed commands keep full conservative rules', () => {
-  assert.equal(blocked(pwsh('Get-ChildItem .dsh; Get-Content .env')), true)
-})
-
-test('credential-name filtering stays blocked even when listing', () => {
-  assert.equal(blocked(pwsh('Get-ChildItem ~ -Filter id_rsa*')), true)
-})
-
-test('path-level: .dsh paths are not intercepted; credentials inside .dsh still are', () => {
-  assert.equal(blocked(read('C:/Users/FengZhiHen/.dsh/.credentials.yaml')), true)
-  assert.equal(blocked(read('C:/Users/FengZhiHen/.dsh/.auteur-media-secret')), true)
-  assert.equal(blocked(read('C:/Users/FengZhiHen/.dsh/sessions/abc/session.jsonl.zstd')), false)
-  assert.equal(blocked(read('.dsh/skills/some-skill/SKILL.md')), false)
-  assert.equal(blocked(read('.env.example')), false)
-  assert.equal(blocked(write('.dsh/sessions/abc/session.jsonl.zstd')), false)
-})
-
-test('path-level: glob only blocks pure credential targets', () => {
-  assert.equal(blocked(glob('.ssh/**')), true)
-  assert.equal(blocked(glob('.dsh/**')), false)
-  assert.equal(blocked(glob('.dsh/sessions/**')), false)
-})
-
-test('DSR-013: ~/.ssh/config is readable (routing table, not key material)', () => {
-  // The alias table is how the sanctioned path (`ssh <alias>`) is discovered;
-  // reading it never exposes key material.
-  assert.equal(allowed(read('C:/Users/me/.ssh/config')), true)
-  assert.equal(allowed(grep('C:/Users/me/.ssh/config')), true)
-  assert.equal(allowed(glob('C:/Users/me/.ssh/config')), true)
-  assert.equal(allowed(pwsh('Get-Content ~/.ssh/config')), true)
-  assert.equal(allowed(pwsh('ssh -G campfire-hk')), true)
-})
-
-test('DSR-013: the relaxation is read-only — writing the config stays blocked', () => {
-  assert.equal(blocked(write('C:/Users/me/.ssh/config')), true)
-  assert.equal(blocked(pwsh('Set-Content ~/.ssh/config Host x')), true)
-  assert.equal(blocked(pwsh('Out-File ~/.ssh/config')), true)
-})
-
-test('DSR-013: the exception does not leak to siblings, nesting, or other dirs', () => {
-  // Only the exact final segment directly inside the credential dir qualifies.
-  assert.equal(blocked(read('C:/Users/me/.ssh/config.bak')), true)
-  assert.equal(blocked(read('C:/Users/me/.ssh/sub/config')), true)
-  assert.equal(blocked(pwsh('Get-Content ~/.ssh/config.bak')), true)
-  assert.equal(blocked(pwsh('Get-Content ~/.ssh/sub/config')), true)
-  // `.kube/config` is a real token/cert store: the exception is a name inside a
-  // known directory, never the name `config` everywhere.
-  assert.equal(blocked(read('C:/Users/me/.kube/config')), true)
-  assert.equal(blocked(pwsh('Get-Content ~/.kube/config')), true)
-  // Keys and the remaining contents of .ssh are untouched by the exception.
-  assert.equal(blocked(read('C:/Users/me/.ssh/id_rsa')), true)
-  assert.equal(blocked(read('C:/Users/me/.ssh/campfire-hk.pem')), true)
-  assert.equal(blocked(read('C:/Users/me/.ssh/known_hosts')), true)
-  assert.equal(blocked(pwsh('Get-ChildItem ~/.ssh')), true)
-  assert.equal(blocked(pwsh('ssh -i ~/.ssh/campfire-hk.pem ubuntu@host')), true)
-})
-
-test('DSR-013: the shipped ssh guidance is itself usable and quotable', () => {
-  // The guidance names `~/.ssh/config` literally, so two things must hold:
-  //  1. Following it — mentioning that path in a PATH position — must be
-  //     allowed, which IS the DSR-013 exemption (verified by ablation: emptying
-  //     SAFE_CRED_DIR_FILES turns the last assertion below red).
-  //  2. Quoting it is safe, but that is DSR-010's text-parameter masking, NOT
-  //     this exemption. An earlier version of this test attributed it to
-  //     DSR-013 and could therefore never fail — keep the attribution honest.
-  const reason = pwsh('Get-Content ~/.ssh/id_rsa')
-  assert.equal(blocked(reason), true)
-  assert.ok(reason.includes('~/.ssh/config'), 'the shipped guidance names the config path')
-  assert.equal(allowed(pwsh(`git commit -m "${reason}"`)), true)
-  // Path position: -Path is path-capable, so it is NOT masked (unlike -m).
-  assert.equal(allowed(pwsh('Select-String -Path ~/.ssh/config -Pattern Host')), true)
-})
-
-test('credentials config key still governs the ssh config exception', () => {
-  const off = makeGuard({ credentials: false })
-  assert.equal(allowed(off('read', { file_path: 'C:/Users/me/.ssh/config' })), true)
-  assert.equal(allowed(off('read', { file_path: 'C:/Users/me/.ssh/id_rsa' })), true)
-})
-
-test('DSR-014: a key outside a credential dir is caught on the pwsh channel too', () => {
-  // Before this, the suffix rule existed only on the path channel, so a key
-  // moved out of `.ssh` was blocked for `read` but ALLOWED through pwsh
-  // (`ssh -i C:/keys/prod.pem …`) — the same protection at two different widths.
-  assert.equal(blocked(read('C:/keys/prod.pem')), true)
-  assert.equal(blocked(pwsh('ssh -i C:/keys/prod.pem ubuntu@host')), true)
-  assert.equal(blocked(pwsh('Get-Content E:/keys/prod.pem')), true)
-  assert.equal(blocked(pwsh('ssh -i /mnt/keys/prod.p12 ubuntu@host')), true)
-  // Public keys and prose citations stay allowed (DSR-010 exemption).
-  assert.equal(allowed(pwsh('Get-Content C:/keys/prod.pem.pub')), true)
-  assert.equal(allowed(pwsh('Write-Output "the .pem file is documented in the runbook"')), true)
-  // .key is deliberately text-layer-free (24/24 measured false positives).
-  assert.equal(allowed(pwsh('ssh -i C:/keys/prod.key ubuntu@host')), true)
-  assert.equal(blocked(read('C:/keys/prod.key')), true)
-})
-
-test('grep on .dsh paths is allowed (no sessions rule)', () => {
-  assert.equal(blocked(grep('.dsh/sessions')), false)
-})
-
-test('sessions config key is removed; .dsh stays allowed with unknown-key failure', () => {
-  assert.equal(blocked(read('C:/Users/FengZhiHen/.dsh/sessions/abc/x')), false)
-  assert.throws(() => makeGuard({ sessions: false }), /unknown config key/)
-})
-
-test('credentials rule remains toggleable', () => {
-  const lax = makeGuard({ credentials: false })
-  assert.equal(allowed(lax('pwsh', { command: 'Get-Content .ssh/id_rsa' })), true)
-})
-
-test('system area: writes blocked, reads and listings allowed (W0)', () => {
-  assert.equal(blocked(write('C:/Windows/System32/drivers/etc/hosts')), true)
-  assert.equal(blocked(read('C:/Windows/System32/drivers/etc/hosts')), false)
-  assert.equal(blocked(glob('C:/Windows/**')), false)
-  assert.equal(blocked(pwsh('Set-Content C:\\Windows\\x y')), true)
-  assert.equal(blocked(pwsh('Remove-Item "C:\\Program Files\\x" -Recurse')), true)
-  assert.equal(blocked(pwsh('Copy-Item a.txt C:\\ProgramData\\x')), true)
-  assert.equal(blocked(pwsh('echo x > C:\\Windows\\foo.txt')), true)
-  assert.equal(blocked(pwsh('cd C:\\Windows; Set-Content x y')), true)
-  assert.equal(blocked(pwsh('Get-Content C:\\Windows\\win.ini')), false)
-  assert.equal(blocked(pwsh('Get-ChildItem C:\\Windows')), false)
-})
-
-test('drive-root deletion is blocked through the guard', () => {
-  assert.equal(blocked(pwsh('Remove-Item C:\\ -Recurse -Force')), true)
-  assert.equal(blocked(pwsh('Remove-Item D:/ -Recurse')), true)
-  assert.equal(blocked(pwsh('rm -rf /')), true)
-  assert.equal(blocked(pwsh('Remove-Item C:\\* -Recurse')), true)
-})
-
-test('range-B credential reads stay blocked through pwsh and tools', () => {
-  assert.equal(blocked(pwsh('Get-Content C:/Windows/System32/config/SAM')), true)
-  assert.equal(blocked(pwsh('Get-Content C:/Users/me/.git-credentials')), true)
-  assert.equal(blocked(read('C:/Users/me/AppData/Local/Google/Chrome/User Data/Default/Cookies')), true)
-  assert.equal(blocked(read('C:/Users/me/ntuser.dat')), true)
-})
-
-test('system rule is toggleable via config', () => {
-  const lax = makeGuard({ system: false })
-  assert.equal(allowed(lax('write', { file_path: 'C:/Windows/x' })), true)
-  assert.equal(allowed(lax('pwsh', { command: 'Set-Content C:\\Windows\\x y' })), true)
-})
-
-test('op-level leaves: env read/modify toggle independently (tools and pwsh)', () => {
-  const readOff = makeGuard({ env: { read: false } })
-  assert.equal(allowed(readOff('read', { file_path: '.env' })), true)
-  assert.equal(blocked(readOff('write', { file_path: '.env' })), true)
-  assert.equal(allowed(readOff('pwsh', { command: 'Get-Content .env' })), true)
-  assert.equal(blocked(readOff('pwsh', { command: 'Set-Content .env x' })), true)
-  const modifyOff = makeGuard({ env: { modify: false } })
-  assert.equal(blocked(modifyOff('read', { file_path: '.env' })), true)
-  assert.equal(allowed(modifyOff('write', { file_path: '.env' })), true)
-  assert.equal(blocked(modifyOff('pwsh', { command: 'Get-Content .env' })), true)
-  assert.equal(allowed(modifyOff('pwsh', { command: 'Set-Content .env x' })), true)
-})
-
-test('op-level leaves: credentials list toggles independently of read', () => {
-  const lax = makeGuard({ credentials: { list: false } })
-  assert.equal(allowed(lax('glob', { path: '.ssh/**' })), true)
-  assert.equal(allowed(lax('pwsh', { command: 'Get-ChildItem .ssh' })), true)
-  assert.equal(blocked(lax('read', { file_path: '.ssh/id_rsa' })), true)
-  assert.equal(blocked(lax('pwsh', { command: 'Get-Content .ssh/id_rsa' })), true)
-  const modOff = makeGuard({ credentials: { modify: false } })
-  assert.equal(allowed(modOff('write', { file_path: '.ssh/x' })), true)
-  assert.equal(blocked(modOff('read', { file_path: '.ssh/id_rsa' })), true)
-})
-
-test('op-level leaves: destructive sub-families gate independently (cli off)', () => {
-  const lax = makeGuard({ destructive: { cli: false } })
-  assert.equal(allowed(lax('pwsh', { command: 'kubectl delete ns prod' })), true)
-  assert.equal(allowed(lax('pwsh', { command: 'docker system prune -a' })), true)
-  assert.equal(blocked(lax('pwsh', { command: 'rm -rf .' })), true)
-  assert.equal(blocked(lax('pwsh', { command: 'shutdown -s -t 0' })), true)
-})
-
-test('unverifiable fail-safe gate is toggleable (default on)', () => {
-  const lax = makeGuard({ unverifiable: false })
-  assert.equal(allowed(lax('pwsh', { command: 'Get-Content $($x)' })), true)
-  assert.equal(blocked(guard('pwsh', { command: 'Get-Content $($x)' })), true)
-})
-
-test('depth bound fails CLOSED: deep nesting cannot hide a system-area write', () => {
-  // Regression: the cap used to `return undefined` — "stop early and allow" —
-  // justified by "the outer pass already sees the text". That holds for the
-  // text-reference and destructive passes (they scan the whole string) but NOT
-  // for the system-write pass, which resolves a PARSED write target; at depth >= 1
-  // the top-level fragment is just `writeoutput`. Verified consequence: nesting
-  // 9 levels of `Write-Output "$( ... )"` around a system-area write was allowed,
-  // and PowerShell really does execute the inner write (checked with a temp file).
-  const wrap = (inner, n) => {
-    let s = inner
-    for (let i = 0; i < n; i += 1) s = `Write-Output "$(${s})"`
-    return s
-  }
-  for (const inner of ['Set-Content C:/Windows/x y', 'Get-Date > C:/Windows/x']) {
-    for (const depth of [0, 1, 8, 9, 12]) {
-      assert.equal(blocked(pwsh(wrap(inner, depth))), true, `depth=${depth} inner=${inner}`)
-    }
+test('V2 never denies and never intercepts writes, deletes, or shell commands', async () => {
+  const gate = makeGate()
+  // Writes/edits/shell are out of V2 scope entirely (Auto Review + OS perms).
+  assert.equal(passedThrough(await write(gate, 'C:/Users/me/.ssh/id_rsa')), true)
+  assert.equal(passedThrough(await pwsh(gate, 'Get-Content .ssh/id_rsa')), true)
+  assert.equal(passedThrough(await pwsh(gate, 'Remove-Item C:\\ -Recurse -Force')), true)
+  assert.equal(passedThrough(await pwsh(gate, 'git reset --hard')), true)
+  // The deny channel is gone: no decision ever carries kind 'deny'.
+  for (const decision of [
+    await read(gate, 'C:/Users/me/.ssh/id_rsa'),
+    await pwsh(gate, 'Remove-Item C:\\ -Recurse -Force'),
+  ]) {
+    assert.equal(decision?.kind === 'deny', false, 'the deny channel is retired')
   }
 })
 
-test('depth bound stays configurable through the unverifiable key (DSR-006)', () => {
-  // Every defense layer must remain toggleable, and the bound reuses the
-  // "cannot be verified statically" semantic rather than adding new config
-  // surface. Turning it off re-opens the deep-nesting hole — the profile
-  // owner's explicit call, asserted here so the coupling is not silent.
-  const wrap9 = (inner) => {
-    let s = inner
-    for (let i = 0; i < 9; i += 1) s = `Write-Output "$(${s})"`
-    return s
+test('user-marked files ask on exact content reads', async () => {
+  const gate = makeGate({ sensitiveFiles: ['E:/Project/app/.env.production', 'C:/Users/me/.kube/config'] })
+  assert.equal(isAsk(await read(gate, 'E:/Project/app/.env.production')), true)
+  assert.equal(isAsk(await read(gate, 'e:\\project\\APP\\.env.production')), true, 'matching is case-insensitive')
+  assert.equal(passedThrough(await read(gate, 'E:/Project/app/.env')), true, 'sibling names are not the marked file')
+  assert.equal(passedThrough(await read(gate, 'E:/Project/app/.env.production.bak')), true)
+  assert.equal(isAsk(await grep(gate, 'C:/Users/me/.kube/config')), true, 'single-file grep on a marked file asks')
+  assert.equal(passedThrough(await grep(gate, 'E:/Project/app')), true, 'directory grep never matches a marked FILE')
+})
+
+test('config toggles: builtin list off, marks still active; live volatile read', async () => {
+  const gate = makeGate({ credentialsReadAsk: false, sensitiveFiles: ['E:/x/secret'] })
+  assert.equal(passedThrough(await read(gate, 'C:/Users/me/.ssh/id_rsa')), true)
+  assert.equal(isAsk(await read(gate, 'E:/x/secret')), true)
+})
+
+test('ask reason names action and target, never file content', async () => {
+  const gate = makeGate()
+  const decision = await read(gate, 'C:/Users/me/.ssh/id_rsa')
+  assert.ok(decision.reason.includes('read'), 'the reason names the tool')
+  assert.ok(decision.reason.includes('id_rsa'), 'the reason names the target path')
+  assert.ok(decision.reason.length < 600, 'the reason stays bounded')
+})
+
+test('relative paths resolve against the session workspace root', async () => {
+  // A marked file referenced relatively from the session cwd must hit.
+  const gate = makeGate({ sensitiveFiles: ['E:/Project/DSH_Plugins/.env.local'] })
+  assert.equal(isAsk(await read(gate, '.env.local')), true)
+  assert.equal(passedThrough(await read(gate, '.env')), true)
+})
+
+test('no sandboxPolicy service: absolute targets still judge; relative targets ask by basename', async () => {
+  // Without a sandboxPolicy the base degrades to ''. Narrow-list matching then
+  // only sees the basename — a relative `.ssh/id_rsa` still asks, because the
+  // failure direction of this plugin is the one-shot ASK, never a denial.
+  let listener
+  const ctx = {
+    get: () => undefined,
+    effect: (fn) => fn(),
+    on: (event, handler) => { listener = handler; return () => {} },
+    inject: () => {},
   }
-  assert.equal(blocked(pwsh(wrap9('Set-Content C:/Windows/x y'))), true)
-  // The coupling is asserted, not just described: with the gate explicitly off,
-  // the depth branch returns undefined again and the deep nest passes. That is
-  // the documented cost of disabling this layer (DSR-006 keeps it the profile
-  // owner's call), and pinning it here means a future change to the gating
-  // cannot pass silently in either direction.
-  const lax = makeGuard({ unverifiable: false })
-  assert.equal(allowed(lax('pwsh', { command: wrap9('Set-Content C:/Windows/x y') })), true)
-  // Shallow rules stay intact regardless of the gate.
-  assert.equal(blocked(lax('pwsh', { command: 'Set-Content C:/Windows/x y' })), true)
-  assert.equal(blocked(lax('pwsh', { command: 'Get-Content .env' })), true)
+  guardrails.apply(ctx, {})
+  const exec = (name, args) =>
+    listener({ name, arguments: args, agent: { session: { header: { cwd: 'E:/p' } } } }, async () => ({ kind: 'allow' }))
+  assert.equal(isAsk(await exec('read', { file_path: 'C:/Users/me/.ssh/id_rsa' })), true)
+  assert.equal(isAsk(await exec('read', { file_path: '.ssh/id_rsa' })), true,
+    'basename-only matching keeps the ask direction (fail-toward-ask, not deny)')
+  assert.equal(isAsk(await exec('read', { file_path: 'notes.txt' })), false)
 })
 
-test('DSR-009: incident replay blocked end-to-end; ablation of chain+misuse opens it again', () => {
-  const incident =
-    "$in = 'E:/Project/Demo/1-保研准备/inbox'; " +
-    'Move-Item -LiteralPath "$in/*" -Destination E:/Project/Demo/library/行政/保研; ' +
-    'Remove-Item -LiteralPath "$in" -Recurse -Force; ' +
-    'Get-ChildItem -Recurse E:/Project/Demo/library/行政/保研 | Measure-Object Length -Sum'
-  assert.equal(blocked(pwsh(incident)), true)
-  // single-layer removals keep the other layer (independent gating)
-  assert.equal(blocked(makeGuard({ destructive: { misuse: false } })('pwsh', { command: incident })), true)
-  assert.equal(blocked(makeGuard({ destructive: { chain: false } })('pwsh', { command: incident })), true)
-  // both new layers off → the resolved plain-directory deletion passes
-  const loose = makeGuard({ destructive: { chain: false, misuse: false } })
-  assert.equal(allowed(loose('pwsh', { command: incident })), true)
-})
-
-test('DSR-010: citing a sensitive name is not a reference to it', () => {
-  // The 2026-09-27 regression: a commit message quoting this guard's own deny
-  // text (which contains ".git") was blocked, so recording a gate result with
-  // `git commit` failed until the message was moved out of the command line.
-  assert.equal(
-    allowed(pwsh('git commit -m "docs: quote [guardrails] references the .git directory"')),
-    true,
+test('listener failure is fail-open: a throwing judgment must not break the waterfall', async () => {
+  let listener
+  const ctx = {
+    // A sandboxPolicy whose resolve throws must degrade to pass-through, not
+    // wedge the tool waterfall: the listener swallows the error and falls
+    // through to `next()`, so the call proceeds under the native review.
+    get: () => ({ resolve: () => { throw new Error('boom') } }),
+    effect: (fn) => fn(),
+    on: (event, handler) => { listener = handler; return () => {} },
+    inject: () => {},
+  }
+  guardrails.apply(ctx, {})
+  const result = await listener(
+    { name: 'read', arguments: { file_path: 'C:/Users/me/.ssh/id_rsa' }, agent: undefined },
+    async () => ({ kind: 'allow' }),
   )
-  assert.equal(allowed(pwsh('git commit -m "fix: load .env earlier"')), true)
-  assert.equal(allowed(pwsh('git commit -m "docs: keep .ssh out of the repo"')), true)
-  assert.equal(allowed(pwsh('git commit --message "the .git dir"')), true)
-  assert.equal(allowed(pwsh('Write-Output "see .git for history"')), true)
-  assert.equal(allowed(pwsh("$n -notmatch '\\.git'")), true)
+  assert.equal(result.kind, 'allow', 'internal errors fall through to next() (fail-open)')
 })
 
-test('DSR-010: real sensitive-path references stay blocked end-to-end', () => {
-  assert.equal(blocked(pwsh('Get-Content .git/config')), true)
-  assert.equal(blocked(pwsh("Get-Content '.git/config'")), true)
-  assert.equal(blocked(pwsh('Get-Content "C:\\Program Files\\repo\\.git\\config"')), true)
-  assert.equal(blocked(pwsh("Remove-Item '.git' -Recurse -Force")), true)
-  assert.equal(blocked(pwsh('Remove-Item -Recurse -Force .git')), true)
-  assert.equal(blocked(pwsh('git cat-file --git-dir=.git -p HEAD')), true)
-  assert.equal(blocked(pwsh('Get-Content .env')), true)
-  assert.equal(blocked(pwsh("Get-Content '.env'")), true)
-  assert.equal(blocked(pwsh('Get-Content C:\\Users\\me\\.ssh\\id_rsa')), true)
-  // a citation does not launder a real reference sitting beside it
-  assert.equal(blocked(pwsh('git commit -m "see .git" -- .env')), true)
+test('non-read tools and malformed executions pass through untouched', async () => {
+  const gate = makeGate()
+  assert.equal((await gate.call('edit', { file_path: 'C:/Users/me/.ssh/id_rsa' })).kind, 'allow')
+  assert.equal((await gate.call('bash', { command: 'cat ~/.ssh/id_rsa' })).kind, 'allow')
+  // No target: the listener returns the downstream decision unchanged.
+  assert.equal((await gate.call('read', {})).kind, 'allow')
+  assert.equal((await gate.call('read', { file_path: '' })).kind, 'allow')
 })
-
-// DSR-012: statement position and interpolated subexpressions.
-// The 2026-09-29 evidence: 478/9062 real agent commands were denied, 413 of
-// them as "the command itself is computed" — yet 395 of those were a bare
-// double-quoted string used as an output statement, whose only "command" was an
-// interpolated `$(...)`. Reading a quoted head as a command name was the bug;
-// ignoring what the interpolation executes would have been the mirror-image bug.
-test('DSR-012: a bare quoted string statement is output, not a computed command', () => {
-  assert.equal(allowed(pwsh('"total: $($list.Count)"')), true)
-  assert.equal(allowed(pwsh('$list = @(1,2); "total: $($list.Count)"')), true)
-  assert.equal(allowed(pwsh('$n = 1; "count: $($n.Count)"')), true)
-  assert.equal(allowed(pwsh('"just text"')), true)
-  assert.equal(allowed(pwsh('"=== banner ==="; Resolve-DnsName example.com')), true)
-  assert.equal(allowed(pwsh('cd E:\\Project; "=== section ==="')), true)
-  // an expression whose head is a keyword is not a computed command either
-  assert.equal(allowed(pwsh('$x=1; if ($x) { "value: $($x)" } else { "none" }')), true)
-})
-
-test('DSR-012: a genuinely computed command name stays blocked', () => {
-  // `$(...)` as the command itself, and the explicit `&` call operator with a
-  // computed name, are the shapes where the invoked command really is dynamic.
-  assert.equal(blocked(pwsh('$(Get-Command git) status')), true)
-  assert.equal(blocked(pwsh("$(if ($true) {'Get-ChildItem .'})")), true)
-  assert.equal(blocked(pwsh('& "$(Get-Date)"')), true)
-})
-
-test('DSR-012: interpolated subexpressions are judged as commands', () => {
-  // The mirror-image gap: PowerShell executes these, so the reference, system
-  // write and destructive passes must see them.
-  assert.equal(blocked(pwsh('"$(Get-Content .env)"')), true)
-  assert.equal(blocked(pwsh('"$(Get-Content .git/config)"')), true)
-  assert.equal(blocked(pwsh('Write-Output "$(Get-Content .env)"')), true)
-  assert.equal(blocked(pwsh('Write-Host "$(Get-Content C:\\Users\\me\\.ssh\\id_rsa)"')), true)
-  assert.equal(blocked(pwsh('Write-Output "$(Remove-Item C:\\Windows\\x -Recurse)"')), true)
-  assert.equal(blocked(pwsh('"$(Remove-Item C:\\Windows\\x -Recurse)"')), true)
-  assert.equal(blocked(pwsh('"$(git reset --hard)"')), true)
-  assert.equal(blocked(pwsh('$a = "$(Get-Content .env)"; Write-Output $a')), true)
-  // nesting one level deeper does not launder it
-  assert.equal(blocked(pwsh('$x=1; "outer $(if ($x) { "$(Get-Content .env)" })"')), true)
-})
-
-test('DSR-012: single-quoted spans stay literal (PowerShell does not interpolate)', () => {
-  // A single-quoted span is inert content, so naming a sensitive file inside it
-  // is a citation, exactly like DSR-010's prose case.
-  assert.equal(allowed(pwsh("Write-Output '$(Get-Content .env)'")), true)
-})
-

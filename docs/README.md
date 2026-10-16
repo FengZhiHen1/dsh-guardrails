@@ -6,7 +6,9 @@
 
 ## 当前状态
 
-- 主题：`dsh-guardrails`（DSH 权限守护层，Host 插件，bundle 形态）。
+- **v2.0.0（2026-10-16，当前）——审批式敏感读与职责收缩（DSR-015）**：插件整体从「`ctx.tools.guard` 硬阻断」重构为「`tools/pre-execute` 原生一次性审批（ask / allow-once）」。内置窄凭据名单 + 用户标记精确路径（`sensitiveFiles`）两层目标，只拦 `read`/`read_image`/单文件 `grep` 的内容读取；`.env` 全局拦截、`.git` 内部、系统区写、破坏性命令静态分析与语料回放工具全部退役，交 DSH 原生 Auto Review 与 OS 权限。peer 抬到 `^0.2.0-rc.2`（0.1.7 上静默禁用，升级顺序见 README）。决策与 0.2.0 源码核查记录见 [DSR-015](decisions/DSR-015-审批式敏感读与职责收缩.md)；设计基线（用户确认）见管理仓库 `references/dsh-guardrails/`。
+- **v1 归档**：下方 v1.x 状态条目与 `technical-details/` 各篇描述的是 v1 硬阻断模型（`规则模型.md`、`命令文本分析.md` 等），**v2 起不再适用**，仅留档对照；`decisions/DSR-001…014` 保留其历史效力，其中 DSR-013 的结论（`~/.ssh/config` 非密钥物质）在 V2 中因目录规则退役而自动成立。
+- 主题：`dsh-guardrails`（DSH 敏感读审批层，Host 插件，bundle 形态）。
 - 设计基线：2026-08-17 经用户逐项确认，见 [决策记录](decisions/)。
 - 实现状态：**已实现（v1.0.0 + v1.1.0 + v1.2.0 + v1.3.0）**——bundle 包形态（`dsh.bundle.patch` + 包内 `cordis.patch.yml`）、五类规则（env / git / credentials / destructive / system）、范围 B 增量（R0 补漏与 W0 系统区写拦截，DSR-001）、操作类型分级（列举 vs 内容访问）、配置校验、规则矩阵与生命周期测试全过（行覆盖 ≥97%，门禁 ≥80%）；**防御层全量配置化（DSR-006，v1.1.0）**——叶子级可配（操作级叶子 + destructive 六子族 + `unverifiable` 键）；**配置入口按 DSH 官方范式（v1.2.0）**——导出 Schemastery `Config` schema，loader 在 `apply` 前验证/填默认值；**设置卡片入口（v1.3.0）**——官方 settings 卡片范式。`.dsh`（含会话历史）不敏感（DSR-003 重访注记）。
 - **0.1.2-rc.1 对齐重构（v1.4.0）**：core/adapter 单包分层（`src/core` 六模块 + `src/adapter/host.js` + `src/client/card.js`，分层门禁实质生效）、settings 改官方 `installSection` 接线、判定基准目录来源修正（DSR-007：`sandboxPolicy.resolve({ session })`）、`assessDestructive` 六子族拆分、质量地板 0 error。
@@ -34,9 +36,9 @@
 
 | 文档 | 唯一权威范围 |
 |---|---|
-| `需求.md` | 目标、用户与场景、功能范围、需求约束、非目标与验收条件 |
+| `需求.md` | 目标、用户与场景、功能范围、需求约束、非目标与验收条件（v1 事实，v2 语义见 DSR-015） |
 | `technical-details/README.md` | 技术细节目录的阅读顺序与文档地图 |
-| `technical-details/规则模型.md` | 敏感类别 × 操作类型矩阵、路径级与命令文本级检查、名单结构与 fail 语义 |
-| `technical-details/命令文本分析.md` | PowerShell 命令文本词法、语句位置、动词分类、列举模式判定、子表达式递归、破坏性分析与固有限制 |
+| `technical-details/规则模型.md` | （v1 归档）敏感类别 × 操作类型矩阵、路径级与命令文本级检查、名单结构与 fail 语义 |
+| `technical-details/命令文本分析.md` | （v1 归档）PowerShell 命令文本词法、语句位置、动词分类、列举模式判定、子表达式递归、破坏性分析与固有限制 |
 | `technical-details/部署.md` | 包形态、部署红线、安装验证、生效流程、挂载与实测场清理实录、测试体系与发布路径 |
-| `decisions/` | 真实重大取舍的备选、评价、后果与重访条件 |
+| `decisions/` | 真实重大取舍的备选、评价、后果与重访条件（DSR-015 起为现行，DSR-001…014 为 v1 历史） |
