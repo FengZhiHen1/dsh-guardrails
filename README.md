@@ -33,13 +33,13 @@ PowerShell 使用微软官方 `Parser.ParseInput`，由惰性持久 `pwsh` helpe
 
 只接受本次 `allowed-once`；拒绝、取消、超时、不可用、异常或会话 `approval: never` 均不执行。超时只约束本插件主动发起的审批，不修改全局 DSH 审批机制。
 
-配置页面使用官方 `plugins.row.config` 入口，并通过 0.2.1 的 `ctx.configForms` 读取活值与提交写入；字段与保存键按官方 `SettingsForm`/`fields` 的几何复制（未修改或输入非法时禁用保存），只用主题 token，不引用 Harness Client 包；沿用 DSH 主题和保存机制。敏感文件每行一个；审批时间以秒显示、毫秒保存；空清单不关闭内置保护。修改暂存到点击保存，失败保留输入，提交绑定开始编辑时的配置修订号。运行期读取 volatile 活值，持久化仍归对应 Profile。界面中可展开查看能力边界；现场加载与验证见[设置页记录](docs/verification/2026-10-17-settings-ui.md)。
+配置页面使用官方 `plugins.row.config` 入口，并通过 0.2.1 的 `ctx.configForms` 读取活值与提交写入；字段与保存键按官方 `SettingsForm`/`fields` 的几何复制（未修改或输入非法时禁用保存），只用主题 token，不引用 Harness Client 包；沿用 DSH 主题和保存机制。字段长说明优先收进标签旁的 info 展开器（原生 button + `aria-expanded`/`aria-controls`），可见区只保留短提示与校验错误；敏感文件每行一个；审批时间以秒显示、毫秒保存；空清单不关闭内置保护。修改暂存到点击保存，失败保留输入，提交绑定开始编辑时的配置修订号。运行期读取 volatile 活值，持久化仍归对应 Profile。界面中可展开查看能力边界；现场加载与验证见[设置页记录](docs/verification/2026-10-17-settings-ui.md)。
 
 ## 文档与验证
 
 从 [文档入口](docs/README.md) 阅读当前需求与机制；本轮取舍见 [DSR-017](docs/decisions/DSR-017-官方AST与最终硬门禁.md)，命名变更见 [DSR-018](docs/decisions/DSR-018-内置敏感文件名单改名.md)，工程证据见 [重构验证记录](docs/verification/2026-10-17-v2-refactor.md)。DSR-001 至 DSR-016 保持历史原文。
 
-验证命令为 `node verify/run-verify.mjs`；使用 `DSH_RUNTIME_PATH` 指向现场运行时，可同时执行真实 ToolRuntime/ApprovalService/PTC bridge 测试。以 0.2.1-rc.2 运行时执行当前完整验证为 464 项（400 通过、0 失败、64 条已声明语料跳过），约 10.9 秒；quality_floor PASS（0 error，5 项提醒）。测试适配了点：`run_code` 需要 Agent `ctx` 与 `workingDirectory` 服务，PTC 释放使用 `agent.ctx.effect`。语料与回放已纳入默认 test/check/verify，详见[稳定语料说明](test/fixtures/review-corpus/README.md)和[设计对照审查](docs/verification/2026-10-17-design-review.md)。test 现场 `install_bundle` 返回 `applied`（3.1.0），Config schema 与 `plugins.row.config` 注册均可见，普通命令放行验证通过。Linux 实跑、97,050 条人工标注回放、设置页保存走查及完整启动门禁尚未完成。3.2.0 的配置键改名未重装、未重启 test 实例；运行中的实例已由 HMR 热加载新模块，Config inspect 显示 `builtinSensitiveAsk`。
+验证命令为 `node verify/run-verify.mjs`；使用 `DSH_RUNTIME_PATH` 指向现场运行时，可同时执行真实 ToolRuntime/ApprovalService/PTC bridge 测试。以 0.2.1-rc.2 运行时执行当前完整验证为 465 项（397 通过、0 失败、68 条已声明语料跳过），约 12–23 秒；quality_floor PASS（0 error，6 项提醒，含设置页 JSX 树复杂度提醒）。测试适配了点：`run_code` 需要 Agent `ctx` 与 `workingDirectory` 服务，PTC 释放使用 `agent.ctx.effect`。语料与回放已纳入默认 test/check/verify，详见[稳定语料说明](test/fixtures/review-corpus/README.md)和[设计对照审查](docs/verification/2026-10-17-design-review.md)。test 现场 `install_bundle` 返回 `applied`（3.1.0），Config schema 与 `plugins.row.config` 注册均可见，普通命令放行验证通过。Linux 实跑、97,050 条人工标注回放、设置页保存走查及完整启动门禁尚未完成。3.2.0 的配置键改名未重装、未重启 test 实例；运行中的实例已由 HMR 热加载新模块，Config inspect 显示 `builtinSensitiveAsk`。
 
 ## 安装与许可
 

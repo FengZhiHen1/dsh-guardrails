@@ -42,6 +42,19 @@ test('settings copies the native settings form and disables save until dirty', (
   assert.doesNotMatch(source, /(?:rgba?|hsla?)\(/)
 })
 
+test('settings puts long explanations behind the info disclosure', () => {
+  assert.match(source, /className: 'gr-help-button'/)
+  assert.match(source, /'aria-expanded': openHelp === key/)
+  assert.match(source, /'aria-controls': helpId\(key\)/)
+  assert.match(source, /role: 'region'/)
+  assert.match(source, /helpRegion\('files'\)/)
+  assert.match(source, /helpRegion\('builtin'\)/)
+  assert.match(source, /helpRegion\('timeout'\)/)
+  assert.match(source, /helpRegion\('scope'\)/)
+  assert.match(source, /filesHelpLabel/)
+  assert.match(source, /scopeHelpLabel/)
+})
+
 test('settings derives safe drafts from partial or stale served sections', () => {
   assert.deepEqual(plain(plugin.toDraft({})), { files: '', builtin: true, seconds: '120' })
   assert.deepEqual(plain(plugin.toDraft({ sensitiveFiles: [1, '/ok'], builtinSensitiveAsk: 'no', askTimeoutMs: -5 })), { files: '/ok', builtin: true, seconds: '120' })
