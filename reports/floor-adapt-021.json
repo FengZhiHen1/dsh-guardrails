@@ -34,7 +34,7 @@
       "severity": "warning",
       "file": "src\\client\\settings.js",
       "line": 5,
-      "snippet": "factory(require) {  # 逻辑行数 140 / 逻辑最大缩进 10 列（JSX 返回块不计入）"
+      "snippet": "factory(require) {  # 逻辑行数 142 / 逻辑最大缩进 10 列（JSX 返回块不计入）"
     },
     {
       "rule": "high-complexity",
@@ -46,8 +46,8 @@
   ],
   "repo_index": {
     "available": true,
-    "tracked_count": 86,
-    "untracked_count": 2,
+    "tracked_count": 89,
+    "untracked_count": 0,
     "note": ""
   }
 }

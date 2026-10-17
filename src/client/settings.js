@@ -46,8 +46,10 @@ window.__ModuleLoader__.load({
 .gr-settings input[type=checkbox]{accent-color:var(--dsw-alias-brand-primary);width:16px;height:16px;margin:0;flex-shrink:0}
 .gr-settings input[type=number]{width:120px}
 .gr-settings .gr-footer{display:flex;align-items:center;flex-wrap:wrap;gap:12px}
-.gr-settings button{appearance:none;border:1px solid transparent;border-radius:6px;padding:6px 14px;font:inherit;font-size:13px;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-base)}
-.gr-settings :disabled{opacity:.45;cursor:default}
+.gr-settings button{appearance:none;border:none;border-radius:var(--dsw-radius-md);height:36px;padding:0 14px;font:inherit;font-size:14px;line-height:22px;cursor:pointer;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}
+.gr-settings button:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
+.gr-settings button:disabled{background:var(--dsw-alias-button-primary-dimmed);color:var(--dsw-alias-label-secondary);cursor:not-allowed}
+.gr-settings textarea:disabled,.gr-settings input:disabled{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);cursor:not-allowed}
 .gr-settings :is(input,textarea,button,summary):focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .gr-settings .gr-error{font-size:12px;line-height:1.6;color:var(--dsw-alias-state-error-primary);margin:0}
 .gr-settings [aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}

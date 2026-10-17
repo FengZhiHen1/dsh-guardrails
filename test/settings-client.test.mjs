@@ -22,6 +22,13 @@ test('settings rejects invalid drafts before any Host mutation', () => {
   assert.deepEqual(plain(plugin.parseDraft(draft).value.sensitiveFiles), [])
 })
 
+test('settings styles its save control with the native button token family', () => {
+  assert.match(source, /--dsw-alias-button-primary-fill/)
+  assert.match(source, /--dsw-alias-label-primary-foreground/)
+  assert.match(source, /--dsw-alias-button-primary-dimmed/)
+  assert.doesNotMatch(source, /background:var\(--dsw-alias-label-primary\)/)
+})
+
 test('settings derives safe drafts from partial or stale served sections', () => {
   assert.deepEqual(plain(plugin.toDraft({})), { files: '', builtin: true, seconds: '120' })
   assert.deepEqual(plain(plugin.toDraft({ sensitiveFiles: [1, '/ok'], credentialsReadAsk: 'no', askTimeoutMs: -5 })), { files: '/ok', builtin: true, seconds: '120' })

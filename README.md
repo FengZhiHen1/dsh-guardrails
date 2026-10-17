@@ -39,7 +39,7 @@ PowerShell 使用微软官方 `Parser.ParseInput`，由惰性持久 `pwsh` helpe
 
 从 [文档入口](docs/README.md) 阅读当前需求与机制；本轮取舍见 [DSR-017](docs/decisions/DSR-017-官方AST与最终硬门禁.md)，工程证据见 [重构验证记录](docs/verification/2026-10-17-v2-refactor.md)。DSR-001 至 DSR-016 保持历史原文。
 
-验证命令为 `node verify/run-verify.mjs`；使用 `DSH_RUNTIME_PATH` 指向现场运行时，可同时执行真实 ToolRuntime/ApprovalService/PTC bridge 测试。以 0.2.1-rc.2 运行时执行当前完整验证为 463 项（399 通过、0 失败、64 条已声明语料跳过），约 10.9 秒；quality_floor PASS（0 error，5 项提醒）。测试适配了点：`run_code` 需要 Agent `ctx` 与 `workingDirectory` 服务，PTC 释放使用 `agent.ctx.effect`。语料与回放已纳入默认 test/check/verify，详见[稳定语料说明](test/fixtures/review-corpus/README.md)和[设计对照审查](docs/verification/2026-10-17-design-review.md)。test 现场 `install_bundle` 返回 `applied`（3.1.0），Config schema 与 `plugins.row.config` 注册均可见，普通命令放行验证通过。Linux 实跑、97,050 条人工标注回放、设置页保存走查及完整启动门禁尚未完成。
+验证命令为 `node verify/run-verify.mjs`；使用 `DSH_RUNTIME_PATH` 指向现场运行时，可同时执行真实 ToolRuntime/ApprovalService/PTC bridge 测试。以 0.2.1-rc.2 运行时执行当前完整验证为 464 项（400 通过、0 失败、64 条已声明语料跳过），约 10.4 秒；quality_floor PASS（0 error，5 项提醒）。测试适配了点：`run_code` 需要 Agent `ctx` 与 `workingDirectory` 服务，PTC 释放使用 `agent.ctx.effect`。语料与回放已纳入默认 test/check/verify，详见[稳定语料说明](test/fixtures/review-corpus/README.md)和[设计对照审查](docs/verification/2026-10-17-design-review.md)。test 现场 `install_bundle` 返回 `applied`（3.1.0），Config schema 与 `plugins.row.config` 注册均可见，普通命令放行验证通过。Linux 实跑、97,050 条人工标注回放、设置页保存走查及完整启动门禁尚未完成。
 
 ## 安装与许可
 
