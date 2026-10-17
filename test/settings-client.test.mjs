@@ -6,7 +6,10 @@ import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../src/client/settings.js', import.meta.url), 'utf8')
 let plugin
 vm.runInNewContext(source, { window: { __ModuleLoader__: { load(entry) {
-  plugin = entry.factory(name => name === 'react' ? { createElement() {} } : { Button() {} })
+  plugin = entry.factory(name => {
+    assert.equal(name, 'react')
+    return { createElement() {} }
+  })
 } } } })
 const plain = value => JSON.parse(JSON.stringify(value))
 
@@ -24,10 +27,13 @@ test('settings rejects invalid drafts before any Host mutation', () => {
   assert.deepEqual(plain(plugin.parseDraft(draft).value.sensitiveFiles), [])
 })
 
-test('settings renders the official primitive Button instead of a hand-styled one', () => {
-  assert.match(source, /require\('@deepseek-ai\/dsh-client-ui-primitives'\)/)
-  assert.match(source, /h\(Button, \{ variant: 'primary', type: 'submit'/)
-  assert.doesNotMatch(source, /\.gr-settings button/)
+test('settings copies the host button instead of importing a Harness Client package', () => {
+  assert.doesNotMatch(source, /require\('@deepseek-ai\//)
+  assert.match(source, /h\(PrimaryButton, \{ type: 'submit'/)
+  assert.match(source, /\.gr-settings \.gr-button\{/)
+  assert.match(source, /--dsw-alias-button-primary-fill/)
+  assert.doesNotMatch(source, /#[0-9a-fA-F]{3,8}\b/)
+  assert.doesNotMatch(source, /(?:rgba?|hsla?)\(/)
 })
 
 test('settings derives safe drafts from partial or stale served sections', () => {
