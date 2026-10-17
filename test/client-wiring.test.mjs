@@ -1,4 +1,4 @@
-// Client retirement contract: the loader uses the official schema-generated settings page.
+// Native configuration slot and Host presentation belong to the plugin lifetime.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -7,9 +7,9 @@ import * as guardrails from '../index.js'
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 
-test('package no longer advertises or exports a custom client settings bundle', () => {
-  assert.equal(Object.hasOwn(manifest.dsh, 'client'), false)
-  assert.equal(Object.hasOwn(manifest.exports, './client'), false)
+test('package declares the native configuration-slot client and its provider dependencies', () => {
+  assert.equal(manifest.dsh.client.platform, 'web')
+  assert.equal(manifest.exports['./client'], './src/client/settings.js')
   assert.equal(manifest.exports['.'].default, './index.js')
 })
 
@@ -19,7 +19,7 @@ test('bundle retains the guardrails row identity for existing settings', () => {
   assert.match(patch, /\bname:\s*dsh-guardrails\b/)
 })
 
-test('Host configures the generated page without asking for client services', async () => {
+test('Host disables duplicate generation without asking for client services', async () => {
   const effects = []
   const configurations = []
   const ctx = {
@@ -38,7 +38,7 @@ test('Host configures the generated page without asking for client services', as
   }
   guardrails.apply(ctx)
   try {
-    assert.deepEqual(configurations, [{ presentation: { auto: true }, owner: ctx.fiber }])
+    assert.deepEqual(configurations, [{ presentation: { auto: false }, owner: ctx.fiber }])
     assert.deepEqual(Object.keys(guardrails.Config.dict).sort(), ['askTimeoutMs', 'credentialsReadAsk', 'sensitiveFiles'])
     for (const value of Object.values(guardrails.Config({}))) assert.equal(typeof value.get, 'function')
   } finally {

@@ -51,9 +51,9 @@ async function harness(t, { withSettings = true, plain = false } = {}) {
   }
 }
 
-test('settings selects the official generated page owned by the plugin fiber', async t => {
+test('settings selects the native slot editor owned by the plugin fiber', async t => {
   const h = await harness(t)
-  assert.deepEqual(h.configured(), { presentation: { auto: true }, owner: h.ctx.fiber })
+  assert.deepEqual(h.configured(), { presentation: { auto: false }, owner: h.ctx.fiber })
   assert.equal(guardrails.SETTINGS_NS, 'guardrails')
 })
 

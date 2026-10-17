@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Guardrails",
+    "description": "Recognize catastrophic operations, approve sensitive-file access and mask recognizable credentials."
+  }
+}

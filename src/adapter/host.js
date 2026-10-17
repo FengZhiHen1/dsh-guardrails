@@ -53,7 +53,7 @@ export function apply(ctx, config = {}) {
     return parsers.dispose()
   })
   ctx.inject(['settings'], (sctx) => {
-    sctx.effect(() => sctx.settings.configure({ auto: true }, ctx.fiber))
+    sctx.effect(() => sctx.settings.configure({ auto: false }, ctx.fiber))
   })
   installRedaction(ctx)
   ctx.effect(() => ctx.tools.guard((execution) => {

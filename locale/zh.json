@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Guardrails 防护",
+    "description": "识别灾难性操作，审批敏感文件访问，并遮罩可识别凭据。"
+  }
+}

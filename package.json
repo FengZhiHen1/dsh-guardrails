@@ -1,6 +1,6 @@
 {
   "name": "dsh-guardrails",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Official Shell AST guard, precise sensitive-file approvals and credential redaction for DSH",
   "license": "MIT",
   "repository": {
@@ -13,11 +13,13 @@
     ".": {
       "default": "./index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": "./src/client/settings.js",
+    "./locale/*.json": "./locale/*.json"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-settings": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.2.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.4"
   },
   "devDependencies": {
@@ -36,9 +38,11 @@
     "src/",
     "vendor/",
     "docs/",
+    "locale/",
     "cordis.patch.yml"
   ],
   "dsh": {
+    "client": { "platform": "web", "immediately": true, "inject": ["@deepseek-ai/dsh-client-ui-plugin-manager", "@deepseek-ai/dsh-client-locale"] },
     "bundle": {
       "patch": "./cordis.patch.yml"
     }

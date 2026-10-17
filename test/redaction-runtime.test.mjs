@@ -27,6 +27,9 @@ async function setup(t, mode = 'native') {
   t.after(() => ctx.fiber.dispose())
   await ctx.plugin(runtime.prompt.default)
   await ctx.plugin(runtime.tools.default, { mode })
+  // 0.2.1 resolves the Agent working directory and confined PTC authority from services.
+  ctx.provide('workingDirectory', { ensure: async () => process.cwd() })
+  ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'workspace-write', workspaceRoot: process.cwd() }) })
   installRedaction(ctx)
   return ctx
 }
@@ -91,7 +94,8 @@ test('real ToolRuntime PTC bridge separates program values from durable content;
   // Definition finalization happens after post; the independent log hook masks it.
   register(ctx, 'finalized', 'safe canonical value', { type: 'string' }, { finalizeContent: () => [{ type: 'text', text: secret }] })
   const events = []
-  const agent = { session: { header: { cwd: process.cwd() }, append: (type, data) => events.push({ type, data }) } }
+  // 0.2.1 requires an Agent context for release effects and a working directory service.
+  const agent = { ctx, session: { header: { cwd: process.cwd() }, append: (type, data) => events.push({ type, data }) } }
   const result = await execute(ctx, 'run_code', { arguments: { code: 'fixture', description: 'Redaction bridge fixture' }, agent })
   assert.equal(result.isError, false)
   const settled = events.filter(event => event.type === 'tool/ptc-dispatch')

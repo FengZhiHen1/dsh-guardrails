@@ -45,7 +45,7 @@ test('mount owns one guard, one pre listener, and the generated settings policy'
   guardrails.apply(h.ctx)
   assert.equal(h.guards.length, 1)
   assert.equal(h.pre().length, 1)
-  assert.deepEqual(h.policies, [{ presentation: { auto: true }, owner: h.ctx.fiber }])
+  assert.deepEqual(h.policies, [{ presentation: { auto: false }, owner: h.ctx.fiber }])
   assert.ok(h.listeners.length >= 1)
   await h.dispose()
   assert.equal(h.guards.length, 0)
