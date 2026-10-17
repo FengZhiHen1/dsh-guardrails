@@ -4,9 +4,9 @@
 
 ## v2.0.0（DSR-015，2026-10-16）待办
 
-- [ ] **test 实测场重挂 + 实例级门禁** —— v2 未在任何运行时实例上验证过。须用户授权后：重挂 test（0.2.0-rc.2，`link:` 直挂）→ 启动 → 门禁（`--dump-config` 恰一行无 disabled、无 `N entries did not activate`、无 peer 静默禁用行）→ 功能冒烟（真实 ask 弹窗：读内置名单文件弹出、批准一次放行、拒绝不执行、再次读取重新审批；`sensitiveFiles` 标记生效；普通 `.env`/`glob`/目录 grep 不弹；`approval policy = never` 时 ask 直接拒绝）→ Auto Review 组合（两者同挂时 deny→ask 仍正确）。verify 第 3 步「test 恰一行」在重挂前会报 0 行（0.2.0 升级时卸载全部插件后的部署态，非代码缺陷）。
+- [x] **test 实测场重挂 + 实例级门禁**（2026-10-17 完成，详见 `technical-details/部署.md`「v2.0.0 重挂 test 实测场与实例级门禁」）—— 以 `install_bundle`（本地目录 ⇒ `link:`）挂入 `homes\test`（运行时 0.2.0-rc.2），在线重组合、未重启实例。门禁：dump 恰一行无 `disabled`；`include:guardrails` `fiberPhase: active`；Config 两字段均 volatile；`plugins.row.config` occupant active；真实审批四条（内置名单 ask→批准放行、同文件再读**重新** ask→拒绝不执行、`sensitiveFiles` 标记 ask→批准）；配置热生效且撤销后 patch 逐字节还原；`glob`/目录 grep/`.env` 读取均不弹。**仍未验证**：`approval policy = never` 分支、Auto Review 命中同一 `read` 的 deny→ask 组合、逐启动 stderr 的字面判据（缺日志通道，用 fiberPhase 与功能替代）。
 - [ ] **stable-dev（web, 0.1.7-rc.2）迁移路径** —— 该实例现仍由 v1.7.0 发布物守护（硬阻断模型）。迁 v2 前置：实例先升 0.2.0-rc.2（会话宿主，重启中断须用户确认时机）→ test 门禁通过 → 换钉 ref 的 github: spec。peer 门禁保证升实例前旧插件行不被 v2 禁用错乱（v2 spec 不满足 0.1.7 时整行禁用）。
-- [ ] **npm 发布（可选）** —— 未开始；发布前须补齐 test 实测门禁（AGENTS.md 发布前置门禁），当前 agent 侧仅完成单测/覆盖/分层/干净安装冒烟。
+- [ ] **npm 发布（可选）** —— 未开始。2026-10-17 起 test 实例级门禁的**主要判据已通过**（见上条与部署篇）；发布前仍须就两条未验证项（`policy = never` 分支、Auto Review 同工具 deny→ask 组合）决定是补测还是显式接受风险，再按 AGENTS.md 发布前置门禁记账。
 - [ ] **`docs/需求.md` v2 重写（低优先）** —— 现以顶部警示标注 v1/v2 分界；若 v2 语义稳定，重写需求正文替代历史文本。
 
 ## v1.7.0（DSR-013/DSR-014，2026-10-06）已办结
