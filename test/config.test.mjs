@@ -36,7 +36,7 @@ test('Config schema: empty config validates to all-defaults', () => {
   assert.deepEqual(resolved({}), {
     sensitiveFiles: [],
     credentialsReadAsk: true,
-    askTimeoutMs: 0,
+    askTimeoutMs: 120_000,
   })
 })
 
@@ -78,5 +78,8 @@ test('Config schema: invalid values fail validation (loader ValidationError)', (
   assert.doesNotThrow(() => Config({ askTimeoutMs: 1.5 }))
   assert.throws(() => evaluateRules({ askTimeoutMs: 1.5 }), /askTimeoutMs/)
   assert.throws(() => evaluateRules({ askTimeoutMs: 3_600_001 }), /askTimeoutMs/)
-  assert.equal(evaluateRules({}).askTimeoutMs, 0)
+  assert.equal(evaluateRules({}).askTimeoutMs, 120_000)
+  assert.equal(evaluateRules({ askTimeoutMs: 0 }).askTimeoutMs, 120_000,
+    'legacy zero selects the bounded default')
+  assert.equal(evaluateRules({ askTimeoutMs: 5000 }).askTimeoutMs, 5000)
 })

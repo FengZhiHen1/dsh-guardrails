@@ -1,45 +1,20 @@
-# dsh-guardrails 设计
+# dsh-guardrails 文档入口
 
-## 权威范围
+## 当前状态与阅读顺序
 
-本文是本仓库 `docs/` 的入口，唯一拥有本主题的目录组织、当前状态、阅读顺序与文档地图。需求事实归 `需求.md`，技术机制归 `technical-details/`，选型理由归 `decisions/`。本文不重复定义任何需求或技术事实。
+2026-10-17：Full Access 官方双 Shell AST 与最终硬门禁源码已重构并通过 95 项测试；包版本 **3.0.0**，未发布，完整跨平台和部署门禁待验。本轮资料所称“V2”指方案代际。旧的 ask-only 架构由 DSR-017 演进，DSR-001…016 原文保持历史记录，不作为当前默认规则清单。
 
-## 当前状态
+先读需求确认产品范围，再读技术入口了解机制；选型理由见 DSR-017，实际通过与缺证据项只以本轮验证记录为准。候选 Git/云/DB 等规则不得从研究表自动升格。受忽略的管理仓库 references 是来源材料，当前必要约束已沉淀到本仓库受版本控制文档。
 
-- **v2.1.0（2026-10-17，当前）——插件自有审批超时（DSR-016）**：新增 `askTimeoutMs`（默认 `0` = 关闭）。`> 0` 时本插件自己发审批请求并以 `AbortSignal` 计时，到点自动拒绝、弹窗随 signal 收起；全局等待上限仍属上游（T-A 收窄，不推翻）。配置页新增对应数字行。**test 实例已验**：超时自动拒绝 + 审计 `cancelled`，取证见 `technical-details/部署.md`「v2.1.0 实例门禁」。
-- **v2.0.0（2026-10-16）——审批式敏感读与职责收缩（DSR-015）**：插件整体从「`ctx.tools.guard` 硬阻断」重构为「`tools/pre-execute` 原生一次性审批（ask / allow-once）」。内置窄凭据名单 + 用户标记精确路径（`sensitiveFiles`）两层目标，只拦 `read`/`read_image`/单文件 `grep` 的内容读取；`.env` 全局拦截、`.git` 内部、系统区写、破坏性命令静态分析与语料回放工具全部退役，交 DSH 原生 Auto Review 与 OS 权限。peer 抬到 `^0.2.0-rc.2`（0.1.7 上静默禁用，升级顺序见 README）。决策与 0.2.0 源码核查记录见 [DSR-015](decisions/DSR-015-审批式敏感读与职责收缩.md)；设计基线（用户确认）见管理仓库 `references/dsh-guardrails/`。
-- **v1 归档**：下方 v1.x 状态条目与 `technical-details/` 各篇描述的是 v1 硬阻断模型（`规则模型.md`、`命令文本分析.md` 等），**v2 起不再适用**，仅留档对照；`decisions/DSR-001…014` 保留其历史效力，其中 DSR-013 的结论（`~/.ssh/config` 非密钥物质）在 V2 中因目录规则退役而自动成立。
-- 主题：`dsh-guardrails`（DSH 敏感读审批层，Host 插件，bundle 形态）。
-- 设计基线：2026-08-17 经用户逐项确认，见 [决策记录](decisions/)。
-- 实现状态：**已实现（v1.0.0 + v1.1.0 + v1.2.0 + v1.3.0）**——bundle 包形态（`dsh.bundle.patch` + 包内 `cordis.patch.yml`）、五类规则（env / git / credentials / destructive / system）、范围 B 增量（R0 补漏与 W0 系统区写拦截，DSR-001）、操作类型分级（列举 vs 内容访问）、配置校验、规则矩阵与生命周期测试全过（行覆盖 ≥97%，门禁 ≥80%）；**防御层全量配置化（DSR-006，v1.1.0）**——叶子级可配（操作级叶子 + destructive 六子族 + `unverifiable` 键）；**配置入口按 DSH 官方范式（v1.2.0）**——导出 Schemastery `Config` schema，loader 在 `apply` 前验证/填默认值；**设置卡片入口（v1.3.0）**——官方 settings 卡片范式。`.dsh`（含会话历史）不敏感（DSR-003 重访注记）。
-- **0.1.2-rc.1 对齐重构（v1.4.0）**：core/adapter 单包分层（`src/core` 六模块 + `src/adapter/host.js` + `src/client/card.js`，分层门禁实质生效）、settings 改官方 `installSection` 接线、判定基准目录来源修正（DSR-007：`sandboxPolicy.resolve({ session })`）、`assessDestructive` 六子族拆分、质量地板 0 error。
-- **链删/误用入闸（v1.5.0，DSR-009）**：`destructive` 扩为八子族（`chain` 无门控链删、`misuse` 参数误用），词法分隔符保真（`&&`/`||`）；会话状态（move journal）与 approval 档评估后否决，**无状态边界重申**——跨回合串联删除不判，规程层补偿，见 [DSR-009](decisions/DSR-009-无状态边界链删与参数误用.md)。
-- **0.1.7-rc.2 对齐重构（v1.6.0）**：settings 模型换代——Host 六个 Config 字段全部 `.volatile()` + `settings.configure({ auto: false })` 页面策略 + 判定时读 `ref.get()` 活值（旧的 `installSection` 在新基线零命中）；浏览器半侧改注册 `plugins.row.config`（key = `dsh-guardrails#guardrails`）并经 `ctx.configForms` 读写（旧的 `settingsScope` / `settings.plugin.item` 零命中）；命名空间改为 loader 条目 id `guardrails`；图标名随新 190 导出体系迁移（`IconChevronDownOutlineRegular`）；peer 范围提到 `0.1.7-rc.2` 并补 peer 门禁说明；**不兼容 0.1.2-rc.1 及更早运行时**（方案 B 单轨适配）。
-- **引用豁免（v1.6.0 内，DSR-010）**：新增 `maskTextSpans`，在文本引用检查前抹掉"引用位置"（散文引号分段 + 文本/模式参数值），使**引用**敏感名不再被判成访问它——`git commit -m "…references the .git directory…"` 这类引用守卫自己拒绝原文的正当操作不再被拦；含路径分隔符的真实引用与全部路径能力参数照旧全拦。见 [DSR-010](decisions/DSR-010-文本引用豁免.md)。
-- **语句位置与插值子表达式（v1.7.0，DSR-012）**：修掉"裸引号输出语句被当成动态命令"这一整类误伤（实测 9062 条真实命令中 407 条属此类，占被拦总数 85%），并同批补上方向相反的漏防——双引号插值 `"$( ... )"` 里的命令此前**同时逃过内容引用、系统区写、破坏性三层**（`Write-Output "$(Get-Content .env)"` 实测放行）。判据来自 PowerShell 运行时实测而非启发式：引号开头的语句是输出（`"cmd" arg` 是语法错误）、`$(...)` 带参数是运行时错误、只有 `&`/`.` 是显式调用；管线改为对 `nested` 子表达式**递归跑全部规则**（深度上界 8）。被拦命令 478 → 76（5.4% → 0.8%），新增误伤 0。见 [DSR-012](decisions/DSR-012-语句位置与插值子表达式.md)。
-- **审计日志可诊断性（v1.7.0）**：审计行上限 140 字符，而拒绝消息前缀已占 112 ⇒ 命令**只剩 28 字符**，导致上述根因无法从日志直接定位（每条都像以赋值开头）。改为 400 字符上限 + 对 pwsh 追加独立 `denied input:` 行（文本引用类拒绝消息不含命令，此前事后无法归因）。
-- **SSH 别名例外与引导（v1.7.0，DSR-013）**：`~/.ssh/config`（别名路由表、不含密钥材料）的**读与列举放行、写仍拦**。拦住它会让 `ssh <别名>` 这条正路对 Agent 不可达（别名无从发现、`glob ~/.ssh` 又被拦），而守卫本就只守密钥**物质**——`ssh <别名>` 用着私钥却放行，`ssh -i <key>` 才拦，config 这种纯路由信息没有理由按密钥对待。例外按目录具名、极窄：仅 `.ssh` 直接子级且名恰为 `config`，且仅读/列举通道（写通道走严格名单，防止 `Set-Content ~/.ssh/config` 从 pwsh 通道绕过）。凭据拒绝文案改为引导走别名（`ssh -G <别名>` 查生效配置），且该文案引用 config 路径不会被自己拦。见 [DSR-013](decisions/DSR-013-ssh-config安全例外与别名引导.md)。
-- **深度上界改 fail-closed（v1.7.0 补修，2026-10-06）**：`MAX_SUBEXPRESSION_DEPTH = 8` 原为"到界放行"，注释称"外层已看见文本"。实测推翻：该理由只对**全文本正则类**（凭据/env/git/machine）成立；**`system.write` 需片段+路径解析**，depth≥1 时顶层片段只剩 `writeoutput` ⇒ 9 层 `Write-Output "$( ... )"` 包裹的系统区写**曾放行**（并用临时文件验证 PowerShell 真的执行）。现到界即拒（`unverifiable` 键门控，遵守 DSR-006）。误伤实测：26,834 条真实命令中深度 ≥8 的 **0 条**。
-- **私钥后缀进文本通道（v1.7.0，DSR-014）**：后缀规则此前只在路径层 ⇒ 密钥搬出 `.ssh` 后 `read C:/keys/prod.pem` 拦、`ssh -i C:/keys/prod.pem` **放行**（`~/.ssh/*.pem` 靠的是目录段而非后缀）。现按实测分档：`.pem/.p12/.pfx/.ppk` 进文本层（新增 7 条全为真），`.key` **有意排除**（新增 24 条全为误报）。见 [DSR-014](decisions/DSR-014-私钥后缀进入文本通道.md)。
-- **verify 脚本不再静默用错目标**：四处默认改由 `dshl env --json` 现查，无法解析目标时判 **SKIP 而非 FAIL**（原先回落到 `~/.dsh` + 遗留全局 CLI，导致第 3 步假失败 "test 行数=0"）。
-- 工程化设计：2026-08-17 经用户确认，结构重构已随 v1.0.0 落地；v1.4.0 按仓库 core/adapter 约定二次分层，见 [工程结构与测试体系.md](technical-details/工程结构与测试体系.md)。
-- 已实现设计（2026-08 定稿，v1.1.0 落地）：**防御层全量配置化**——类别键扩展为布尔/对象（操作级叶子 `read`/`modify`/`list`/`write`）、`destructive` 拆分六子族（git/machine/eval/cli/bulk/target）、新增 `unverifiable` 键，见 [DSR-006](decisions/DSR-006-防御层全量配置化.md) 与 [需求.md](需求.md) R-03。
-- 部署：**test 实测场按需直挂、用完即清**（`link:` 符号链接，源码改动重启即生效；2026-09-29 已按指令清空为纯净壳，重挂命令见 [部署.md](technical-details/部署.md)）；**web profile 只吃发布物**——当前以 `github:` git 依赖（`FengZhiHen1/dsh-guardrails`，spec 无 ref、lockfile 承载 resolution）挂载，非源码直挂（AGENTS.md 红线），发布后切换 registry 版本。**运行时基线 `0.1.7-rc.2` 及以后**。
-- `missing evidence`：符号链接/Junction 的真实路径解析行为（现状为纯段运算，不解析链接）；跨平台（Linux/macOS）敏感清单；`reg` 注册表类命令文本的覆盖范围。
-
-## 阅读顺序
-
-1. `需求.md`：先确认目标、范围、约束与验收。
-2. `technical-details/README.md`：按机制阅读顺序展开。
-3. `decisions/`：需要了解决策理由时阅读。
-
-## 文档地图
-
-| 文档 | 唯一权威范围 |
+| 文档 | 权威范围 |
 |---|---|
-| `需求.md` | 目标、用户与场景、功能范围、需求约束、非目标与验收条件（v1 事实，v2 语义见 DSR-015） |
-| `technical-details/README.md` | 技术细节目录的阅读顺序与文档地图 |
-| `technical-details/规则模型.md` | （v1 归档）敏感类别 × 操作类型矩阵、路径级与命令文本级检查、名单结构与 fail 语义 |
-| `technical-details/命令文本分析.md` | （v1 归档）PowerShell 命令文本词法、语句位置、动词分类、列举模式判定、子表达式递归、破坏性分析与固有限制 |
-| `technical-details/部署.md` | 包形态、部署红线、安装验证、生效流程、挂载与实测场清理实录、测试体系与发布路径 |
-| `decisions/` | 真实重大取舍的备选、评价、后果与重访条件（DSR-015 起为现行，DSR-001…014 为 v1 历史） |
+| [需求](需求.md) | 当前产品目标、范围、约束及可观察验收 |
+| [技术入口](technical-details/README.md) | 机制阅读顺序与目录地图 |
+| [DSR-017](decisions/DSR-017-官方AST与最终硬门禁.md) | 本轮重大取舍、替代关系、确认状态与来源 |
+| [验证记录](verification/2026-10-17-v2-refactor.md) | 本轮证据、限制和最终结果补记位置 |
+| [TODO](TODO.md) | 项目待办；本轮由主 agent 最终同步旧条目 |
+| `decisions/DSR-001…016` | 历史决策原文；不因保留而恢复旧默认策略 |
+
+## 已知偏差
+
+当前代码、测试和包清单由并行实施任务更新，本文档不声称已完成适配。初始 73 tests / 406 ms 属重构前基准；Linux 运行、历史 97,050 次回放、安装部署与 Native/PTC 全出口净化没有完成证据。旧部署实录只证明其当时版本。旧 TODO 中的 ask-only 方向与“等设计再编码”等描述需由主 agent 在收尾时同步。

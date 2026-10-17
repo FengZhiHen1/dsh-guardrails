@@ -1,0 +1,10 @@
+{
+  "version": "v3.12.0",
+  "release": "https://github.com/mvdan/sh/releases/tag/v3.12.0",
+  "checksumSource": "https://github.com/mvdan/sh/releases/download/v3.12.0/sha256sums.txt",
+  "binaries": {
+    "win32-x64": {"file":"shfmt_v3.12.0_windows_amd64.exe","sha256":"c8bda517ba1c640ce4a715c0fa665439ddbe4357ba5e9b77b0e51e70e2b9c94b"},
+    "linux-x64": {"file":"shfmt_v3.12.0_linux_amd64","sha256":"d9fbb2a9c33d13f47e7618cf362a914d029d02a6df124064fff04fd688a745ea"},
+    "linux-arm64": {"file":"shfmt_v3.12.0_linux_arm64","sha256":"5f3fe3fa6a9f766e6a182ba79a94bef8afedafc57db0b1ad32b0f67fae971ba4"}
+  }
+}

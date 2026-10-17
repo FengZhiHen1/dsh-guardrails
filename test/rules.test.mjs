@@ -48,7 +48,9 @@ test('retired V1 rule families no longer match (behavioral ablation)', () => {
   assert.equal(pathTargetsCredentials('C:/Users/me/AppData/Local/Google/Chrome/User Data/Default/Cookies'), false)
   assert.equal(pathTargetsCredentials('C:/Users/me/AppData/Roaming/Microsoft/Protect/x'), false)
   // Mixed-use carriers: retired (user marks them explicitly).
+  // quality-floor: ignore unstaged-ref Synthetic path fixture; this file is neither read nor executed.
   assert.equal(pathTargetsCredentials('C:/Users/me/.docker/config.json'), false)
+  // quality-floor: ignore unstaged-ref Synthetic path fixture; this file is neither read nor executed.
   assert.equal(pathTargetsCredentials('C:/Users/me/.config/gcloud/legacy_credentials/x.json'), false)
 })
 
@@ -75,6 +77,7 @@ test('builtin list still covers the named credential files end-to-end', () => {
 })
 
 test('DSH-managed credential files stay on the list (DSR-003 intent)', () => {
+  // quality-floor: ignore unstaged-ref Synthetic path fixture; this file is neither read nor executed.
   assert.equal(pathTargetsCredentials('C:/Users/FengZhiHen/.dsh/.credentials.yaml'), true)
   assert.equal(pathTargetsCredentials('C:/Users/FengZhiHen/.dsh/.auteur-media-secret'), true)
   // But .dsh itself remains a non-credential directory.
@@ -88,14 +91,14 @@ test('RULE_KEYS is exactly the V2 pair + the plugin-owned timeout bound', () => 
 })
 
 test('evaluateRules: defaults (empty marks, builtin list on)', () => {
-  assert.deepEqual(evaluateRules({}), { sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 0 })
-  assert.deepEqual(evaluateRules(undefined), { sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 0 })
+  assert.deepEqual(evaluateRules({}), { sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 120_000 })
+  assert.deepEqual(evaluateRules(undefined), { sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 120_000 })
 })
 
 test('evaluateRules: accepts explicit values', () => {
   assert.deepEqual(
     evaluateRules({ sensitiveFiles: ['E:/p/.env.production'], credentialsReadAsk: false }),
-    { sensitiveFiles: ['E:/p/.env.production'], credentialsReadAsk: false, askTimeoutMs: 0 },
+    { sensitiveFiles: ['E:/p/.env.production'], credentialsReadAsk: false, askTimeoutMs: 120_000 },
   )
 })
 

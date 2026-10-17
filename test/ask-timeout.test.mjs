@@ -1,205 +1,151 @@
-// Plugin-owned ask timeout (DSR-016).
-//
-// Drives the real tools/pre-execute listener through a mock ctx whose approval
-// service mimics @deepseek-ai/dsh-user-approval: `request()` settles with a
-// closed outcome and reports `cancelled` when the request signal aborts. Timers
-// are mocked, so nothing here waits in real time.
-//
-// Run with: node --test test/
-
+// Bounded approval lifecycle, driven through the real Host pre-execute and guard.
+// Approval is a virtual service; this suite does not exercise runtime approval UI.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import path from 'node:path'
 import * as guardrails from '../index.js'
 
-const CWD = 'E:/Project/DSH_Plugins'
-const TARGET = 'C:/Users/me/.ssh/id_rsa'
-
-/**
- * Build a gate over a fake approval service.
- *
- * @param config - plugin row config.
- * @param answer - outcome the service returns when it is not aborted.
- * @param opts - `{ service: false }` omits the approval service entirely.
- */
-function makeGate(config = {}, answer = 'allowed-once', opts = {}) {
-  let listener
+async function makeGate(t, config = {}, options = {}) {
+  const root = await mkdtemp(path.resolve('tmp/approval-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const target = path.join(root, 'synthetic-sensitive.txt')
+  await writeFile(target, 'synthetic fixture only')
+  const listeners = new Map()
+  const disposers = []
   const requests = []
-  const approval = {
-    request: (req) => {
-      if (opts.throw === true) throw new Error('approval seam exploded')
-      requests.push(req)
-      return new Promise((resolve) => {
-        const settle = () => resolve(answer)
-        if (req.signal === undefined) {
-          settle()
-          return
-        }
-        if (req.signal.aborted) {
-          resolve('cancelled')
-          return
-        }
-        req.signal.addEventListener('abort', () => resolve('cancelled'), { once: true })
-        if (opts.pending === true) return
-        // An answerer that decides before any timeout.
-        queueMicrotask(() => {
-          if (!req.signal.aborted) settle()
-        })
-      })
-    },
-  }
-  const sandboxPolicy = { resolve: ({ session } = {}) => ({ workspaceRoot: session?.header?.cwd ?? CWD }) }
+  let answer
+  let started
+  const ready = new Promise(resolve => { started = resolve })
   const ctx = {
-    get: (key) => {
-      if (key === 'sandboxPolicy') return sandboxPolicy
-      if (key === 'approval') return opts.service === false ? undefined : approval
-      return undefined
+    tools: { guard(fn) { ctx.gate = fn; return () => { ctx.gate = undefined } } },
+    get(key) {
+      if (key === 'approval' && options.service !== false) return {
+        request(req) {
+          requests.push(req)
+          started()
+          if (options.throw) throw new Error('synthetic approval failure')
+          if (options.pending) return new Promise(resolve => { answer = resolve })
+          return Promise.resolve(options.outcome ?? 'allowed-once')
+        },
+      }
     },
-    effect: (fn) => fn(),
-    on: (event, handler) => {
-      if (event === 'tools/pre-execute') listener = handler
-      return () => { listener = undefined }
-    },
-    inject: () => {},
+    effect(fn) { const off = fn(); if (typeof off === 'function') disposers.push(off) },
+    inject() {},
+    on(event, fn) { listeners.set(event, fn); return () => listeners.delete(event) },
   }
-  guardrails.apply(ctx, config)
+  guardrails.apply(ctx, { sensitiveFiles: [target], ...config })
+  const dispose = async () => { while (disposers.length) await disposers.pop()() }
+  t.after(dispose)
+  const execution = { name: 'read', arguments: { file_path: target }, callId: 'synthetic-call', agent: { session: { header: { cwd: root } } }, ...options.execution }
+  let dispatches = 0
   return {
-    requests,
-    call: (name, args, exec = {}) =>
-      listener(
-        { name, arguments: args, agent: { session: { header: { cwd: CWD } } }, ...exec },
-        async () => ({ kind: 'allow' }),
-      ),
-    read: (file_path, exec) => listener(
-      { name: 'read', arguments: { file_path }, agent: { session: { header: { cwd: CWD } } }, ...exec },
-      async () => ({ kind: 'allow' }),
-    ),
+    execution, requests, ready, dispose,
+    guard: () => ctx.gate(execution),
+    answer: value => answer(value),
+    dispatches: () => dispatches,
+    run: () => listeners.get('tools/pre-execute')(execution, async () => { dispatches++; return { kind: 'allow' } }),
   }
 }
 
-const isTimeoutDeny = (r) => r !== undefined && r.kind === 'deny' && /审批在 .* 内无人处理，已自动拒绝/.test(r.reason)
+await mkdir(path.resolve('tmp'), { recursive: true })
 
-test('askTimeoutMs = 0 (default) keeps the native ask and issues no request', async () => {
-  const gate = makeGate()
-  const decision = await gate.read(TARGET)
-  assert.equal(decision.kind, 'ask')
-  assert.equal(gate.requests.length, 0, 'a disabled bound must not own the request')
-})
+for (const config of [{}, { askTimeoutMs: 0 }]) {
+  test(`default and legacy zero own a bounded 120000ms request: ${JSON.stringify(config)}`, async t => {
+    const gate = await makeGate(t, config, { pending: true })
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const pending = gate.run()
+    await gate.ready
+    t.mock.timers.tick(119999)
+    assert.equal(gate.requests[0].signal.aborted, false)
+    t.mock.timers.tick(1)
+    const result = await pending
+    assert.equal(result.kind, 'deny')
+    assert.match(result.reason, /APPROVAL_TIMEOUT.*120000ms/)
+    assert.equal(gate.requests[0].signal.aborted, true)
+    assert.equal(gate.dispatches(), 0)
+    assert.match(gate.guard(), /APPROVAL_TIMEOUT/)
+  })
+}
 
-test('a bound owns the request and maps a grant to allow', async () => {
-  const gate = makeGate({ askTimeoutMs: 5000 })
-  const decision = await gate.read(TARGET)
-  assert.equal(decision.kind, 'allow')
-  assert.equal(gate.requests.length, 1)
-  const req = gate.requests[0]
-  assert.equal(req.toolName, 'read')
-  assert.ok(typeof req.reason === 'string' && req.reason.includes('id_rsa'))
-  assert.ok(req.signal !== undefined, 'the request must carry a signal so the UI can dismiss on timeout')
-})
-
-test('a grant clears the timer: aborting later must not touch the request signal', async (t) => {
+test('one timely grant dispatches once and clears its timer', async t => {
+  const gate = await makeGate(t, { askTimeoutMs: 5000 })
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const gate = makeGate({ askTimeoutMs: 5000 })
-  assert.equal((await gate.read(TARGET)).kind, 'allow')
-  const signal = gate.requests[0].signal
-  t.mock.timers.tick(60_000)
-  assert.equal(signal.aborted, false, 'the timeout timer must be cleared once the ask settles')
+  assert.deepEqual(await gate.run(), { kind: 'allow' })
+  assert.equal(gate.dispatches(), 1)
+  assert.equal(gate.guard(), undefined)
+  const request = gate.requests[0]
+  assert.equal(request.toolName, 'read')
+  assert.equal(request.callId, gate.execution.callId)
+  assert.equal(request.agent, gate.execution.agent)
+  assert.match(request.reason, /S-F1/)
+  assert.ok(request.reason.length < 600)
+  t.mock.timers.tick(60000)
+  assert.equal(request.signal.aborted, false)
 })
 
-test('a user rejection keeps the native wording', async () => {
-  const gate = makeGate({ askTimeoutMs: 5000 }, 'rejected')
-  const decision = await gate.read(TARGET)
-  assert.equal(decision.kind, 'deny')
-  assert.equal(decision.reason, 'the user rejected tool "read"')
-})
+for (const outcome of ['rejected', 'unavailable', 'cancelled', 'maybe']) {
+  test(`non-grant approval outcome ${outcome} refuses dispatch`, async t => {
+    const gate = await makeGate(t, {}, { outcome })
+    const result = await gate.run()
+    assert.equal(result.kind, 'deny')
+    assert.match(result.reason, /APPROVAL_/)
+    assert.equal(gate.dispatches(), 0)
+    assert.equal(gate.guard(), result.reason)
+  })
+}
 
-test('an unavailable channel denies with the native wording', async () => {
-  const gate = makeGate({ askTimeoutMs: 5000 }, 'unavailable')
-  const decision = await gate.read(TARGET)
-  assert.equal(decision.kind, 'deny')
-  assert.match(decision.reason, /no approval channel is available/)
-})
+for (const options of [{ service: false }, { throw: true }, { execution: { agent: undefined } }]) {
+  test(`unavailable or failing approval refuses dispatch: ${JSON.stringify(options)}`, async t => {
+    const gate = await makeGate(t, {}, options)
+    const result = await gate.run()
+    assert.equal(result.kind, 'deny')
+    assert.match(result.reason, /APPROVAL_(UNAVAILABLE|FAILED)/)
+    assert.equal(gate.dispatches(), 0)
+  })
+}
 
-test('no approval service at all denies instead of reading', async () => {
-  const gate = makeGate({ askTimeoutMs: 5000 }, 'allowed-once', { service: false })
-  const decision = await gate.read(TARGET)
-  assert.equal(decision.kind, 'deny')
-  assert.match(decision.reason, /no approval channel is available/)
-})
-
-test('a caller-side cancel keeps the native cancel shape', async () => {
-  const gate = makeGate({ askTimeoutMs: 60_000 }, 'allowed-once', { pending: true })
+test('caller cancellation aborts an uncooperative approval service and blocks late grant', async t => {
   const controller = new AbortController()
-  const pending = gate.read(TARGET, { signal: controller.signal })
-  controller.abort(new Error('turn cancelled'))
-  assert.deepEqual(await pending, { kind: 'cancel' })
-})
-
-test('the bound fires: nobody answers → explicit automatic refusal', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  const gate = makeGate({ askTimeoutMs: 3000 }, 'allowed-once', { pending: true })
-  const pending = gate.read(TARGET)
-  // Let the listener reach the await, then let the timer elapse.
-  await Promise.resolve()
-  assert.equal(gate.requests.length, 1, 'the request must be pending before the timeout')
-  t.mock.timers.tick(3000)
-  const decision = await pending
-  assert.equal(decision.kind, 'deny')
-  assert.equal(isTimeoutDeny(decision), true, `unexpected reason: ${decision.reason}`)
-  assert.match(decision.reason, /3s/, 'the reason states the bound')
-  assert.match(decision.reason, /自动拒绝/, 'the reason distinguishes timeout from a human rejection')
-})
-
-test('the timeout never grants and never leaves the call running', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  const gate = makeGate({ askTimeoutMs: 1000 }, 'allowed-once', { pending: true })
-  const pending = gate.read(TARGET)
-  await Promise.resolve()
-  t.mock.timers.tick(5000)
-  const decision = await pending
-  assert.equal(decision.kind, 'deny')
+  const gate = await makeGate(t, {}, { pending: true, execution: { signal: controller.signal } })
+  const pending = gate.run()
+  await gate.ready
+  controller.abort()
+  assert.equal((await pending).kind, 'deny')
   assert.equal(gate.requests[0].signal.aborted, true)
+  gate.answer('allowed-once')
+  await Promise.resolve()
+  assert.match(gate.guard(), /CANCELLED/)
+  assert.equal(gate.dispatches(), 0)
 })
 
-test('a throwing approval request fails closed instead of reading', async () => {
-  const gate = makeGate({ askTimeoutMs: 5000 }, 'allowed-once', { throw: true })
-  const decision = await gate.read(TARGET)
-  assert.equal(decision.kind, 'deny')
-  assert.match(decision.reason, /approval request failed/)
-})
-
-test('a timeout leaves one bounded audit line (the approval pair cannot say timeout)', async (t) => {
+test('timeout ignores a late grant even when the service ignores its abort signal', async t => {
+  const gate = await makeGate(t, { askTimeoutMs: 1000 }, { pending: true })
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const lines = []
-  const original = console.error
-  console.error = (...args) => { lines.push(args.join(' ')) }
-  try {
-    const gate = makeGate({ askTimeoutMs: 2000 }, 'allowed-once', { pending: true })
-    const pending = gate.read(TARGET)
-    await Promise.resolve()
-    t.mock.timers.tick(2000)
-    await pending
-  } finally {
-    console.error = original
-  }
-  assert.equal(lines.length, 1, `expected exactly one audit line, got ${JSON.stringify(lines)}`)
-  assert.match(lines[0], /\[guardrails\] ask timed out after 2000ms/)
+  const pending = gate.run()
+  await gate.ready
+  t.mock.timers.tick(1000)
+  assert.match((await pending).reason, /APPROVAL_TIMEOUT/)
+  gate.answer('allowed-once')
+  await Promise.resolve()
+  assert.match(gate.guard(), /APPROVAL_TIMEOUT/)
+  assert.equal(gate.dispatches(), 0)
 })
 
-test('an unknown outcome fails closed', async () => {
-  const gate = makeGate({ askTimeoutMs: 5000 }, 'maybe')
-  const decision = await gate.read(TARGET)
-  assert.equal(decision.kind, 'deny')
-  assert.match(decision.reason, /unrecognized/)
+test('unload cancels pending approval without waiting for the service', async t => {
+  const gate = await makeGate(t, {}, { pending: true })
+  const pending = gate.run()
+  await gate.ready
+  await gate.dispose()
+  assert.equal((await pending).kind, 'deny')
+  assert.equal(gate.requests[0].signal.aborted, true)
+  gate.answer('allowed-once')
+  await Promise.resolve()
+  assert.equal(gate.dispatches(), 0)
 })
 
-test('non-sensitive reads never touch the approval service, even with a bound', async () => {
-  const gate = makeGate({ askTimeoutMs: 5000 })
-  assert.equal((await gate.read('src/core/rules.js')).kind, 'allow')
-  assert.equal(gate.requests.length, 0)
-})
-
-test('mount-time validation rejects a malformed bound loudly', () => {
-  for (const bad of [-1, 1.5, '3000', 3_600_001]) {
-    assert.throws(() => makeGate({ askTimeoutMs: bad }), /askTimeoutMs/)
+test('mount validation rejects malformed timeout bounds', async t => {
+  for (const bad of [-1, 1.5, '3000', 3600001]) {
+    await assert.rejects(makeGate(t, { askTimeoutMs: bad }), /askTimeoutMs/)
   }
 })

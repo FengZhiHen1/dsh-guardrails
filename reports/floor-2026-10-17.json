@@ -1,0 +1,32 @@
+{
+  "root": "E:\\Project\\DSH_Plugins\\plugins\\dsh-guardrails",
+  "verdict": "pass",
+  "files": {
+    "python": 0,
+    "typescript": 29
+  },
+  "error_count": 0,
+  "warning_count": 2,
+  "findings": [
+    {
+      "rule": "high-complexity",
+      "severity": "warning",
+      "file": "src\\adapter\\parsers\\index.mjs",
+      "line": 17,
+      "snippet": "export function createShellParsers(options = {}) {  # 逻辑行数 154 / 逻辑最大缩进 8 列（JSX 返回块不计入）"
+    },
+    {
+      "rule": "high-complexity",
+      "severity": "warning",
+      "file": "src\\adapter\\targets.js",
+      "line": 115,
+      "snippet": "export async function observeTargets({ commands = [], cwd, rules, signal } = {}) {  # 逻辑行数 92 / 逻辑最大缩进 12 列（JSX 返回块不计入）"
+    }
+  ],
+  "repo_index": {
+    "available": true,
+    "tracked_count": 70,
+    "untracked_count": 0,
+    "note": ""
+  }
+}

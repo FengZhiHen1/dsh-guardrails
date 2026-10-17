@@ -1,0 +1,46 @@
+{
+  "root": "E:\\Project\\DSH_Plugins\\plugins\\dsh-guardrails",
+  "verdict": "pass",
+  "files": {
+    "python": 0,
+    "typescript": 31
+  },
+  "error_count": 0,
+  "warning_count": 4,
+  "findings": [
+    {
+      "rule": "high-complexity",
+      "severity": "warning",
+      "file": "src\\adapter\\parsers\\index.mjs",
+      "line": 17,
+      "snippet": "export function createShellParsers(options = {}) {  # 逻辑行数 154 / 逻辑最大缩进 8 列（JSX 返回块不计入）"
+    },
+    {
+      "rule": "docstring-promise",
+      "severity": "warning",
+      "file": "src\\adapter\\targets.js",
+      "line": 115,
+      "snippet": "export async function observeTargets(options = {}) {  # 声明 @throws 但函数体无 throw"
+    },
+    {
+      "rule": "high-complexity",
+      "severity": "warning",
+      "file": "src\\adapter\\targets.js",
+      "line": 130,
+      "snippet": "async function collectTargets({ commands = [], cwd, rules, signal } = {}) {  # 逻辑行数 92 / 逻辑最大缩进 12 列（JSX 返回块不计入）"
+    },
+    {
+      "rule": "high-complexity",
+      "severity": "warning",
+      "file": "src\\core\\policy.js",
+      "line": 62,
+      "snippet": "export function extractOperations(commands = []) {  # 逻辑行数 88 / 逻辑最大缩进 10 列（JSX 返回块不计入）"
+    }
+  ],
+  "repo_index": {
+    "available": true,
+    "tracked_count": 77,
+    "untracked_count": 1,
+    "note": ""
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "purpose": "dsh-guardrails 只读审查补充：pre-execute 短路 / 审批 / 执行身份状态序列的结构化测试用例（纯数据，无命令文本，不执行）。",
+    "target": "plugins/dsh-guardrails src/adapter/host.js approval.js + 真实 ToolRuntime prepareExecution (packages/core/tools/src/index.ts:1493-1539)",
+    "usage": "供 mock/fixture 测试编写者按 stateSequence 构造用例；dangerousOperation 仅作语义标签，不含任何可执行命令。"
+  },
+  "cases": [
+    { "id": "G-01", "category": "pre-shortcircuit", "stateSequence": ["pre-execute 被 prepend 监听器返回 allow，未调用 next"], "expectedGuardOutcome": "deny ANALYSIS_MISSING", "designClause": "基线 §3.1-5 前置 waterfall 短路不得静默放行", "evidence": "证实（guard-runtime.test.mjs:47 + tools/src/index.ts:1519）" },
+    { "id": "G-02", "category": "pre-shortcircuit", "stateSequence": ["pre-execute 返回 deny（分析完成）"], "expectedGuardOutcome": "guard 不再被征询，denialReason 用 pre 的 reason", "designClause": "Deny>Ask>Allow", "evidence": "证实（index.ts:1519-1531）" },
+    { "id": "G-03", "category": "pre-shortcircuit", "stateSequence": ["pre-execute 抛异常，另一插件捕获并返回 allow"], "expectedGuardOutcome": "deny ANALYSIS_MISSING", "designClause": "分析不可用 fail-closed", "evidence": "证实（WeakMap 未写入）" },
+    { "id": "G-04", "category": "identity", "stateSequence": ["同 callId 字符串、不同 ToolExecution 对象重放"], "expectedGuardOutcome": "deny ANALYSIS_MISSING", "designClause": "禁止裸 callId 充当安全身份", "evidence": "证实（guard.integration.test.mjs:49）" },
+    { "id": "G-05", "category": "identity", "stateSequence": ["around-wrapper 替换 exec.signal 后 guard 求值"], "expectedGuardOutcome": "WeakMap 键仍命中（对象身份不变）", "designClause": "同 execution WeakMap", "evidence": "证实（index.ts:1576 signal 原地替换，对象不变）" },
+    { "id": "G-06", "category": "identity", "stateSequence": ["HMR dispose 后旧 guard 对旧 execution 求值"], "expectedGuardOutcome": "deny ANALYSIS_DISPOSED", "designClause": "卸载资源与授权不延续", "evidence": "证实（lifecycle.test.mjs:72）" },
+    { "id": "G-07", "category": "identity", "stateSequence": ["重挂载后对 HMR 前旧 execution 求值"], "expectedGuardOutcome": "deny ANALYSIS_MISSING", "designClause": "跨挂载不继承授权", "evidence": "证实（lifecycle.test.mjs:80）" },
+    { "id": "G-08", "category": "approval", "stateSequence": ["ask → 审批服务在超时前返回 allowed-once"], "expectedGuardOutcome": "allow，本次可 dispatch", "designClause": "只接收本次 allowed-once", "evidence": "证实（ask-timeout.test.mjs:71）" },
+    { "id": "G-09", "category": "approval", "stateSequence": ["ask → 超时触发 → 审批服务此后才返回 allowed-once"], "expectedGuardOutcome": "deny APPROVAL_TIMEOUT，迟到批准无效", "designClause": "迟到回复不得执行", "evidence": "证实（ask-timeout.test.mjs:122）" },
+    { "id": "G-10", "category": "approval", "stateSequence": ["ask → 服务忽略 abort 信号且永不返回，超时到期"], "expectedGuardOutcome": "deny APPROVAL_TIMEOUT（Promise.race 不依赖服务配合）", "designClause": "Guardrails 自有超时", "evidence": "证实（approval.js:20-23,32-37）" },
+    { "id": "G-11", "category": "approval", "stateSequence": ["ask → caller 在等待中 abort"], "expectedGuardOutcome": "deny/cancel，迟到 allowed-once 不 dispatch", "designClause": "取消绑定", "evidence": "证实（ask-timeout.test.mjs:108）" },
+    { "id": "G-12", "category": "approval", "stateSequence": ["ask → 生命周期 abort（卸载）"], "expectedGuardOutcome": "deny，不等待服务", "designClause": "卸载取消迟到", "evidence": "证实（ask-timeout.test.mjs:135）" },
+    { "id": "G-13", "category": "approval", "stateSequence": ["approval policy=never，且有 prepend answerer 返回 allowed-once"], "expectedGuardOutcome": "即时拒绝，answerer 调用计数 0；asked/decided 审计对仍存在", "designClause": "never 立即拒绝且不可被监听器覆盖", "evidence": "证实（guard-runtime.test.mjs:34 + user-approval/src/index.ts:270-275）" },
+    { "id": "G-14", "category": "approval", "stateSequence": ["ask → 服务返回 rejected/unavailable/cancelled/未知值"], "expectedGuardOutcome": "deny，无 dispatch", "designClause": "其余结果均未授权", "evidence": "证实（ask-timeout.test.mjs:87）" },
+    { "id": "G-15", "category": "approval", "stateSequence": ["无 approval 服务或无 agent"], "expectedGuardOutcome": "deny APPROVAL_UNAVAILABLE", "designClause": "无渠道 fail-closed", "evidence": "证实（approval.js:12-14）" },
+    { "id": "G-16", "category": "approval", "stateSequence": ["同一敏感目标第二次调用（上次 allowed-once）"], "expectedGuardOutcome": "再次 ask，不静默复用授权", "designClause": "只 allowed-once / 禁止缓存上一调用授权", "evidence": "证实（每次调用独立 requestApproval）" },
+    { "id": "G-17", "category": "cancel", "stateSequence": ["分析为 allow 后、guard 求值前 caller abort"], "expectedGuardOutcome": "deny ANALYSIS_CANCELLED", "designClause": "超时是未知/迟到取消不生效", "evidence": "证实（guard.integration.test.mjs:128）" },
+    { "id": "G-18", "category": "cancel", "stateSequence": ["审批通过后、dispatch 前 caller abort"], "expectedGuardOutcome": "deny ANALYSIS_CANCELLED（host.js:92）", "designClause": "取消迟到不执行", "evidence": "证实" },
+    { "id": "G-19", "category": "cancel", "stateSequence": ["pre-execute 分析进行中 abort，解析器排队任务收到 abort"], "expectedGuardOutcome": "解析任务 stop CANCELLED，决策 deny", "designClause": "取消终止进程并清理", "evidence": "证实（parsers/index.mjs:144-148）" },
+    { "id": "G-20", "category": "failclosed", "stateSequence": ["pwsh helper 返回 reqId 不匹配/多余输出/协议错"], "expectedGuardOutcome": "PROTOCOL 错误 → ANALYSIS_UNAVAILABLE，helper 重启", "designClause": "协议故障 fail-closed", "evidence": "证实（parsers/index.mjs:67-71）" },
+    { "id": "G-21", "category": "failclosed", "stateSequence": ["shfmt SHA256 不匹配"], "expectedGuardOutcome": "INTEGRITY → ANALYSIS_UNAVAILABLE", "designClause": "固定二进制校验", "evidence": "证实（parsers/index.mjs:91）" },
+    { "id": "G-22", "category": "failclosed", "stateSequence": ["并发 shell 调用 > maxQueue(16)"], "expectedGuardOutcome": "BUSY → ANALYSIS_UNAVAILABLE（可用性损失，非放行）", "designClause": "有界并发", "evidence": "证实（parsers/index.mjs:138）" },
+    { "id": "G-23", "category": "config", "stateSequence": ["volatile askTimeoutMs 被提交为 -1/1.5/3600001"], "expectedGuardOutcome": "此后所有受分析调用 ANALYSIS_UNAVAILABLE（全局拒绝）", "designClause": "无效 live 值逐调用 fail-closed", "evidence": "证实（settings.test.mjs:76；发现 F-3 全局拒绝是活性风险）" },
+    { "id": "G-24", "category": "config", "stateSequence": ["legacy 配置含未知键挂载"], "expectedGuardOutcome": "apply 抛错 → 插件不挂载 → guard 与 redaction 全部缺失", "designClause": "配置兼容", "evidence": "证实（rules.js:38-39；发现 F-2 保护消失方向）" },
+    { "id": "G-25", "category": "bypass-path", "stateSequence": ["复合命令中先 cd 到子目录，随后相对路径删除已标记文件"], "expectedGuardOutcome": "当前实现按沙箱根解析 → allow（旁路 S-F1）", "designClause": "S-F1 精确敏感文件", "evidence": "推断（发现 F-1，需回归负例）" },
+    { "id": "G-26", "category": "bypass-path", "stateSequence": ["cd 子仓库后相对路径 rm -rf .git"], "expectedGuardOutcome": "当前实现 common-dir 基于错误 cwd → allow（旁路 ABS-03）", "designClause": "绝对 Deny 对象边界", "evidence": "推断（发现 F-1）" },
+    { "id": "G-27", "category": "bypass-coverage", "stateSequence": ["对标记文件执行 in-place 重写类命令（sed 非交互 -i 语义）"], "expectedGuardOutcome": "当前实现名称表未覆盖 → allow（S-F1 已知机制缺口）", "designClause": "S-F1 直接修改", "evidence": "推断（发现 F-5）" },
+    { "id": "G-28", "category": "late-io", "stateSequence": ["标记清单含挂死的网络路径，执行期间 caller abort"], "expectedGuardOutcome": "fs.stat 无 signal，不响应取消直至 IO 返回；期间 guard 为 ANALYSIS_MISSING（阻断但不撤销等待）", "designClause": "取消应可中断分析", "evidence": "推断（发现 F-4）" }
+  ]
+}

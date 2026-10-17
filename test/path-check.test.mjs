@@ -28,6 +28,8 @@ test('resolvePath: absolute, relative, dot-dot folding, separators', () => {
   assert.equal(resolvePath(BASE, '../other'), 'E:/Project/other')
   assert.equal(resolvePath(BASE, './x/./y'), 'E:/Project/DSH_Plugins/x/y')
   assert.equal(resolvePath('', 'x'), 'x')
+  assert.equal(resolvePath('/workspace/app', '../secret'), '/workspace/secret')
+  assert.equal(resolvePath('/workspace', '/a/../b'), '/b')
 })
 
 test('segmentsOf / baseNameOf / normCompare / slash basics', () => {
@@ -40,6 +42,14 @@ test('segmentsOf / baseNameOf / normCompare / slash basics', () => {
   assert.equal(isAbsolutePath('C:/x'), true)
   assert.equal(isAbsolutePath('/x'), true)
   assert.equal(isAbsolutePath('x/y'), false)
+})
+
+test('POSIX comparisons preserve case and credential combos require the exact file', () => {
+  const rules = evaluateRules({ sensitiveFiles: ['/workspace/Secret'] })
+  assert.equal(checkSensitiveRead('/workspace/Secret', rules), 'marked')
+  assert.equal(checkSensitiveRead('/workspace/secret', rules), null)
+  assert.equal(checkSensitiveRead('/home/me/.SSH/ID_RSA', rules), null)
+  assert.equal(checkSensitiveRead('/home/me/.aws/credentials/other', rules), null)
 })
 
 test('checkSensitiveRead: builtin credential hits', () => {

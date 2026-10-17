@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.0（计划，2026-10-17，实施中、未发布）
+
+本轮“V2”方案对应计划包版本 3.0.0；下列为已确认重构目标，最终实现和通过结果由主 agent 补入验证记录，不表示已安装部署。决定见 [DSR-017](docs/decisions/DSR-017-官方AST与最终硬门禁.md)。
+
+- 从 ask-only/依赖 Auto Review 改为 Full Access 下 `Deny > Ask > Allow`；官方持久 pwsh helper + 固定官方 shfmt v3.12.0 typed AST，目标 Windows x64、Linux x64/arm64，不保留自研 tokenizer 回退。
+- 异步 pre-execute 分析，以同 execution 对象 WeakMap 关联，同步 guard 做最终门禁；解析器/协议/关联结果故障 fail-closed，语义 Unknown 不自动 Deny。
+- `credentialsReadAsk` 保留名称，扩展为敏感内容读/导出/写/删/移；`sensitiveFiles` 保持 Profile 精确文件。审批自有默认 120000 ms，legacy `0` 映射 120000 ms，不再无限等待。
+- 官方 schema 自动设置取代旧 client 自绘。高置信凭据结果完整遮罩和内联凭据纠正型 Deny 按已确认政策实施，Native/PTC 真正出口范围待验，不承诺零泄漏。
+- 候选 Git/链删/云/数据库/容器/系统逐命令矩阵不默认启用；普通清理与正常非强制 Worktree 回收保持低干预。
+- 初始基准：73 tests 通过、约 406 ms；`pnpm test` 自动依赖安装 EPERM 失败，直接 Node 测试通过。该结果不是重构最终验证。未完成 Linux 实跑、97,050 历史回放或本轮安装部署，见 [验证记录](docs/verification/2026-10-17-v2-refactor.md)。
+
+以下 2.x/1.x 条目保留历史语义和取证，不构成本轮验收。
+
 ## 2.1.0（2026-10-17，未发布）
 
 **新增：插件自有审批超时**（`askTimeoutMs`），决策记录见 [DSR-016](docs/decisions/DSR-016-插件自有审批超时.md)——收窄 DSR-015 的 T-A 边界（全局等待上限仍属上游，本插件只约束自己发起的 ask）。

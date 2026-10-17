@@ -1,0 +1,25 @@
+{
+  "root": "src\\adapter\\parsers",
+  "verdict": "pass",
+  "files": {
+    "python": 0,
+    "typescript": 2
+  },
+  "error_count": 0,
+  "warning_count": 1,
+  "findings": [
+    {
+      "rule": "high-complexity",
+      "severity": "warning",
+      "file": "index.mjs",
+      "line": 17,
+      "snippet": "export function createShellParsers(options = {}) {  # 逻辑行数 128 / 逻辑最大缩进 8 列（JSX 返回块不计入）"
+    }
+  ],
+  "repo_index": {
+    "available": true,
+    "tracked_count": 4,
+    "untracked_count": 0,
+    "note": ""
+  }
+}

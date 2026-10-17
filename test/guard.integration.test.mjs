@@ -1,172 +1,135 @@
-// Integration matrix: drives the plugin's tools/pre-execute listener through a
-// mock ctx (no filesystem, no network). This is the V2 semantic anchor: the
-// listener never denies — it returns `{ kind: 'ask', reason }` on sensitive
-// content reads and passes everything else through with `next()`.
-// Run with: node --test test/
-
+// Host integration: real isolated file identities and execution-local guard decisions.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import path from 'node:path'
 import * as guardrails from '../index.js'
 
-function makeGate(config = {}, settings) {
-  let listener
-  // Mirror the real ctx.sandboxPolicy shape (DSR-007): resolve() derives the
-  // workspace root from the calling session's immutable header.cwd.
-  const sandboxPolicy = {
-    resolve: ({ session } = {}) => ({ workspaceRoot: session?.header?.cwd ?? 'E:/FallbackRoot' }),
-  }
+async function fixture(t, config = {}, options = {}) {
+  await mkdir(path.resolve('tmp'), { recursive: true })
+  const root = await mkdtemp(path.resolve('tmp/host-'))
+  const marked = path.join(root, 'marked.txt')
+  const ordinary = path.join(root, 'ordinary.txt')
+  const builtin = path.join(root, 'id_rsa')
+  for (const file of [marked, ordinary, builtin]) await writeFile(file, 'synthetic fixture only')
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const listeners = new Map()
+  const disposers = []
+  const requests = []
+  let guard
   const ctx = {
-    get: (key) => (key === 'sandboxPolicy' ? sandboxPolicy : undefined),
-    // The adapter registers the listener inside an effect and returns the
-    // listener's disposer; keep the registration alive (disposal is lifecycle
-    // territory, covered by lifecycle.test.mjs).
-    effect: (fn) => fn(),
-    on: (event, handler) => {
-      assert.equal(event, 'tools/pre-execute', 'the plugin must register tools/pre-execute')
-      listener = handler
-      return () => { listener = undefined }
+    tools: { guard(fn) { guard = fn; return () => { guard = undefined } } },
+    get(key) {
+      if (key === 'sandboxPolicy') return { resolve: () => { if (options.brokenSandbox) throw new Error('synthetic failure'); return { workspaceRoot: root } } }
+      if (key === 'approval') return { request: async req => { requests.push(req); return options.outcome ?? 'allowed-once' } }
     },
-    inject: (name, consumer) => {
-      const deps = Array.isArray(name) ? name : [name]
-      if (deps.includes('settings') && settings !== undefined) consumer({ ...ctx, settings })
-    },
+    effect(fn) { const off = fn(); if (typeof off === 'function') disposers.push(off) },
+    on(event, fn) { listeners.set(event, fn); return () => listeners.delete(event) },
+    inject() {},
   }
-  guardrails.apply(ctx, config)
+  guardrails.apply(ctx, { sensitiveFiles: [marked], ...config })
+  t.after(async () => { while (disposers.length) await disposers.pop()() })
+  const execution = (name, args) => ({ name, arguments: args, agent: { session: { header: { cwd: root } } } })
+  let dispatches = 0
   return {
-    /** Drive the registered listener: (name, args) → Promise<PreToolDecision | undefined>. */
-    call: (name, args, cwd = 'E:/Project/DSH_Plugins') =>
-      listener({ name, arguments: args, agent: { session: { header: { cwd } } } }, async () => ({ kind: 'allow' })),
+    root, marked, ordinary, builtin, requests, execution,
+    guard: exec => guard(exec),
+    dispatches: () => dispatches,
+    pre: exec => listeners.get('tools/pre-execute')(exec, async () => { dispatches++; return { kind: 'allow' } }),
   }
 }
 
-const isAsk = (r) => r !== undefined && r.kind === 'ask' && typeof r.reason === 'string'
-const passedThrough = (r) => r !== undefined && r.kind === 'allow'
-const read = (gate, file_path) => gate.call('read', { file_path })
-const readImage = (gate, file_path) => gate.call('read_image', { file_path })
-const grep = (gate, path) => gate.call('grep', { path })
-const glob = (gate, path) => gate.call('glob', { path })
-const write = (gate, file_path) => gate.call('write', { file_path })
-const pwsh = (gate, command) => gate.call('pwsh', { command })
-
-test('gate registers exactly one pre-execute listener', async () => {
-  const gate = makeGate()
-  assert.equal(typeof gate.call, 'function')
+test('tools is required and each protected execution needs completed analysis', async t => {
+  assert.deepEqual(guardrails.inject, ['tools'])
+  const h = await fixture(t)
+  const exec = h.execution('read', { file_path: h.ordinary })
+  assert.match(h.guard(exec), /ANALYSIS_MISSING/)
+  assert.equal((await h.pre(exec)).kind, 'allow')
+  assert.equal(h.guard(exec), undefined)
+  assert.match(h.guard({ ...exec }), /ANALYSIS_MISSING/, 'a clone cannot reuse another execution analysis')
+  assert.equal(h.guard(h.execution('unrelated-tool', {})), undefined)
 })
 
-test('builtin credential reads ask; ordinary reads pass through', async () => {
-  const gate = makeGate()
-  assert.equal(isAsk(await read(gate, 'C:/Users/me/.ssh/id_rsa')), true)
-  assert.equal(isAsk(await read(gate, 'C:/Users/me/.npmrc')), true)
-  assert.equal(isAsk(await read(gate, 'C:/Users/me/.aws/credentials')), true)
-  assert.equal(passedThrough(await read(gate, 'src/core/rules.js')), true)
-  assert.equal(passedThrough(await read(gate, '.env')), true, 'plain .env is Auto-Review territory (decision C)')
-  assert.equal(passedThrough(await read(gate, '.env.example')), true)
-  assert.equal(passedThrough(await read(gate, '.git/config')), true)
-  assert.equal(passedThrough(await read(gate, 'C:/Users/me/.ssh/config')), true, 'routing table stays free')
-  assert.equal(passedThrough(await read(gate, 'C:/keys/prod.pem')), true, 'suffix rules are retired')
+test('guard refuses dispatch while asynchronous analysis is pending', async t => {
+  const h = await fixture(t)
+  const exec = h.execution('read', { file_path: h.marked })
+  const pending = h.pre(exec)
+  assert.match(h.guard(exec), /ANALYSIS_MISSING/)
+  await pending
+  assert.equal(h.guard(exec), undefined)
+  assert.equal(h.requests.length, 1)
 })
 
-test('read_image and single-file grep are judged; glob never is', async () => {
-  const gate = makeGate()
-  assert.equal(isAsk(await readImage(gate, 'C:/Users/me/.ssh/id_rsa')), true)
-  assert.equal(passedThrough(await readImage(gate, 'E:/shot.png')), true)
-  assert.equal(isAsk(await grep(gate, 'C:/Users/me/.ssh/id_rsa')), true)
-  assert.equal(passedThrough(await grep(gate, 'E:/Project/DSH_Plugins/src')), true, 'directory grep cannot name a marked file')
-  assert.equal(passedThrough(await glob(gate, '.ssh/**')), true)
-  assert.equal(passedThrough(await glob(gate, 'C:/Users/me/.ssh')), true)
+test('structured content operations on actual marked files require a grant', async t => {
+  const h = await fixture(t, {}, { outcome: 'rejected' })
+  for (const name of ['read', 'read_image', 'grep', 'write', 'edit', 'delete', 'move']) {
+    const exec = h.execution(name, { file_path: h.marked, destination: h.ordinary })
+    const result = await h.pre(exec)
+    assert.equal(result.kind, 'deny', name)
+    assert.match(h.guard(exec), /APPROVAL_REJECTED/, name)
+  }
+  assert.equal(h.dispatches(), 0)
+  assert.equal(h.requests.length, 7)
 })
 
-test('V2 never denies and never intercepts writes, deletes, or shell commands', async () => {
-  const gate = makeGate()
-  // Writes/edits/shell are out of V2 scope entirely (Auto Review + OS perms).
-  assert.equal(passedThrough(await write(gate, 'C:/Users/me/.ssh/id_rsa')), true)
-  assert.equal(passedThrough(await pwsh(gate, 'Get-Content .ssh/id_rsa')), true)
-  assert.equal(passedThrough(await pwsh(gate, 'Remove-Item C:\\ -Recurse -Force')), true)
-  assert.equal(passedThrough(await pwsh(gate, 'git reset --hard')), true)
-  // The deny channel is gone: no decision ever carries kind 'deny'.
-  for (const decision of [
-    await read(gate, 'C:/Users/me/.ssh/id_rsa'),
-    await pwsh(gate, 'Remove-Item C:\\ -Recurse -Force'),
+test('ordinary and missing targets pass without approval; glob does not read content', async t => {
+  const h = await fixture(t)
+  for (const [name, args] of [
+    ['read', { file_path: h.ordinary }],
+    ['read', { file_path: path.join(h.root, 'missing', 'id_rsa') }],
+    ['glob', { path: h.root, pattern: '**/*' }],
+    ['read', { file_path: `${h.marked}.bak` }],
   ]) {
-    assert.equal(decision?.kind === 'deny', false, 'the deny channel is retired')
+    const exec = h.execution(name, args)
+    assert.equal((await h.pre(exec)).kind, 'allow')
+    assert.equal(h.guard(exec), undefined)
   }
+  assert.equal(h.requests.length, 0)
 })
 
-test('user-marked files ask on exact content reads', async () => {
-  const gate = makeGate({ sensitiveFiles: ['E:/Project/app/.env.production', 'C:/Users/me/.kube/config'] })
-  assert.equal(isAsk(await read(gate, 'E:/Project/app/.env.production')), true)
-  assert.equal(isAsk(await read(gate, 'e:\\project\\APP\\.env.production')), true, 'matching is case-insensitive')
-  assert.equal(passedThrough(await read(gate, 'E:/Project/app/.env')), true, 'sibling names are not the marked file')
-  assert.equal(passedThrough(await read(gate, 'E:/Project/app/.env.production.bak')), true)
-  assert.equal(isAsk(await grep(gate, 'C:/Users/me/.kube/config')), true, 'single-file grep on a marked file asks')
-  assert.equal(passedThrough(await grep(gate, 'E:/Project/app')), true, 'directory grep never matches a marked FILE')
+test('builtin toggle leaves explicit marks active', async t => {
+  const h = await fixture(t, { credentialsReadAsk: false })
+  await h.pre(h.execution('read', { file_path: h.builtin }))
+  assert.equal(h.requests.length, 0)
+  await h.pre(h.execution('read', { file_path: h.marked }))
+  assert.equal(h.requests.length, 1)
 })
 
-test('config toggles: builtin list off, marks still active; live volatile read', async () => {
-  const gate = makeGate({ credentialsReadAsk: false, sensitiveFiles: ['E:/x/secret'] })
-  assert.equal(passedThrough(await read(gate, 'C:/Users/me/.ssh/id_rsa')), true)
-  assert.equal(isAsk(await read(gate, 'E:/x/secret')), true)
+test('relative targets use the sandbox workspace root', async t => {
+  const h = await fixture(t)
+  const exec = h.execution('read', { file_path: 'marked.txt' })
+  exec.agent.session.header.cwd = path.join(h.root, 'different-session-directory')
+  await h.pre(exec)
+  assert.equal(h.requests.length, 1)
+  assert.equal(h.guard(exec), undefined)
 })
 
-test('ask reason names action and target, never file content', async () => {
-  const gate = makeGate()
-  const decision = await read(gate, 'C:/Users/me/.ssh/id_rsa')
-  assert.ok(decision.reason.includes('read'), 'the reason names the tool')
-  assert.ok(decision.reason.includes('id_rsa'), 'the reason names the target path')
-  assert.ok(decision.reason.length < 600, 'the reason stays bounded')
+test('analysis failures refuse dispatch with safe diagnostics', async t => {
+  const h = await fixture(t, {}, { brokenSandbox: true })
+  const exec = h.execution('read', { file_path: h.marked })
+  const result = await h.pre(exec)
+  assert.equal(result.kind, 'deny')
+  assert.match(result.reason, /ANALYSIS_UNAVAILABLE/)
+  assert.equal(result.reason.includes(h.marked), false)
+  assert.equal(h.guard(exec), result.reason)
+  assert.equal(h.dispatches(), 0)
 })
 
-test('relative paths resolve against the session workspace root', async () => {
-  // A marked file referenced relatively from the session cwd must hit.
-  const gate = makeGate({ sensitiveFiles: ['E:/Project/DSH_Plugins/.env.local'] })
-  assert.equal(isAsk(await read(gate, '.env.local')), true)
-  assert.equal(passedThrough(await read(gate, '.env')), true)
-})
-
-test('no sandboxPolicy service: absolute targets still judge; relative targets ask by basename', async () => {
-  // Without a sandboxPolicy the base degrades to ''. Narrow-list matching then
-  // only sees the basename — a relative `.ssh/id_rsa` still asks, because the
-  // failure direction of this plugin is the one-shot ASK, never a denial.
-  let listener
-  const ctx = {
-    get: () => undefined,
-    effect: (fn) => fn(),
-    on: (event, handler) => { listener = handler; return () => {} },
-    inject: () => {},
+test('malformed shell input fails closed without dispatching source', async t => {
+  const h = await fixture(t)
+  for (const name of ['pwsh', 'bash']) {
+    const exec = h.execution(name, { command: null })
+    assert.match((await h.pre(exec)).reason, /ANALYSIS_UNAVAILABLE/)
+    assert.match(h.guard(exec), /ANALYSIS_UNAVAILABLE/)
   }
-  guardrails.apply(ctx, {})
-  const exec = (name, args) =>
-    listener({ name, arguments: args, agent: { session: { header: { cwd: 'E:/p' } } } }, async () => ({ kind: 'allow' }))
-  assert.equal(isAsk(await exec('read', { file_path: 'C:/Users/me/.ssh/id_rsa' })), true)
-  assert.equal(isAsk(await exec('read', { file_path: '.ssh/id_rsa' })), true,
-    'basename-only matching keeps the ask direction (fail-toward-ask, not deny)')
-  assert.equal(isAsk(await exec('read', { file_path: 'notes.txt' })), false)
+  assert.equal(h.dispatches(), 0)
 })
 
-test('listener failure is fail-open: a throwing judgment must not break the waterfall', async () => {
-  let listener
-  const ctx = {
-    // A sandboxPolicy whose resolve throws must degrade to pass-through, not
-    // wedge the tool waterfall: the listener swallows the error and falls
-    // through to `next()`, so the call proceeds under the native review.
-    get: () => ({ resolve: () => { throw new Error('boom') } }),
-    effect: (fn) => fn(),
-    on: (event, handler) => { listener = handler; return () => {} },
-    inject: () => {},
-  }
-  guardrails.apply(ctx, {})
-  const result = await listener(
-    { name: 'read', arguments: { file_path: 'C:/Users/me/.ssh/id_rsa' }, agent: undefined },
-    async () => ({ kind: 'allow' }),
-  )
-  assert.equal(result.kind, 'allow', 'internal errors fall through to next() (fail-open)')
-})
-
-test('non-read tools and malformed executions pass through untouched', async () => {
-  const gate = makeGate()
-  assert.equal((await gate.call('edit', { file_path: 'C:/Users/me/.ssh/id_rsa' })).kind, 'allow')
-  assert.equal((await gate.call('bash', { command: 'cat ~/.ssh/id_rsa' })).kind, 'allow')
-  // No target: the listener returns the downstream decision unchanged.
-  assert.equal((await gate.call('read', {})).kind, 'allow')
-  assert.equal((await gate.call('read', { file_path: '' })).kind, 'allow')
+test('an allowed analysis cannot override later invocation cancellation', async t => {
+  const h = await fixture(t)
+  const controller = new AbortController()
+  const exec = { ...h.execution('read', { file_path: h.ordinary }), signal: controller.signal }
+  await h.pre(exec)
+  controller.abort()
+  assert.match(h.guard(exec), /ANALYSIS_CANCELLED/)
 })
