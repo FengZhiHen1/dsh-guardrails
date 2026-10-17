@@ -14,10 +14,10 @@ vm.runInNewContext(source, { window: { __ModuleLoader__: { load(entry) {
 const plain = value => JSON.parse(JSON.stringify(value))
 
 test('settings converts seconds to milliseconds without losing legacy values or exact path spaces', () => {
-  const draft = plugin.toDraft({ sensitiveFiles: ['E:/a b/x', '/tmp/with trailing space '], credentialsReadAsk: false, askTimeoutMs: 1501 })
+  const draft = plugin.toDraft({ sensitiveFiles: ['E:/a b/x', '/tmp/with trailing space '], builtinSensitiveAsk: false, askTimeoutMs: 1501 })
   assert.equal(draft.seconds, '1.501')
-  assert.deepEqual(plain(plugin.parseDraft(draft).value), { sensitiveFiles: ['E:/a b/x', '/tmp/with trailing space '], credentialsReadAsk: false, askTimeoutMs: 1501 })
-  assert.equal(plugin.toDraft({ sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 0 }).seconds, '120')
+  assert.deepEqual(plain(plugin.parseDraft(draft).value), { sensitiveFiles: ['E:/a b/x', '/tmp/with trailing space '], builtinSensitiveAsk: false, askTimeoutMs: 1501 })
+  assert.equal(plugin.toDraft({ sensitiveFiles: [], builtinSensitiveAsk: true, askTimeoutMs: 0 }).seconds, '120')
 })
 
 test('settings rejects invalid drafts before any Host mutation', () => {
@@ -42,7 +42,7 @@ test('settings copies the native settings form and disables save until dirty', (
 
 test('settings derives safe drafts from partial or stale served sections', () => {
   assert.deepEqual(plain(plugin.toDraft({})), { files: '', builtin: true, seconds: '120' })
-  assert.deepEqual(plain(plugin.toDraft({ sensitiveFiles: [1, '/ok'], credentialsReadAsk: 'no', askTimeoutMs: -5 })), { files: '/ok', builtin: true, seconds: '120' })
+  assert.deepEqual(plain(plugin.toDraft({ sensitiveFiles: [1, '/ok'], builtinSensitiveAsk: 'no', askTimeoutMs: -5 })), { files: '/ok', builtin: true, seconds: '120' })
 })
 
 test('settings owns bilingual dictionary and row slot resources for unload', () => {

@@ -13,7 +13,7 @@ import { inlineCredentialDecision } from '../core/redaction.js'
 /** Live profile settings; zero from legacy configs now selects the bounded default. */
 export const Config = z.object({
   sensitiveFiles: z.array(z.string()).default([]).volatile(),
-  credentialsReadAsk: z.boolean().default(true).volatile(),
+  builtinSensitiveAsk: z.boolean().default(true).volatile(),
   askTimeoutMs: z.number().min(0).max(ASK_TIMEOUT_MAX).default(DEFAULT_ASK_TIMEOUT_MS).volatile(),
 })
 /** Host plugin identity. */

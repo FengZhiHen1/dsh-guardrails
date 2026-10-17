@@ -17,8 +17,8 @@ export const CRED_COMBOS = [
 export const CRED_BASENAME_PREFIXES = ['ntuser.dat', 'usrclass.dat']
 /** Public key suffix excluded from credential-carrier matching. */
 export const PUBLIC_KEY_SUFFIX = '.pub'
-/** Supported settings, retained for existing profiles. */
-export const RULE_KEYS = ['sensitiveFiles', 'credentialsReadAsk', 'askTimeoutMs']
+/** Supported settings. */
+export const RULE_KEYS = ['sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs']
 /** Zero is a legacy alias for the bounded default, never unlimited waiting. */
 export const ASK_TIMEOUT_MIN = 0
 /** One hour caps interactive waits even in unattended profiles. */
@@ -37,8 +37,8 @@ export function evaluateRules(config = {}) {
   }
   const unknown = Object.keys(config).filter((key) => !RULE_KEYS.includes(key))
   if (unknown.length) throw new Error(`dsh-guardrails: unknown config key(s): ${unknown.join(', ')}`)
-  const { sensitiveFiles = [], credentialsReadAsk = true, askTimeoutMs = DEFAULT_ASK_TIMEOUT_MS } = config
-  if (typeof credentialsReadAsk !== 'boolean') throw new Error('credentialsReadAsk must be a boolean')
+  const { sensitiveFiles = [], builtinSensitiveAsk = true, askTimeoutMs = DEFAULT_ASK_TIMEOUT_MS } = config
+  if (typeof builtinSensitiveAsk !== 'boolean') throw new Error('builtinSensitiveAsk must be a boolean')
   if (!Number.isInteger(askTimeoutMs) || askTimeoutMs < ASK_TIMEOUT_MIN || askTimeoutMs > ASK_TIMEOUT_MAX) {
     throw new Error(`askTimeoutMs must be an integer between ${ASK_TIMEOUT_MIN} and ${ASK_TIMEOUT_MAX}`)
   }
@@ -53,5 +53,5 @@ export function evaluateRules(config = {}) {
     }
     if (/[*?]/.test(entry)) throw new Error('sensitiveFiles does not support globs or wildcards')
   }
-  return { sensitiveFiles: [...sensitiveFiles], credentialsReadAsk, askTimeoutMs: askTimeoutMs || DEFAULT_ASK_TIMEOUT_MS }
+  return { sensitiveFiles: [...sensitiveFiles], builtinSensitiveAsk, askTimeoutMs: askTimeoutMs || DEFAULT_ASK_TIMEOUT_MS }
 }

@@ -81,7 +81,7 @@ test('checkSensitiveRead: ordinary files and unmarked .env stay free', () => {
 })
 
 test('checkSensitiveRead: builtin toggle off removes only the builtin channel', () => {
-  const off = { ...RULES, credentialsReadAsk: false }
+  const off = { ...RULES, builtinSensitiveAsk: false }
   assert.equal(checkSensitiveRead('C:/Users/me/.ssh/id_rsa', off), null)
   assert.equal(checkSensitiveRead('E:/Project/app/.env.production', { ...off, sensitiveFiles: MARKED.sensitiveFiles }), 'marked')
 })

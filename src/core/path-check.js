@@ -35,7 +35,7 @@ export function pathTargetsCredentials(resolved) {
 
 /** Identify an exact marked or inherited credential target without filesystem IO. */
 export function checkSensitiveRead(resolved, rules) {
-  if (rules.credentialsReadAsk && pathTargetsCredentials(resolved)) return 'credentials'
+  if (rules.builtinSensitiveAsk && pathTargetsCredentials(resolved)) return 'credentials'
   const normalized = normCompare(resolved)
   return rules.sensitiveFiles.some((marked) => normCompare(marked) === normalized) ? 'marked' : null
 }

@@ -87,18 +87,18 @@ test('DSH-managed credential files stay on the list (DSR-003 intent)', () => {
 // ---------- V2 config evaluation ----------
 
 test('RULE_KEYS is exactly the V2 pair + the plugin-owned timeout bound', () => {
-  assert.deepEqual(RULE_KEYS, ['sensitiveFiles', 'credentialsReadAsk', 'askTimeoutMs'])
+  assert.deepEqual(RULE_KEYS, ['sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs'])
 })
 
 test('evaluateRules: defaults (empty marks, builtin list on)', () => {
-  assert.deepEqual(evaluateRules({}), { sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 120_000 })
-  assert.deepEqual(evaluateRules(undefined), { sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 120_000 })
+  assert.deepEqual(evaluateRules({}), { sensitiveFiles: [], builtinSensitiveAsk: true, askTimeoutMs: 120_000 })
+  assert.deepEqual(evaluateRules(undefined), { sensitiveFiles: [], builtinSensitiveAsk: true, askTimeoutMs: 120_000 })
 })
 
 test('evaluateRules: accepts explicit values', () => {
   assert.deepEqual(
-    evaluateRules({ sensitiveFiles: ['E:/p/.env.production'], credentialsReadAsk: false }),
-    { sensitiveFiles: ['E:/p/.env.production'], credentialsReadAsk: false, askTimeoutMs: 120_000 },
+    evaluateRules({ sensitiveFiles: ['E:/p/.env.production'], builtinSensitiveAsk: false }),
+    { sensitiveFiles: ['E:/p/.env.production'], builtinSensitiveAsk: false, askTimeoutMs: 120_000 },
   )
 })
 
@@ -106,7 +106,7 @@ test('evaluateRules: mount-time validation fails loudly', () => {
   assert.throws(() => evaluateRules(null), /must be an object/)
   assert.throws(() => evaluateRules([]), /must be an object/)
   assert.throws(() => evaluateRules({ bogus: true }), /unknown config key/)
-  assert.throws(() => evaluateRules({ credentialsReadAsk: 'yes' }), /must be a boolean/)
+  assert.throws(() => evaluateRules({ builtinSensitiveAsk: 'yes' }), /must be a boolean/)
   assert.throws(() => evaluateRules({ sensitiveFiles: 'E:/p/.env' }), /must be an array/)
   assert.throws(() => evaluateRules({ sensitiveFiles: ['.env'] }), /absolute file paths/)
   assert.throws(() => evaluateRules({ sensitiveFiles: ['E:/p', ''] }), /non-empty strings/)

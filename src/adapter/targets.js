@@ -36,7 +36,7 @@ async function metadata(target) {
 }
 
 function builtin(target, rules) {
-  if (!rules.credentialsReadAsk) return false
+  if (!rules.builtinSensitiveAsk) return false
   const parts = target.split(path.sep).filter(Boolean).map(comparable)
   const basename = parts.at(-1) ?? ''
   if (basename.endsWith('.pub')) return false
@@ -188,7 +188,7 @@ async function collectTargets({ commands = [], cwd, rules, signal } = {}) {
     const treeEffect = operation.recursive || ['move', 'copy', 'worktree-remove'].includes(operation.action)
     if (info.stat.isDirectory() && treeEffect) {
       observed.containsProtected = marks.some((marked) => within(info.path, marked))
-      if (!observed.containsProtected && rules.credentialsReadAsk && operation.action === 'worktree-remove') {
+      if (!observed.containsProtected && rules.builtinSensitiveAsk && operation.action === 'worktree-remove') {
         const queue = [{ directory: info.path, depth: 0 }]
         let entries = 0
         while (queue.length && entries < MAX_ENTRIES && Date.now() - started <= DEADLINE_MS) {

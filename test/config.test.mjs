@@ -30,12 +30,12 @@ const resolved = (input) =>
 const volatileKeys = (input) =>
   Object.entries(Config(input)).filter(([, value]) => typeof value?.get === 'function').map(([key]) => key)
 
-const ALL_FIELDS = ['sensitiveFiles', 'credentialsReadAsk', 'askTimeoutMs']
+const ALL_FIELDS = ['sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs']
 
 test('Config schema: empty config validates to all-defaults', () => {
   assert.deepEqual(resolved({}), {
     sensitiveFiles: [],
-    credentialsReadAsk: true,
+    builtinSensitiveAsk: true,
     askTimeoutMs: 120_000,
   })
 })
@@ -48,7 +48,7 @@ test('Config schema: every top-level field is volatile (writable + live-committe
   // Still volatile when a non-default value is supplied (the marker rides the
   // schema, not the value that happens to resolve).
   assert.deepEqual(
-    volatileKeys({ sensitiveFiles: ['E:/x'], credentialsReadAsk: false }).sort(),
+    volatileKeys({ sensitiveFiles: ['E:/x'], builtinSensitiveAsk: false }).sort(),
     [...ALL_FIELDS].sort(),
   )
 })
@@ -63,7 +63,7 @@ test('Config schema: resolved references expose get() and reflect the stored val
 
 test('Config schema: invalid values fail validation (loader ValidationError)', () => {
   // Type-level errors are the schema's job (they fail the mount before apply).
-  assert.throws(() => Config({ credentialsReadAsk: 'yes' }))
+  assert.throws(() => Config({ builtinSensitiveAsk: 'yes' }))
   assert.throws(() => Config({ sensitiveFiles: 'E:/x' }))
   assert.throws(() => Config({ sensitiveFiles: [42] }))
   // Semantic errors (relative paths, unknown keys) pass the schema by design

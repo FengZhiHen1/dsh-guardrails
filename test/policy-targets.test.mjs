@@ -58,7 +58,7 @@ test('worktree builtin discovery uses metadata; ordinary cleanup does not scan b
   await fs.writeFile(path.join(root, 'build', '.npmrc'), 'synthetic fixture')
   assert.equal((await judge(root, [{ name: 'rm', args: ['-rf', 'build'] }])).decision.kind, 'allow')
   assert.equal((await judge(root, [{ name: 'git', args: ['worktree', 'remove', 'build'] }])).decision.kind, 'ask')
-  assert.equal((await judge(root, [{ name: 'git', args: ['worktree', 'remove', 'build'] }], { credentialsReadAsk: false })).decision.kind, 'allow')
+  assert.equal((await judge(root, [{ name: 'git', args: ['worktree', 'remove', 'build'] }], { builtinSensitiveAsk: false })).decision.kind, 'allow')
 })
 
 test('real git common-dir differs from linked .git pointer and local cleanup', async (t) => {

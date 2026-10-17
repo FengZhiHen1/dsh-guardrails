@@ -17,7 +17,7 @@ async function harness(t, { withSettings = true, plain = false } = {}) {
   const marked = path.join(root, 'marked.txt')
   const builtin = path.join(root, 'id_rsa')
   for (const file of [marked, builtin]) await writeFile(file, 'synthetic fixture only')
-  const entry = Object.fromEntries(Object.entries({ sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 120000 })
+  const entry = Object.fromEntries(Object.entries({ sensitiveFiles: [], builtinSensitiveAsk: true, askTimeoutMs: 120000 })
     .map(([key, value]) => [key, plain ? value : volatile(value)]))
   const effects = []
   const settingsEffects = []
@@ -66,7 +66,7 @@ test('live marked-file and builtin toggles change analysis without remount', asy
   assert.equal(h.requests.length, 1)
   await h.read(h.builtin)
   assert.equal(h.requests.length, 2)
-  h.entry.credentialsReadAsk.commit(false)
+  h.entry.builtinSensitiveAsk.commit(false)
   await h.read(h.builtin)
   assert.equal(h.requests.length, 2)
   await h.read(h.marked)

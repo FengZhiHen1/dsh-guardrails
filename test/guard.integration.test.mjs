@@ -88,7 +88,7 @@ test('ordinary and missing targets pass without approval; glob does not read con
 })
 
 test('builtin toggle leaves explicit marks active', async t => {
-  const h = await fixture(t, { credentialsReadAsk: false })
+  const h = await fixture(t, { builtinSensitiveAsk: false })
   await h.pre(h.execution('read', { file_path: h.builtin }))
   assert.equal(h.requests.length, 0)
   await h.pre(h.execution('read', { file_path: h.marked }))

@@ -21,9 +21,9 @@ test('generated path-list values retain exact files including spaces and empty l
 })
 
 test('generated boolean values remain booleans and reject text drafts at schema boundary', () => {
-  for (const value of [true, false]) assert.equal(plain({ credentialsReadAsk: value }).credentialsReadAsk, value)
-  for (const value of ['yes', 'true', '1', 1]) assert.throws(() => Config({ credentialsReadAsk: value }))
-  assert.equal(plain({ credentialsReadAsk: null }).credentialsReadAsk, true, 'schema treats null as the default')
+  for (const value of [true, false]) assert.equal(plain({ builtinSensitiveAsk: value }).builtinSensitiveAsk, value)
+  for (const value of ['yes', 'true', '1', 1]) assert.throws(() => Config({ builtinSensitiveAsk: value }))
+  assert.equal(plain({ builtinSensitiveAsk: null }).builtinSensitiveAsk, true, 'schema treats null as the default')
 })
 
 test('schema and runtime jointly reject invalid marked-file settings', () => {

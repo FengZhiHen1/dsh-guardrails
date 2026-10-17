@@ -14,9 +14,9 @@ window.__ModuleLoader__.load({
     const dictionaries = {
       zh: {
         summary: '限制灾难性操作，审批敏感文件访问，并遮罩可识别凭据。',
-        files: '敏感文件', filesHint: '每行一个完整文件路径。读取、修改、删除或移动这些文件需要单次批准。仅填写文件路径，不支持目录规则、通配符或相对路径。',
-        empty: '尚未添加自定义文件；内置凭据文件保护可独立开启。',
-        builtin: '内置凭据文件保护', builtinHint: '对已识别的私钥、凭据文件等内容操作请求批准。关闭后，自定义敏感文件清单仍生效。',
+        files: '自定义敏感文件', filesHint: '每行一个完整文件路径。读取、修改、删除或移动这些文件需要单次批准。仅填写文件路径，不支持目录规则、通配符或相对路径。',
+        empty: '尚未添加自定义文件；内置敏感文件名单可独立开启。',
+        builtin: '内置敏感文件', builtinHint: '对内置名单（私钥、工具凭据文件、系统凭据库、分页与休眠文件）的内容操作请求批准。关闭后，自定义敏感文件清单仍生效。',
         timeout: '审批等待时间', seconds: '秒', timeoutHint: '默认 120 秒，最长 3600 秒。超时或取消后拒绝本次操作，迟到的批准不再生效。',
         loading: '正在读取配置…', unavailable: '当前无法读取此插件配置。请确认插件已启用并重新打开此页。',
         readOnly: '当前连接只允许查看配置。', save: '保存', saving: '保存中…',
@@ -28,9 +28,9 @@ window.__ModuleLoader__.load({
       },
       en: {
         summary: 'Block recognized catastrophic operations, approve sensitive-file access and mask recognizable credentials.',
-        files: 'Sensitive files', filesHint: 'One absolute file path per line. Reading, changing, deleting or moving these files requires one-time approval. Directory rules, wildcards and relative paths are unsupported.',
-        empty: 'No custom files added. Built-in credential-file protection works independently.',
-        builtin: 'Built-in credential-file protection', builtinHint: 'Request approval for content operations on recognized private keys and credential files. Turning this off keeps your custom sensitive-file list active.',
+        files: 'Custom sensitive files', filesHint: 'One absolute file path per line. Reading, changing, deleting or moving these files requires one-time approval. Directory rules, wildcards and relative paths are unsupported.',
+        empty: 'No custom files added. The built-in sensitive-file list works independently.',
+        builtin: 'Built-in sensitive files', builtinHint: 'Request approval for content operations on the built-in list: private keys, tool credential files, system credential stores, and page/hibernation files. Turning this off keeps your custom sensitive-file list active.',
         timeout: 'Approval wait', seconds: 'seconds', timeoutHint: 'Default: 120 seconds. Maximum: 3600 seconds. Timeout or cancellation refuses the operation; late approval cannot authorize it.',
         loading: 'Loading settings…', unavailable: 'Settings are unavailable. Confirm the plugin is enabled and reopen this page.',
         readOnly: 'This connection can only view settings.', save: 'Save', saving: 'Saving…',
@@ -76,7 +76,7 @@ window.__ModuleLoader__.load({
     // Defensive: a served section can lag the schema, so never assume field shapes.
     function toDraft(value) {
       const files = Array.isArray(value?.sensitiveFiles) ? value.sensitiveFiles.filter(entry => typeof entry === 'string') : []
-      const builtin = typeof value?.credentialsReadAsk === 'boolean' ? value.credentialsReadAsk : true
+      const builtin = typeof value?.builtinSensitiveAsk === 'boolean' ? value.builtinSensitiveAsk : true
       const timeout = Number.isInteger(value?.askTimeoutMs) && value.askTimeoutMs > 0 ? value.askTimeoutMs : 120000
       return { files: files.join('\n'), builtin, seconds: String(timeout / 1000) }
     }
@@ -86,7 +86,7 @@ window.__ModuleLoader__.load({
       const milliseconds = Math.round(seconds * 1000)
       if (!draft.seconds.trim() || !Number.isFinite(seconds) || seconds <= 0 || seconds > 3600 || Math.abs(milliseconds - seconds * 1000) > 0.000001) return { error: 'timeoutError' }
       if (sensitiveFiles.length > 1024 || sensitiveFiles.some(path => path.length > 32768 || /[\0*?]/.test(path) || !(/^[A-Za-z]:[\\/]/.test(path) || path.startsWith('/') || path.startsWith('\\\\')))) return { error: 'pathError' }
-      return { value: { sensitiveFiles, credentialsReadAsk: draft.builtin, askTimeoutMs: milliseconds } }
+      return { value: { sensitiveFiles, builtinSensitiveAsk: draft.builtin, askTimeoutMs: milliseconds } }
     }
     function Editor({ settingsForm: form, t }) {
       const [snapshot, setSnapshot] = React.useState(() => form.getSnapshot())

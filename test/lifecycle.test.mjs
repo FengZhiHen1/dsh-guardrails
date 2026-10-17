@@ -97,7 +97,7 @@ test('duplicate mounts remain distinct fibers of registrations until disposal', 
 })
 
 test('invalid config fails before any effect registration', () => {
-  for (const config of [{ credentialsReadAsk: 'no' }, { bogusKey: true }, null, { sensitiveFiles: ['relative/path'] }]) {
+  for (const config of [{ builtinSensitiveAsk: 'no' }, { bogusKey: true }, null, { sensitiveFiles: ['relative/path'] }]) {
     const h = makeLifecycleCtx()
     assert.throws(() => guardrails.apply(h.ctx, config))
     assert.equal(h.listeners.length, 0)
