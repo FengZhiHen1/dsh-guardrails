@@ -9,7 +9,8 @@
 - 审批层失败改为 **fail-closed**（无 approval 服务 / 无 agent / 请求抛错 → deny）；判定层异常仍 fail-open（DSR-015 不变）。
 - 结果映射与 `tools/serviceAsk` 逐字对齐，落在新的 `src/core/ask-decision.js`；词表外的结果一律拒绝（绝不读成放行）。
 - 配置页新增「审批超时（毫秒）」行（数字输入 + 本地校验 + 覆盖/重置徽标）。
-- 测试 58 → **71 例**（新增 `test/ask-timeout.test.mjs` 13 例：默认不接管、授权放行、计时器清理、拒绝/不可用/无通道文案、调用方取消、超时触发、超时不放行、未知结果 fail-closed、非敏感不触达、挂载校验）。
+- 测试 58 → **73 例**（新增 `test/ask-timeout.test.mjs` 15 例：默认不接管、授权放行、计时器清理、拒绝/不可用/无通道文案、调用方取消、超时触发、超时不放行、请求抛错 fail-closed、审计行恰一条、未知结果 fail-closed、非敏感不触达、挂载校验）。
+- 实例验证（test，0.2.0-rc.2，2026-10-17）：配 `askTimeoutMs: 2000` 后读合成凭据 fixture 不点弹窗，约 2 s 返回超时自动拒绝，审计 `asked` → `cancelled`；改值/改源码均热生效。取证见 `docs/technical-details/部署.md`「v2.1.0 实例门禁」。
 - 已知边界：超时与用户取消在审计里同为 `cancelled`（结果词表封闭）；只约束本插件发起的审批，Auto Review 等来源的弹窗仍无超时。
 
 ## 2.0.0（2026-10-16，未发布）
