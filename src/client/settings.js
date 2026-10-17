@@ -4,6 +4,9 @@ window.__ModuleLoader__.load({
   id: 'dsh-guardrails',
   factory(require) {
     const React = require('react')
+    // Platform seed (not a dynamic plugin row): resolve the shared primitives here,
+    // never vendor a second copy or list it under dsh.client.external.
+    const { Button } = require('@deepseek-ai/dsh-client-ui-primitives')
     const h = React.createElement
     const dictionaries = {
       zh: {
@@ -46,11 +49,8 @@ window.__ModuleLoader__.load({
 .gr-settings input[type=checkbox]{accent-color:var(--dsw-alias-brand-primary);width:16px;height:16px;margin:0;flex-shrink:0}
 .gr-settings input[type=number]{width:120px}
 .gr-settings .gr-footer{display:flex;align-items:center;flex-wrap:wrap;gap:12px}
-.gr-settings button{appearance:none;border:none;border-radius:var(--dsw-radius-md);height:36px;padding:0 14px;font:inherit;font-size:14px;line-height:22px;cursor:pointer;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}
-.gr-settings button:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
-.gr-settings button:disabled{background:var(--dsw-alias-button-primary-dimmed);color:var(--dsw-alias-label-secondary);cursor:not-allowed}
 .gr-settings textarea:disabled,.gr-settings input:disabled{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);cursor:not-allowed}
-.gr-settings :is(input,textarea,button,summary):focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.gr-settings :is(input,textarea,summary):focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .gr-settings .gr-error{font-size:12px;line-height:1.6;color:var(--dsw-alias-state-error-primary);margin:0}
 .gr-settings [aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}
 .gr-settings .gr-scope{border-top:1px solid var(--dsw-alias-border-l1);padding-top:20px;display:flex;flex-direction:column;gap:8px}
@@ -100,7 +100,9 @@ window.__ModuleLoader__.load({
       }
       async function save(event) {
         event.preventDefault()
-        if (busy.current || !dirty || parsed.error || !snapshot.writable || !Number.isInteger(edit?.revision)) return
+        if (busy.current || !snapshot.writable) return
+        if (!dirty) { setOutcome('saved'); return }
+        if (parsed.error || !Number.isInteger(edit?.revision)) return
         busy.current = true
         setOutcome('saving')
         try {
@@ -129,7 +131,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'gr-number' }, h('input', { id: uid + '-wait', type: 'number', min: 0.001, max: 3600, step: 0.001, value: draft.seconds, disabled: locked, 'aria-describedby': uid + '-wait-help', 'aria-invalid': parsed.error === 'timeoutError', onChange: event => change('seconds', event.target.value) }), h('span', null, t('seconds'))),
           note('timeoutHint', uid + '-wait-help')),
         edit && parsed.error ? h('p', { role: 'alert', className: 'gr-error' }, t(parsed.error)) : null,
-        h('div', { className: 'gr-footer' }, h('button', { type: 'submit', disabled: locked || !dirty || Boolean(parsed.error) }, t(outcome === 'saving' ? 'saving' : 'save')),
+        h('div', { className: 'gr-footer' }, h(Button, { variant: 'primary', type: 'submit', disabled: locked }, t(outcome === 'saving' ? 'saving' : 'save')),
           h('span', { role: 'status', className: outcome === 'failed' ? 'gr-error' : 'gr-help' }, t(outcome === 'saved' ? 'saved' : outcome === 'failed' ? 'failed' : ''))),
         h('div', { className: 'gr-scope' }, h('h3', null, t('scope')), note('scopeBody'), h('details', null, h('summary', null, t('limits')), note('limitsBody'))))
     }

@@ -5,7 +5,9 @@ import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../src/client/settings.js', import.meta.url), 'utf8')
 let plugin
-vm.runInNewContext(source, { window: { __ModuleLoader__: { load(entry) { plugin = entry.factory(() => ({})) } } } })
+vm.runInNewContext(source, { window: { __ModuleLoader__: { load(entry) {
+  plugin = entry.factory(name => name === 'react' ? { createElement() {} } : { Button() {} })
+} } } })
 const plain = value => JSON.parse(JSON.stringify(value))
 
 test('settings converts seconds to milliseconds without losing legacy values or exact path spaces', () => {
@@ -22,11 +24,10 @@ test('settings rejects invalid drafts before any Host mutation', () => {
   assert.deepEqual(plain(plugin.parseDraft(draft).value.sensitiveFiles), [])
 })
 
-test('settings styles its save control with the native button token family', () => {
-  assert.match(source, /--dsw-alias-button-primary-fill/)
-  assert.match(source, /--dsw-alias-label-primary-foreground/)
-  assert.match(source, /--dsw-alias-button-primary-dimmed/)
-  assert.doesNotMatch(source, /background:var\(--dsw-alias-label-primary\)/)
+test('settings renders the official primitive Button instead of a hand-styled one', () => {
+  assert.match(source, /require\('@deepseek-ai\/dsh-client-ui-primitives'\)/)
+  assert.match(source, /h\(Button, \{ variant: 'primary', type: 'submit'/)
+  assert.doesNotMatch(source, /\.gr-settings button/)
 })
 
 test('settings derives safe drafts from partial or stale served sections', () => {
