@@ -1,6 +1,6 @@
 # dsh-guardrails — DSH 工具安全防护
 
-在 Full Access 下为 DSH 受管 AI 工具提供 `Deny / Ask / Allow` 防护，不依赖 Auto Review 的模型判定。源码已重构为官方双 Shell AST 与最终硬门禁，包版本 **3.2.1，尚未发布**；本轮适配 DSH `0.2.1-rc.2`。“V2”是本轮设计资料的方案名，不代表包版本仍为 2.x。
+在 Full Access 下为 DSH 受管 AI 工具提供 `Deny / Ask / Allow` 防护，不依赖 Auto Review 的模型判定。源码已重构为官方双 Shell AST 与最终硬门禁，包版本 **0.1.0，尚未发布**（2026-10-17 版本线从 3.2.1 重置）；本轮适配 DSH `0.2.1-rc.2`。“V2”是本轮设计资料的方案名，不代表包版本仍为 2.x。
 
 ## 兼容性
 
@@ -39,7 +39,7 @@ PowerShell 使用微软官方 `Parser.ParseInput`，由惰性持久 `pwsh` helpe
 
 从 [文档入口](docs/README.md) 阅读当前需求与机制；本轮取舍见 [DSR-017](docs/decisions/DSR-017-官方AST与最终硬门禁.md)，命名变更见 [DSR-018](docs/decisions/DSR-018-内置敏感文件名单改名.md)，工程证据见 [重构验证记录](docs/verification/2026-10-17-v2-refactor.md)。DSR-001 至 DSR-016 保持历史原文。
 
-验证命令为 `node verify/run-verify.mjs`；使用 `DSH_RUNTIME_PATH` 指向现场运行时，可同时执行真实 ToolRuntime/ApprovalService/PTC bridge 测试。以 0.2.1-rc.2 运行时执行当前完整验证为 465 项（397 通过、0 失败、68 条已声明语料跳过），约 12–23 秒；quality_floor PASS（0 error，6 项提醒，含设置页 JSX 树复杂度提醒）。测试适配了点：`run_code` 需要 Agent `ctx` 与 `workingDirectory` 服务，PTC 释放使用 `agent.ctx.effect`。语料与回放已纳入默认 test/check/verify，详见[稳定语料说明](test/fixtures/review-corpus/README.md)和[设计对照审查](docs/verification/2026-10-17-design-review.md)。test 现场 `install_bundle` 返回 `applied`（3.1.0），Config schema 与 `plugins.row.config` 注册均可见，普通命令放行验证通过。Linux 实跑、97,050 条人工标注回放、设置页保存走查及完整启动门禁尚未完成。3.2.0 的配置键改名未重装、未重启 test 实例；运行中的实例已由 HMR 热加载新模块，Config inspect 显示 `builtinSensitiveAsk`。
+验证命令为 `node verify/run-verify.mjs`；使用 `DSH_RUNTIME_PATH` 指向现场运行时，可同时执行真实 ToolRuntime/ApprovalService/PTC bridge 测试。以 0.2.1-rc.2 运行时执行当前完整验证为 465 项（397 通过、0 失败、68 条已声明语料跳过），约 12–23 秒；quality_floor PASS（0 error，6 项提醒，含设置页 JSX 树复杂度提醒）。测试适配了点：`run_code` 需要 Agent `ctx` 与 `workingDirectory` 服务，PTC 释放使用 `agent.ctx.effect`。语料与回放已纳入默认 test/check/verify，详见[稳定语料说明](test/fixtures/review-corpus/README.md)和[设计对照审查](docs/verification/2026-10-17-design-review.md)。test 现场 `install_bundle` 返回 `applied`（3.1.0），Config schema 与 `plugins.row.config` 注册均可见，普通命令放行验证通过。Linux 实跑、97,050 条人工标注回放、设置页保存走查及完整启动门禁尚未完成。版本线已重置为 0.1.0；test 的安装记录仍是 3.1.0，管理面可能把 0.1.0 视为降级，需重装/重链或新建实例后核对。版本线重置前的 3.2.0/3.2.1 均未重装、未重启 test 实例；运行中的实例已由 HMR 热加载新模块，Config inspect 显示 `builtinSensitiveAsk`。
 
 ## 安装与许可
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-guardrails",
-  "version": "3.2.1",
+  "version": "0.1.0",
   "description": "Official Shell AST guard, precise sensitive-file approvals and credential redaction for DSH",
   "license": "MIT",
   "repository": {
