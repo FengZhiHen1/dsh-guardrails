@@ -5,11 +5,11 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    // Copy the host Button's markup, geometry and states; only --dsw-alias-* tokens
-    // are shared. Harness Client packages are internal shell build inputs without a
-    // plugin support contract, so this bundle must not require them.
-    function PrimaryButton({ children, ...rest }) {
-      return h('button', { type: 'button', className: 'gr-button gr-button-primary', ...rest }, children)
+    // Copy the host settings form's field and save geometry; only --dsw-alias-* and
+    // official design tokens are shared. Harness Client packages are internal shell
+    // build inputs without a plugin support contract, so this bundle must not require them.
+    function SaveButton({ children, ...rest }) {
+      return h('button', { type: 'button', className: 'gr-save', ...rest }, children)
     }
     const dictionaries = {
       zh: {
@@ -19,7 +19,7 @@ window.__ModuleLoader__.load({
         builtin: '内置凭据文件保护', builtinHint: '对已识别的私钥、凭据文件等内容操作请求批准。关闭后，自定义敏感文件清单仍生效。',
         timeout: '审批等待时间', seconds: '秒', timeoutHint: '默认 120 秒，最长 3600 秒。超时或取消后拒绝本次操作，迟到的批准不再生效。',
         loading: '正在读取配置…', unavailable: '当前无法读取此插件配置。请确认插件已启用并重新打开此页。',
-        readOnly: '当前连接只允许查看配置。', save: '保存设置', saving: '正在保存…', saved: '设置已保存并生效。',
+        readOnly: '当前连接只允许查看配置。', save: '保存设置', saving: '正在保存…',
         failed: '保存未成功，输入已保留。配置可能已在别处修改，请重新打开此页后核对并重试。',
         pathError: '请填写最多 1024 个绝对文件路径；不支持通配符，每个路径最长 32768 个字符。',
         timeoutError: '请输入大于 0 且不超过 3600 的秒数，精度最多为毫秒。',
@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
         builtin: 'Built-in credential-file protection', builtinHint: 'Request approval for content operations on recognized private keys and credential files. Turning this off keeps your custom sensitive-file list active.',
         timeout: 'Approval wait', seconds: 'seconds', timeoutHint: 'Default: 120 seconds. Maximum: 3600 seconds. Timeout or cancellation refuses the operation; late approval cannot authorize it.',
         loading: 'Loading settings…', unavailable: 'Settings are unavailable. Confirm the plugin is enabled and reopen this page.',
-        readOnly: 'This connection can only view settings.', save: 'Save settings', saving: 'Saving…', saved: 'Settings saved and applied.',
+        readOnly: 'This connection can only view settings.', save: 'Save settings', saving: 'Saving…',
         failed: 'Save failed; your input is retained. Settings may have changed elsewhere. Reopen this page, review the values and retry.',
         pathError: 'Enter up to 1024 absolute file paths without wildcards, each at most 32768 characters.',
         timeoutError: 'Enter seconds greater than 0 and at most 3600, with at most millisecond precision.',
@@ -42,28 +42,36 @@ window.__ModuleLoader__.load({
       },
     }
     const css = `
-.gr-settings{display:flex;flex-direction:column;gap:24px;color:var(--dsw-alias-label-primary);font:inherit;max-width:680px}
-.gr-settings .gr-field{display:flex;flex-direction:column;gap:8px;min-width:0}
-.gr-settings label,.gr-settings h3{font-size:13px;font-weight:500;margin:0}
-.gr-settings .gr-help{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary);margin:0;overflow-wrap:anywhere}
-.gr-settings textarea,.gr-settings input[type=number]{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:var(--dsw-alias-bg-base);color:inherit;font:inherit;font-size:13px;padding:8px 10px;max-width:100%}
-.gr-settings textarea{width:100%;resize:vertical;min-height:110px;line-height:1.6}
-.gr-settings .gr-check,.gr-settings .gr-number{display:flex;align-items:center;gap:8px;font-size:13px}
-.gr-settings input[type=checkbox]{accent-color:var(--dsw-alias-brand-primary);width:16px;height:16px;margin:0;flex-shrink:0}
-.gr-settings input[type=number]{width:120px}
-.gr-settings .gr-footer{display:flex;align-items:center;flex-wrap:wrap;gap:12px}
-.gr-settings .gr-button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:4px;height:36px;padding:0 14px;border:none;border-radius:var(--dsw-radius-md);cursor:pointer;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);background:transparent}
-.gr-settings .gr-button:disabled{cursor:not-allowed;opacity:.4}
-.gr-settings .gr-button-primary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}
-.gr-settings .gr-button-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
-.gr-settings textarea:disabled,.gr-settings input:disabled{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);cursor:not-allowed}
-.gr-settings :is(input,textarea,summary,.gr-button):focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.gr-settings .gr-error{font-size:12px;line-height:1.6;color:var(--dsw-alias-state-error-primary);margin:0}
+.gr-settings{display:flex;flex-direction:column;color:var(--dsw-alias-label-primary);font:inherit;max-width:680px}
+.gr-settings .gr-note{margin:0 0 12px;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+.gr-settings .gr-field{display:flex;flex-direction:column;gap:6px;padding:12px 0;min-width:0}
+.gr-settings .gr-field + .gr-field{border-top:.5px solid var(--dsw-alias-border-l2)}
+.gr-settings .gr-field > label:not(.gr-check){margin:0;font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
+.gr-settings .gr-help{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere}
+.gr-settings .gr-input,.gr-settings .gr-textarea{box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:1.5}
+.gr-settings .gr-input{height:34px;padding:0 12px}
+.gr-settings .gr-textarea{width:100%;min-height:110px;padding:6px 12px;resize:vertical}
+.gr-settings .gr-input:focus-visible,.gr-settings .gr-textarea:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+.gr-settings .gr-input:disabled,.gr-settings .gr-textarea:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
 .gr-settings [aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}
-.gr-settings .gr-scope{border-top:1px solid var(--dsw-alias-border-l1);padding-top:20px;display:flex;flex-direction:column;gap:8px}
-.gr-settings details{font-size:12px;color:var(--dsw-alias-label-secondary);line-height:1.6}
+.gr-settings .gr-check{display:inline-flex;align-items:center;gap:6px;font-size:14px;line-height:20px;color:var(--dsw-alias-label-primary);cursor:pointer}
+.gr-settings .gr-check input{flex:0 0 auto;width:16px;height:16px;margin:0;accent-color:var(--dsw-alias-brand-primary);cursor:inherit}
+.gr-settings .gr-check input:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+.gr-settings .gr-check:has(input:disabled){cursor:default;opacity:.5}
+.gr-settings .gr-number{display:flex;align-items:center;gap:8px}
+.gr-settings .gr-number .gr-input{width:120px}
+.gr-settings .gr-suffix{font-size:13px;color:var(--dsw-alias-label-secondary)}
+.gr-settings .gr-footer{display:flex;align-items:center;gap:8px;padding-top:16px}
+.gr-settings .gr-failed{flex:1;min-width:0;margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-error)}
+.gr-settings .gr-save{appearance:none;border:1px solid transparent;border-radius:var(--dsw-radius-md);padding:5px 14px;font:inherit;font-size:13px;line-height:1.5;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}
+.gr-settings .gr-save:disabled{opacity:.4;cursor:default}
+.gr-settings .gr-save:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+.gr-settings .gr-section{display:flex;flex-direction:column;gap:6px;padding:12px 0;border-top:.5px solid var(--dsw-alias-border-l2)}
+.gr-settings .gr-section h3{margin:0;font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
+.gr-settings .gr-error{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-state-error-primary)}
+.gr-settings details{font-size:12px;color:var(--dsw-alias-label-secondary);line-height:1.5}
 .gr-settings summary{cursor:pointer;padding:4px 0;width:fit-content}
-.gr-settings details p{padding-top:4px}
+.gr-settings details p{padding-top:4px;margin:0}
 `
     // Defensive: a served section can lag the schema, so never assume field shapes.
     function toDraft(value) {
@@ -94,8 +102,8 @@ window.__ModuleLoader__.load({
         const off = form.subscribe(sync)
         return () => { mounted.current = false; off() }
       }, [form])
-      if (snapshot.status === 'loading') return h('p', { role: 'status' }, t('loading'))
-      if (snapshot.status !== 'ready' || snapshot.value === undefined) return h('p', { role: 'status' }, t('unavailable'))
+      if (snapshot.status === 'loading') return h('div', { className: 'gr-settings' }, h('style', null, css), h('p', { role: 'status', className: 'gr-note' }, t('loading')))
+      if (snapshot.status !== 'ready' || snapshot.value === undefined) return h('div', { className: 'gr-settings' }, h('style', null, css), h('p', { role: 'status', className: 'gr-note' }, t('unavailable')))
       const baseline = toDraft(snapshot.value)
       const draft = edit?.draft ?? baseline
       const parsed = parseDraft(draft)
@@ -107,14 +115,12 @@ window.__ModuleLoader__.load({
       }
       async function save(event) {
         event.preventDefault()
-        if (busy.current || !snapshot.writable) return
-        if (!dirty) { setOutcome('saved'); return }
-        if (parsed.error || !Number.isInteger(edit?.revision)) return
+        if (busy.current || !dirty || parsed.error || !snapshot.writable || !Number.isInteger(edit?.revision)) return
         busy.current = true
         setOutcome('saving')
         try {
           const accepted = await form.mutate(Object.entries(parsed.value).map(([key, value]) => ({ op: 'set', path: [key], value })), edit.revision)
-          if (mounted.current) { setOutcome(accepted ? 'saved' : 'failed'); if (accepted) setEdit(null) }
+          if (mounted.current) { setOutcome(accepted ? 'idle' : 'failed'); if (accepted) setEdit(null) }
         } catch (error) {
           // Transport diagnostics may contain config values; show only safe localized feedback.
           if (mounted.current) setOutcome('failed')
@@ -123,24 +129,24 @@ window.__ModuleLoader__.load({
       }
       const note = (key, id) => h('p', { className: 'gr-help', id }, t(key))
       return h('form', { className: 'gr-settings', onSubmit: save, 'aria-busy': outcome === 'saving' },
-        !snapshot.writable ? note('readOnly') : null,
         h('style', null, css),
+        !snapshot.writable ? h('p', { role: 'status', className: 'gr-note' }, t('readOnly')) : null,
         h('div', { className: 'gr-field' },
           h('label', { htmlFor: uid + '-files' }, t('files')),
-          note('filesHint', uid + '-files-help'),
-          h('textarea', { id: uid + '-files', rows: 5, value: draft.files, disabled: locked, spellCheck: false, 'aria-describedby': uid + '-files-help', 'aria-invalid': parsed.error === 'pathError', onChange: event => change('files', event.target.value) }),
-          !draft.files.trim() ? note('empty') : null),
+          h('textarea', { id: uid + '-files', className: 'gr-textarea', rows: 5, value: draft.files, disabled: locked, spellCheck: false, 'aria-describedby': uid + '-files-help', 'aria-invalid': parsed.error === 'pathError', onChange: event => change('files', event.target.value) }),
+          parsed.error === 'pathError' ? h('p', { role: 'alert', id: uid + '-files-help', className: 'gr-error' }, t('pathError')) : note('filesHint', uid + '-files-help'),
+          !draft.files.trim() && parsed.error !== 'pathError' ? note('empty') : null),
         h('div', { className: 'gr-field' },
           h('label', { className: 'gr-check' }, h('input', { type: 'checkbox', checked: draft.builtin, disabled: locked, 'aria-describedby': uid + '-builtin-help', onChange: event => change('builtin', event.target.checked) }), t('builtin')),
           note('builtinHint', uid + '-builtin-help')),
         h('div', { className: 'gr-field' },
           h('label', { htmlFor: uid + '-wait' }, t('timeout')),
-          h('div', { className: 'gr-number' }, h('input', { id: uid + '-wait', type: 'number', min: 0.001, max: 3600, step: 0.001, value: draft.seconds, disabled: locked, 'aria-describedby': uid + '-wait-help', 'aria-invalid': parsed.error === 'timeoutError', onChange: event => change('seconds', event.target.value) }), h('span', null, t('seconds'))),
-          note('timeoutHint', uid + '-wait-help')),
-        edit && parsed.error ? h('p', { role: 'alert', className: 'gr-error' }, t(parsed.error)) : null,
-        h('div', { className: 'gr-footer' }, h(PrimaryButton, { type: 'submit', disabled: locked }, t(outcome === 'saving' ? 'saving' : 'save')),
-          h('span', { role: 'status', className: outcome === 'failed' ? 'gr-error' : 'gr-help' }, t(outcome === 'saved' ? 'saved' : outcome === 'failed' ? 'failed' : ''))),
-        h('div', { className: 'gr-scope' }, h('h3', null, t('scope')), note('scopeBody'), h('details', null, h('summary', null, t('limits')), note('limitsBody'))))
+          h('div', { className: 'gr-number' }, h('input', { id: uid + '-wait', className: 'gr-input', type: 'number', min: 0.001, max: 3600, step: 0.001, value: draft.seconds, disabled: locked, 'aria-describedby': uid + '-wait-help', 'aria-invalid': parsed.error === 'timeoutError', onChange: event => change('seconds', event.target.value) }), h('span', { className: 'gr-suffix' }, t('seconds'))),
+          parsed.error === 'timeoutError' ? h('p', { role: 'alert', id: uid + '-wait-help', className: 'gr-error' }, t('timeoutError')) : note('timeoutHint', uid + '-wait-help')),
+        h('div', { className: 'gr-section' }, h('h3', null, t('scope')), note('scopeBody'), h('details', null, h('summary', null, t('limits')), note('limitsBody'))),
+        h('div', { className: 'gr-footer' },
+          outcome === 'failed' ? h('p', { role: 'status', className: 'gr-failed' }, t('failed')) : null,
+          h(SaveButton, { type: 'submit', disabled: locked || !dirty || Boolean(parsed.error) }, t(outcome === 'saving' ? 'saving' : 'save'))))
     }
     return {
       inject: ['slots', 'locale', 'configForms'], toDraft, parseDraft,

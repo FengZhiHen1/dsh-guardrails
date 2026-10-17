@@ -33,7 +33,7 @@ PowerShell 使用微软官方 `Parser.ParseInput`，由惰性持久 `pwsh` helpe
 
 只接受本次 `allowed-once`；拒绝、取消、超时、不可用、异常或会话 `approval: never` 均不执行。超时只约束本插件主动发起的审批，不修改全局 DSH 审批机制。
 
-配置页面使用官方 `plugins.row.config` 入口，并通过 0.2.1 的 `ctx.configForms` 读取活值与提交写入；保存按钮复制官方 `Button` 的几何与交互状态，只用主题 token，不引用 Harness Client 包；沿用 DSH 主题和保存机制。敏感文件每行一个；审批时间以秒显示、毫秒保存；空清单不关闭内置保护。修改暂存到点击保存，失败保留输入，提交绑定开始编辑时的配置修订号。运行期读取 volatile 活值，持久化仍归对应 Profile。界面中可展开查看能力边界；现场加载与验证见[设置页记录](docs/verification/2026-10-17-settings-ui.md)。
+配置页面使用官方 `plugins.row.config` 入口，并通过 0.2.1 的 `ctx.configForms` 读取活值与提交写入；字段与保存键按官方 `SettingsForm`/`fields` 的几何复制（未修改或输入非法时禁用保存），只用主题 token，不引用 Harness Client 包；沿用 DSH 主题和保存机制。敏感文件每行一个；审批时间以秒显示、毫秒保存；空清单不关闭内置保护。修改暂存到点击保存，失败保留输入，提交绑定开始编辑时的配置修订号。运行期读取 volatile 活值，持久化仍归对应 Profile。界面中可展开查看能力边界；现场加载与验证见[设置页记录](docs/verification/2026-10-17-settings-ui.md)。
 
 ## 文档与验证
 

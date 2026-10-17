@@ -27,11 +27,13 @@ test('settings rejects invalid drafts before any Host mutation', () => {
   assert.deepEqual(plain(plugin.parseDraft(draft).value.sensitiveFiles), [])
 })
 
-test('settings copies the host button instead of importing a Harness Client package', () => {
+test('settings copies the native settings form and disables save until dirty', () => {
   assert.doesNotMatch(source, /require\('@deepseek-ai\//)
-  assert.match(source, /h\(PrimaryButton, \{ type: 'submit'/)
-  assert.match(source, /\.gr-settings \.gr-button\{/)
-  assert.match(source, /--dsw-alias-button-primary-fill/)
+  assert.match(source, /h\(SaveButton, \{ type: 'submit', disabled: locked \|\| !dirty \|\| Boolean\(parsed\.error\)/)
+  assert.match(source, /if \(busy\.current \|\| !dirty \|\| parsed\.error \|\| !snapshot\.writable/)
+  assert.match(source, /\.gr-settings \.gr-field \+ \.gr-field\{/)
+  assert.match(source, /\.gr-settings \.gr-save\{/)
+  assert.match(source, /--dsw-alias-label-primary/)
   assert.doesNotMatch(source, /#[0-9a-fA-F]{3,8}\b/)
   assert.doesNotMatch(source, /(?:rgba?|hsla?)\(/)
 })

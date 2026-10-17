@@ -3,7 +3,7 @@
 ## 3.1.0（2026-10-17，适配 DSH 0.2.1-rc.2，未发布）
 
 - 目标运行时升级到 `0.2.1-rc.2`：`@deepseek-ai/dsh-settings` peer 下限抬到 `^0.2.1-rc.2`；0.2.0 及更早会被 peer 门禁禁用，不静默降级。
-- 设置页改用 0.2.1 的官方 `plugins.row.config` + `ctx.configForms.get('guardrails')`：订阅 Host 快照、读取 revision/writable、一次 `mutate` 提交三字段；不依赖页面一次性 `props.form`。保存按钮复制官方 `Button` 的 markup、36px 几何与 primary/禁用/悬停状态，类名改为 `gr-button` 前缀，仅保留 `--dsw-alias-*` token，不 `require` 任何 Harness Client 包。保留原生主题、双语 locale 和秒/毫秒转换；移除未保存标记，离开页面即丢弃草稿。
+- 设置页改用 0.2.1 的官方 `plugins.row.config` + `ctx.configForms.get('guardrails')`：订阅 Host 快照、读取 revision/writable、一次 `mutate` 提交三字段；不依赖页面一次性 `props.form`。设置页按官方 `SettingsForm`/`fields` 复制：字段 12px 纵向 padding + 0.5px 分隔线，34px 控件与 `--dsw-radius-md`、`bg-layer-3`，保存键沿用官方 `.save` 的 13px/`5px 14px`/`label-primary`；类名统一 `gr-` 前缀、只用 token，不 `require` 任何 Harness Client 包。未修改或输入非法时禁用保存，成功保存后回到未修改态，不额外显示成功文案。保留原生主题、双语 locale 和秒/毫秒转换；移除未保存标记，离开页面即丢弃草稿。
 - 0.2.1 的 `run_code` 需要 Agent `ctx` 与 `workingDirectory` 服务，PTC 释放走 `agent.ctx.effect`；仅测试夹具适配，生产防护语义不变。
 - 以 0.2.1-rc.2 运行时全量验证 464 项：400 通过、0 失败、64 条已声明语料跳过，约 10.9 秒。test 实例 `install_bundle` 返回 `applied`（changed=true，version=3.1.0），Host Config schema 与 Client slot occupant 均可见，普通 pwsh 命令放行验证通过。
 - 尚未完成：浏览器页面保存/明暗/窄屏走查、Linux 实跑、97,050 历史回放、完整启动门禁。决定与边界见 [设置页记录](docs/verification/2026-10-17-settings-ui.md)。
