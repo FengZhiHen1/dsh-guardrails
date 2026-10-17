@@ -2,6 +2,11 @@
 
 > 本文件只记**待办**。已完成的实录与取证归档在 `technical-details/部署.md`（v1.7.0 挂载与实测场清理）与各 `decisions/`。
 
+## v2.1.0（DSR-016，2026-10-17）待办
+
+- [ ] **`askTimeoutMs` 的实例级冒烟（须重启 test 实例）** —— 代码与单测已就位（71/71，行覆盖门禁通过），但 test 实例当前跑的是挂载时载入的 v2.0.0 模块：`link:` 源码改动**不会**热重载，必须重启 test 才能验证新代码。重启会中断当前会话，须用户定时机并走启动器。判据：① 配 `askTimeoutMs: 3000` 后读敏感 fixture **不点弹窗** → 3 秒后弹窗自动收起、工具返回「审批在 3s 内无人处理，已自动拒绝」；② 会话审计出现 `approval/decided: cancelled` + 实例日志出现 `[guardrails] ask timed out after 3000ms`；③ 授权路径与 `0`（关闭）路径行为不变；④ 配置页「审批超时（毫秒）」行可写、覆盖/重置徽标正常。
+- [ ] **重启后补做 §「审批超时」的两条历史未验证项** —— `approval policy = never` 分支、Auto Review 与本插件命中同一个 `read` 的 deny→ask 顺序（v2.0.0 门禁时缺这两项）。
+
 ## v2.0.0（DSR-015，2026-10-16）待办
 
 - [x] **test 实测场重挂 + 实例级门禁**（2026-10-17 完成，详见 `technical-details/部署.md`「v2.0.0 重挂 test 实测场与实例级门禁」）—— 以 `install_bundle`（本地目录 ⇒ `link:`）挂入 `homes\test`（运行时 0.2.0-rc.2），在线重组合、未重启实例。门禁：dump 恰一行无 `disabled`；`include:guardrails` `fiberPhase: active`；Config 两字段均 volatile；`plugins.row.config` occupant active；真实审批四条（内置名单 ask→批准放行、同文件再读**重新** ask→拒绝不执行、`sensitiveFiles` 标记 ask→批准）；配置热生效且撤销后 patch 逐字节还原；`glob`/目录 grep/`.env` 读取均不弹。**仍未验证**：`approval policy = never` 分支、Auto Review 命中同一 `read` 的 deny→ask 组合、逐启动 stderr 的字面判据（缺日志通道，用 fiberPhase 与功能替代）。

@@ -58,7 +58,12 @@ export const PUBLIC_KEY_SUFFIX = '.pub'
 // ---------- V2 config evaluation ----------
 
 /** Every valid top-level config key. */
-export const RULE_KEYS = ['sensitiveFiles', 'credentialsReadAsk']
+export const RULE_KEYS = ['sensitiveFiles', 'credentialsReadAsk', 'askTimeoutMs']
+
+/** Bounds of `askTimeoutMs` (milliseconds). `0` disables the plugin-owned
+ * bound and leaves the ask to DSH's native (unbounded) approval wait. */
+export const ASK_TIMEOUT_MIN = 0
+export const ASK_TIMEOUT_MAX = 3_600_000
 
 /** Whether a path is absolute (`C:/x`, `C:\x`, or POSIX `/x`). Local copy:
  * rules.js stays dependency-free (no imports from other core modules). */
@@ -68,7 +73,7 @@ const absolutePath = (p) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('/')
  * Evaluate the per-row config into plain data.
  *
  * @param config - raw plugin-row config (or settings-resolved value).
- * @returns `{ sensitiveFiles: string[], credentialsReadAsk: boolean }`.
+ * @returns `{ sensitiveFiles: string[], credentialsReadAsk: boolean, askTimeoutMs: number }`.
  * @throws {Error} on unknown keys or malformed values — the mount fails with
  *   an actionable error instead of silently degrading.
  */
@@ -84,11 +89,23 @@ export function evaluateRules(config = {}) {
       `dsh-guardrails: unknown config key(s): ${unknown.join(', ')} — valid keys: ${RULE_KEYS.join(', ')}`,
     )
   }
-  const { sensitiveFiles, credentialsReadAsk } = config
+  const { sensitiveFiles, credentialsReadAsk, askTimeoutMs } = config
   if (credentialsReadAsk !== undefined && typeof credentialsReadAsk !== 'boolean') {
     throw new Error(
       `dsh-guardrails: config "credentialsReadAsk" must be a boolean, got ${JSON.stringify(credentialsReadAsk)}`,
     )
+  }
+  if (askTimeoutMs !== undefined) {
+    if (
+      typeof askTimeoutMs !== 'number' ||
+      !Number.isInteger(askTimeoutMs) ||
+      askTimeoutMs < ASK_TIMEOUT_MIN ||
+      askTimeoutMs > ASK_TIMEOUT_MAX
+    ) {
+      throw new Error(
+        `dsh-guardrails: config "askTimeoutMs" must be an integer between ${ASK_TIMEOUT_MIN} and ${ASK_TIMEOUT_MAX} (milliseconds; 0 disables), got ${JSON.stringify(askTimeoutMs)}`,
+      )
+    }
   }
   if (sensitiveFiles !== undefined) {
     if (!Array.isArray(sensitiveFiles)) {
@@ -117,5 +134,6 @@ export function evaluateRules(config = {}) {
   return {
     sensitiveFiles: sensitiveFiles ?? [],
     credentialsReadAsk: credentialsReadAsk !== false,
+    askTimeoutMs: askTimeoutMs ?? 0,
   }
 }

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.0（2026-10-17，未发布）
+
+**新增：插件自有审批超时**（`askTimeoutMs`），决策记录见 [DSR-016](docs/decisions/DSR-016-插件自有审批超时.md)——收窄 DSR-015 的 T-A 边界（全局等待上限仍属上游，本插件只约束自己发起的 ask）。
+
+- 配置新增 `askTimeoutMs`（整数毫秒，默认 `0` = 关闭，上限 3600000，全 `.volatile()`）；`0` 时仍返回原生 `{ kind: 'ask' }`，行为零变化。
+- `> 0` 时插件自己调用 `approval.request({ …, signal: AbortSignal.any([exec.signal, 计时器]) })`：到点 abort，客户端弹窗随 `signal` 收起，工具调用以**明确的自动拒绝**结束（文案明示"不是用户拒绝、不要反复重试"），控制台记 `[guardrails] ask timed out after Nms`。
+- 审批层失败改为 **fail-closed**（无 approval 服务 / 无 agent / 请求抛错 → deny）；判定层异常仍 fail-open（DSR-015 不变）。
+- 结果映射与 `tools/serviceAsk` 逐字对齐，落在新的 `src/core/ask-decision.js`；词表外的结果一律拒绝（绝不读成放行）。
+- 配置页新增「审批超时（毫秒）」行（数字输入 + 本地校验 + 覆盖/重置徽标）。
+- 测试 58 → **71 例**（新增 `test/ask-timeout.test.mjs` 13 例：默认不接管、授权放行、计时器清理、拒绝/不可用/无通道文案、调用方取消、超时触发、超时不放行、未知结果 fail-closed、非敏感不触达、挂载校验）。
+- 已知边界：超时与用户取消在审计里同为 `cancelled`（结果词表封闭）；只约束本插件发起的审批，Auto Review 等来源的弹窗仍无超时。
+
 ## 2.0.0（2026-10-16，未发布）
 
 **不兼容重构：从「guard 硬阻断」到「pre-execute 原生审批」的职责收缩**，按 `references/dsh-guardrails` 已确认设计基线（B / B-2 / C / A / T-A，2026-10-16 六轮研讨）实施；决策记录见 [DSR-015](docs/decisions/DSR-015-审批式敏感读与职责收缩.md)。

@@ -83,19 +83,19 @@ test('DSH-managed credential files stay on the list (DSR-003 intent)', () => {
 
 // ---------- V2 config evaluation ----------
 
-test('RULE_KEYS is exactly the V2 pair', () => {
-  assert.deepEqual(RULE_KEYS, ['sensitiveFiles', 'credentialsReadAsk'])
+test('RULE_KEYS is exactly the V2 pair + the plugin-owned timeout bound', () => {
+  assert.deepEqual(RULE_KEYS, ['sensitiveFiles', 'credentialsReadAsk', 'askTimeoutMs'])
 })
 
 test('evaluateRules: defaults (empty marks, builtin list on)', () => {
-  assert.deepEqual(evaluateRules({}), { sensitiveFiles: [], credentialsReadAsk: true })
-  assert.deepEqual(evaluateRules(undefined), { sensitiveFiles: [], credentialsReadAsk: true })
+  assert.deepEqual(evaluateRules({}), { sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 0 })
+  assert.deepEqual(evaluateRules(undefined), { sensitiveFiles: [], credentialsReadAsk: true, askTimeoutMs: 0 })
 })
 
 test('evaluateRules: accepts explicit values', () => {
   assert.deepEqual(
     evaluateRules({ sensitiveFiles: ['E:/p/.env.production'], credentialsReadAsk: false }),
-    { sensitiveFiles: ['E:/p/.env.production'], credentialsReadAsk: false },
+    { sensitiveFiles: ['E:/p/.env.production'], credentialsReadAsk: false, askTimeoutMs: 0 },
   )
 })
 
@@ -107,4 +107,7 @@ test('evaluateRules: mount-time validation fails loudly', () => {
   assert.throws(() => evaluateRules({ sensitiveFiles: 'E:/p/.env' }), /must be an array/)
   assert.throws(() => evaluateRules({ sensitiveFiles: ['.env'] }), /absolute file paths/)
   assert.throws(() => evaluateRules({ sensitiveFiles: ['E:/p', ''] }), /non-empty strings/)
+  assert.throws(() => evaluateRules({ askTimeoutMs: 1.5 }), /askTimeoutMs/)
+  assert.throws(() => evaluateRules({ askTimeoutMs: 3_600_001 }), /askTimeoutMs/)
+  assert.throws(() => evaluateRules({ askTimeoutMs: '3000' }), /askTimeoutMs/)
 })

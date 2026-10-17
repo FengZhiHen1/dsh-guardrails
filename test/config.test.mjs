@@ -30,12 +30,13 @@ const resolved = (input) =>
 const volatileKeys = (input) =>
   Object.entries(Config(input)).filter(([, value]) => typeof value?.get === 'function').map(([key]) => key)
 
-const ALL_FIELDS = ['sensitiveFiles', 'credentialsReadAsk']
+const ALL_FIELDS = ['sensitiveFiles', 'credentialsReadAsk', 'askTimeoutMs']
 
 test('Config schema: empty config validates to all-defaults', () => {
   assert.deepEqual(resolved({}), {
     sensitiveFiles: [],
     credentialsReadAsk: true,
+    askTimeoutMs: 0,
   })
 })
 
@@ -71,4 +72,11 @@ test('Config schema: invalid values fail validation (loader ValidationError)', (
   assert.doesNotThrow(() => Config({ sensitiveFiles: ['relative/path'] }))
   assert.throws(() => evaluateRules({ sensitiveFiles: ['relative/path'] }), /absolute file paths/)
   assert.throws(() => evaluateRules({ bogus: true }), /unknown config key/)
+  // The timeout bound is type-checked by the schema and integer/bounds-checked
+  // by the evaluator (schemastery allows a float; the evaluator does not).
+  assert.throws(() => Config({ askTimeoutMs: -1 }))
+  assert.doesNotThrow(() => Config({ askTimeoutMs: 1.5 }))
+  assert.throws(() => evaluateRules({ askTimeoutMs: 1.5 }), /askTimeoutMs/)
+  assert.throws(() => evaluateRules({ askTimeoutMs: 3_600_001 }), /askTimeoutMs/)
+  assert.equal(evaluateRules({}).askTimeoutMs, 0)
 })

@@ -48,11 +48,14 @@ window.__ModuleLoader__.load({
 		const ROW_KEY = 'dsh-guardrails#guardrails';
 
 		// ---------- the V2 config model ----------
-		// Mirrors src/core/rules.js RULE_KEYS. The Host half refuses unknown
-		// keys loudly, so a drift here would surface as a rejected save rather
-		// than a silent no-op; test/config-page.test.mjs pins the parity
+		// Shape mirrors src/core/rules.js RULE_KEYS. The Host half refuses
+		// unknown keys loudly, so a drift here would surface as a rejected save
+		// rather than a silent no-op; test/config-page.test.mjs pins the parity
 		// mechanically by importing the core module.
-		const FIELDS = ['sensitiveFiles', 'credentialsReadAsk'];
+		const FIELDS = ['sensitiveFiles', 'credentialsReadAsk', 'askTimeoutMs'];
+
+		// Mirrors src/core/rules.js ASK_TIMEOUT_MAX (milliseconds).
+		const TIMEOUT_MAX = 3600000;
 
 		const isAbsolutePath = (p) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('/');
 
@@ -101,8 +104,27 @@ window.__ModuleLoader__.load({
 			},
 		});
 
-		/** Every field this page edits — the two top-level keys of the Config schema. */
-		const SPECS = [pathsSpec, boolSpec('credentialsReadAsk')];
+		/**
+		 * Integer-milliseconds spec for `askTimeoutMs` (DSR-016). Only plain
+		 * digits are accepted, so the draft can never be a negative, a float,
+		 * or an empty string that the Host would refuse at save time; `0` is
+		 * the documented "no plugin-owned bound" value.
+		 */
+		const timeoutSpec = {
+			field: 'askTimeoutMs',
+			format: (value) => String(typeof value === 'number' ? value : 0),
+			parse: (text) => {
+				const normalized = String(text).trim();
+				if (!/^\d+$/.test(normalized)) return undefined;
+				const value = Number(normalized);
+				if (!Number.isInteger(value) || value < 0 || value > TIMEOUT_MAX) return undefined;
+				return { kind: 'set', value };
+			},
+		};
+
+		/** Every field this page edits — the three top-level keys of the Config schema. */
+		const SPECS = [pathsSpec, boolSpec('credentialsReadAsk'), timeoutSpec];
+
 
 		/** The form frame's copy (official SettingsFormLabels; five keys, all required). */
 		const LABELS = {
@@ -149,6 +171,12 @@ window.__ModuleLoader__.load({
 				padding: '6px 8px', outline: 'none',
 			},
 			textareaInvalid: { borderColor: T.stateError },
+			input: {
+				display: 'block', width: 160, boxSizing: 'border-box', marginTop: 8,
+				font: 'inherit', fontSize: 12, lineHeight: 1.6, color: T.labelPrimary,
+				background: T.bgLayer2, border: `1px solid ${T.borderL2}`, borderRadius: R.sm,
+				padding: '4px 8px', outline: 'none',
+			},
 			note: { margin: '12px 0 0', fontSize: 12, color: T.labelTertiary, lineHeight: 1.6 },
 		};
 
@@ -224,6 +252,47 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * The approval-wait bound row (DSR-016): 0 disables the plugin-owned
+		 * limit; a positive value auto-declines after that many milliseconds.
+		 */
+		function AskTimeoutRow({ field, writable, busy, onEdit, onReset }) {
+			const disabled = !writable || busy;
+			const invalid = field.text.trim() !== '' && timeoutSpec.parse(field.text) === undefined;
+			return h('div', { style: style.row },
+				h('div', { style: style.head },
+					h('h4', { style: style.title }, '审批超时（毫秒）'),
+					field.overridden
+						? h('span', { style: style.badge },
+							h(Tag, { tone: 'neutral' }, OVERRIDDEN),
+							h('button', {
+								type: 'button',
+								disabled,
+								onClick: () => onReset('askTimeoutMs'),
+								style: { ...style.reset, ...disabledStyle(disabled) },
+							}, RESET),
+						)
+						: null,
+				),
+				h('input', {
+					type: 'number',
+					min: 0,
+					max: TIMEOUT_MAX,
+					step: 1000,
+					value: field.text,
+					disabled,
+					style: { ...style.input, ...(invalid ? style.textareaInvalid : {}) },
+					onChange: (event) => onEdit(event.target.value),
+				}),
+				h('p', { style: invalid ? style.hintInvalid : style.hint },
+					invalid
+						? `只接受 0–${TIMEOUT_MAX} 的整数毫秒；保存会被拒绝。`
+						: '0 = 不设插件侧上界（沿用 DSH 原生无超时等待）；大于 0 时到点自动拒绝并收起弹窗。'
+							+ '只约束本插件发起的审批，不覆盖 Auto Review 等其他来源的弹窗。',
+				),
+			);
+		}
+
+		/**
 		 * The row's configuration page.
 		 *
 		 * Owner contract of `plugins.row.config` (knowledge `client/15` §4;
@@ -258,6 +327,13 @@ window.__ModuleLoader__.load({
 					writable,
 					busy,
 					onEdit: (text) => edit('sensitiveFiles', text),
+					onReset: resetField,
+				}),
+				h(AskTimeoutRow, {
+					field: state.askTimeoutMs,
+					writable,
+					busy,
+					onEdit: (text) => edit('askTimeoutMs', text),
 					onReset: resetField,
 				}),
 				h('p', { style: style.note },

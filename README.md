@@ -10,7 +10,7 @@
 ## 拦截语义
 
 - **触发面**：`read` / `read_image` / `grep`（显式单文件路径）对命中目标的内容读取 → `{ kind: 'ask' }` → DSH 原生一次性审批。
-- **批准一次只放行对应调用**；再次读取重新审批。拒绝/取消/不可用（无审批通道、`never` 策略）一律不执行。
+- **批准一次只放行对应调用**；再次读取重新审批。拒绝/取消/超时/不可用（无审批通道、`never` 策略）一律不执行。
 - **不触发**：普通文档与代码读取、`.env.example` 等模板、`*.pub` 公钥、`~/.ssh/config`（路由表）、`.git` 正常读取、元数据列举（`glob`）、目录级/工作区级 grep 搜索、一切写/改/删、pwsh/bash 命令。
 - 审批提示只含动作与目标路径，**绝不读取或记录文件内容**。
 - 未挂载 approval 服务时 `ask` 退化为拒绝（fail-closed，DSH 原生语义）；插件自身判定层异常时放行并大声记日志（fail-open）。
@@ -34,6 +34,7 @@
 | --- | --- | --- | --- |
 | `sensitiveFiles` | `string[]` | `[]` | 精确绝对路径清单；相对路径、通配符挂载即失败 |
 | `credentialsReadAsk` | `boolean` | `true` | 内置凭据名单开关；关闭后整类交 Auto Review |
+| `askTimeoutMs` | integer | `0` | 审批等待的插件侧上界（毫秒，0–3600000）；`0` = 不设上界（沿用 DSH 原生无超时等待），`>0` 到点自动拒绝并收起弹窗（见「审批超时」） |
 
 **配置入口**：侧栏「插件」→ dsh-guardrails → 行内「配置」——内置名单开关 + 标记文件路径编辑器（每行一个绝对路径），由官方 `SettingsForm` 呈现。命名空间 = loader 条目 id `guardrails`（改名即脱钩）。
 
@@ -63,9 +64,18 @@ profile 覆盖形态示例：
 
 > ⚠️ **基线要求（硬性）**：v2.0.0 适配 **DSH `0.2.0-rc.2` 及以后**（peer `@deepseek-ai/dsh-settings ^0.2.0-rc.2`）。在 `0.1.7-rc.2` 等旧运行时上，peer 门禁会把该行**静默禁用**（stderr 一行 `disabling profile plugin`，实例照常启动、守护消失）——**升级顺序：先把实例升到 `0.2.0-rc.2`，再挂载/更新本插件**。旧实例继续用 v1.7.0 发布物（`ctx.tools.guard` 硬阻断模型）。
 
-## 审批超时（T-A 结论，2026-10-16 源码核查）
+## 审批超时（T-A 修订为 DSR-016）
 
-DSH `0.2.0-rc.2` 的原生审批链**没有任何等待超时**：`@deepseek-ai/dsh-user-approval` 只提供 `policy: 'ask' | 'never'`（`never` 为立即确定性拒绝，适合无人值守/CI）；answerer pending 时审批会一直等待。无人值守场景的当前姿态：把会话审批策略设为 `never`（需要审批的操作立即拒绝），不新造定时器。统一等待上限属 DSH Approval Service / Host answerer 的公共边界，本插件不实现（设计基线 T-A 的职责划分）。
+DSH `0.2.0-rc.2` 的原生审批链**没有任何等待超时**（`@deepseek-ai/dsh-user-approval` 只提供 `policy: 'ask' | 'never'`，pending 的 answerer 会被无限等待；`never` 为立即确定性拒绝）。这仍是上游事实。
+
+本插件因此提供一个**可选的、只约束自己的**上界：
+
+- `askTimeoutMs = 0`（默认）—— 原样交给 DSH，行为与没有本功能一致；
+- `askTimeoutMs > 0` —— 插件自己发这次审批请求（`approval.request` + `AbortSignal.any([exec.signal, 计时器])`），到点 abort：弹窗随 signal 收起，工具调用以**明确的自动拒绝**结束，并在控制台记一行 `[guardrails] ask timed out after Nms`。
+- 超时与「用户拒绝」在会话审计里都落成 `approval/decided: cancelled`（结果词表封闭），区分只能靠上面那行日志与工具返回文案。**不要**把超时当成安全边界：它只解决"没人点导致挂起"。
+- **不覆盖**其他来源的弹窗（Auto Review 等）——它们仍无超时。无人值守的完整姿态是会话 `approval policy = never`。
+
+设计依据与取舍见 [DSR-016](docs/decisions/DSR-016-插件自有审批超时.md)。
 
 ## 测试
 

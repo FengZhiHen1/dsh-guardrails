@@ -20,9 +20,10 @@
 // degrades to a denial when no approval service is composed (fail-closed).
 
 import z from '@deepseek-ai/schemastery'
-import { evaluateRules } from '../core/rules.js'
+import { ASK_TIMEOUT_MAX, evaluateRules } from '../core/rules.js'
 import { checkSensitiveRead, resolvePath } from '../core/path-check.js'
 import { askMessage } from '../core/ask-messages.js'
+import { decideFromOutcome } from '../core/ask-decision.js'
 
 /**
  * Render one audit line, bounded. Only the first line of a reason is logged;
@@ -47,6 +48,11 @@ export const Config = z.object({
   // dump files — see core/rules.js). Off only to hand the whole category to
   // Auto Review.
   credentialsReadAsk: z.boolean().default(true).volatile(),
+  // Plugin-owned upper bound on the approval wait (DSR-016). `0` (default)
+  // keeps DSH's native unbounded wait; a positive value aborts this plugin's
+  // own ask when nobody answers, which the approval service reports as
+  // `cancelled` and we turn into an explicit automatic refusal.
+  askTimeoutMs: z.number().min(0).max(ASK_TIMEOUT_MAX).default(0).volatile(),
 })
 
 export const name = 'dsh-guardrails'
@@ -94,7 +100,9 @@ const READ_TOOLS = new Set(['read', 'read_image', 'grep'])
 /**
  * Judge one tool execution for a sensitive content read.
  *
- * @returns `{ kind: 'ask', reason }` on a hit, `undefined` otherwise.
+ * @returns `{ hit, reason, timeoutMs }` on a hit, `undefined` otherwise. The
+ *   decision shape (ask vs. plugin-owned request) belongs to the listener so
+ *   this stays a pure judgment; `timeoutMs` is the live `askTimeoutMs` value.
  *   An internal error must not deadlock the tool waterfall: it is logged loud
  *   and swallowed (fail-open listener layer).
  */
@@ -110,7 +118,7 @@ function judgeExecution(execution, rawConfig, sandboxPolicy) {
     const base = sandboxPolicy?.resolve(session ? { session } : {}).workspaceRoot ?? ''
     const hit = checkSensitiveRead(resolvePath(base, raw), rules)
     if (hit === null) return undefined
-    return { kind: 'ask', reason: askMessage(hit, raw, execution.name) }
+    return { hit, reason: askMessage(hit, raw, execution.name), timeoutMs: rules.askTimeoutMs }
   } catch (error) {
     // Fail-open with a loud log: a listener bug must not wedge the waterfall.
     console.error(
@@ -119,6 +127,75 @@ function judgeExecution(execution, rawConfig, sandboxPolicy) {
     )
     return undefined
   }
+}
+
+/**
+ * Run one plugin-owned approval request with an upper bound on the wait
+ * (DSR-016).
+ *
+ * Why the plugin issues the request itself: a `{ kind: 'ask' }` decision is
+ * resolved by `tools/serviceAsk`, which borrows `exec.signal` and waits
+ * forever — the approval chain has no timeout at all. Passing our own merged
+ * signal is the only seam that both bounds the wait and tells the UI to dismiss
+ * its pending prompt (`dsh-client-ui-approval` aborts the presentation on
+ * `request.signal`). Policy (`never`) and the answerer waterfall stay inside
+ * the service, so neither is bypassed.
+ *
+ * Failure direction: once a target is judged sensitive, a broken approval path
+ * must NOT read it — every error here denies. (The judgment layer above keeps
+ * its fail-open behavior for its own bugs.)
+ */
+async function askWithTimeout(ctx, execution, judged) {
+  const toolName = execution.name
+  const approval = ctx.get('approval')
+  if (approval === undefined) {
+    return { kind: 'deny', reason: `tool "${toolName}" requires approval, but no approval channel is available` }
+  }
+  if (execution.agent === undefined) {
+    return { kind: 'deny', reason: `tool "${toolName}" requires approval, but the call has no agent to route it through` }
+  }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`dsh-guardrails: ask timeout after ${judged.timeoutMs}ms`))
+  }, judged.timeoutMs)
+  // Keep a caller-side cancel intact: aborting the turn must still end the wait
+  // (and must be told apart from our own timeout below).
+  const signal = execution.signal === undefined
+    ? controller.signal
+    : AbortSignal.any([execution.signal, controller.signal])
+
+  let outcome
+  try {
+    outcome = await approval.request({
+      agent: execution.agent,
+      toolName,
+      callId: execution.callId,
+      reason: judged.reason,
+      signal,
+    })
+  } catch (error) {
+    console.error(
+      '[guardrails] approval request failed (fail-closed):',
+      error && error.message ? error.message : String(error),
+    )
+    return { kind: 'deny', reason: `tool "${toolName}" requires approval, but the approval request failed` }
+  } finally {
+    clearTimeout(timer)
+  }
+
+  const timedOut = controller.signal.aborted
+  if (timedOut) {
+    // One bounded audit line: the approval pair itself records `cancelled`,
+    // which cannot distinguish "timeout" from "user cancelled the turn".
+    console.error(`[guardrails] ask timed out after ${judged.timeoutMs}ms: ${toolName}`)
+  }
+  return decideFromOutcome(outcome, {
+    toolName,
+    hit: judged.hit,
+    timeoutMs: judged.timeoutMs,
+    timedOut,
+  })
 }
 
 /**
@@ -142,9 +219,12 @@ export function apply(ctx, config = {}) {
   const sandboxPolicy = ctx.get('sandboxPolicy')
   ctx.effect(() =>
     ctx.on('tools/pre-execute', async (execution, next) => {
-      const decision = judgeExecution(execution, config, sandboxPolicy)
-      if (decision !== undefined) return decision
-      return next()
+      const judged = judgeExecution(execution, config, sandboxPolicy)
+      if (judged === undefined) return next()
+      // `askTimeoutMs = 0` keeps the native unbounded ask (a plain decision);
+      // a positive bound owns the request so it can be aborted.
+      if (judged.timeoutMs <= 0) return { kind: 'ask', reason: judged.reason }
+      return await askWithTimeout(ctx, execution, judged)
     }),
   )
 }

@@ -6,7 +6,8 @@
 
 ## 当前状态
 
-- **v2.0.0（2026-10-16，当前）——审批式敏感读与职责收缩（DSR-015）**：插件整体从「`ctx.tools.guard` 硬阻断」重构为「`tools/pre-execute` 原生一次性审批（ask / allow-once）」。内置窄凭据名单 + 用户标记精确路径（`sensitiveFiles`）两层目标，只拦 `read`/`read_image`/单文件 `grep` 的内容读取；`.env` 全局拦截、`.git` 内部、系统区写、破坏性命令静态分析与语料回放工具全部退役，交 DSH 原生 Auto Review 与 OS 权限。peer 抬到 `^0.2.0-rc.2`（0.1.7 上静默禁用，升级顺序见 README）。决策与 0.2.0 源码核查记录见 [DSR-015](decisions/DSR-015-审批式敏感读与职责收缩.md)；设计基线（用户确认）见管理仓库 `references/dsh-guardrails/`。
+- **v2.1.0（2026-10-17，当前）——插件自有审批超时（DSR-016）**：新增 `askTimeoutMs`（默认 `0` = 关闭）。`> 0` 时本插件自己发审批请求并以 `AbortSignal` 计时，到点自动拒绝、弹窗随 signal 收起；全局等待上限仍属上游（T-A 收窄，不推翻）。配置页新增对应数字行。
+- **v2.0.0（2026-10-16）——审批式敏感读与职责收缩（DSR-015）**：插件整体从「`ctx.tools.guard` 硬阻断」重构为「`tools/pre-execute` 原生一次性审批（ask / allow-once）」。内置窄凭据名单 + 用户标记精确路径（`sensitiveFiles`）两层目标，只拦 `read`/`read_image`/单文件 `grep` 的内容读取；`.env` 全局拦截、`.git` 内部、系统区写、破坏性命令静态分析与语料回放工具全部退役，交 DSH 原生 Auto Review 与 OS 权限。peer 抬到 `^0.2.0-rc.2`（0.1.7 上静默禁用，升级顺序见 README）。决策与 0.2.0 源码核查记录见 [DSR-015](decisions/DSR-015-审批式敏感读与职责收缩.md)；设计基线（用户确认）见管理仓库 `references/dsh-guardrails/`。
 - **v1 归档**：下方 v1.x 状态条目与 `technical-details/` 各篇描述的是 v1 硬阻断模型（`规则模型.md`、`命令文本分析.md` 等），**v2 起不再适用**，仅留档对照；`decisions/DSR-001…014` 保留其历史效力，其中 DSR-013 的结论（`~/.ssh/config` 非密钥物质）在 V2 中因目录规则退役而自动成立。
 - 主题：`dsh-guardrails`（DSH 敏感读审批层，Host 插件，bundle 形态）。
 - 设计基线：2026-08-17 经用户逐项确认，见 [决策记录](decisions/)。

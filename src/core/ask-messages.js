@@ -21,3 +21,19 @@ export function askMessage(hit, rawPath, toolName) {
     '本次读取需要用户一次性批准（allow-once）；拒绝或不可用时不执行。',
   ].join('\n')
 }
+
+/**
+ * Render the model-facing reason for a plugin-owned ask timeout (DSR-016).
+ *
+ * Bounded and path-only like the ask text: the timeout is a "nobody answered"
+ * outcome, so the model must know it was an automatic refusal — not a human
+ * "no" — and must not retry the same read in a loop.
+ */
+export function timeoutMessage(toolName, timeoutMs, hit) {
+  const seconds = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 100) / 10}s` : `${timeoutMs}ms`
+  return [
+    `[guardrails] ${toolName} 的审批在 ${seconds} 内无人处理，已自动拒绝（超时）；该调用未执行。`,
+    `这是自动拒绝，不是用户拒绝——不要用同一参数反复重试；需要该内容时请让用户在场后重新发起（命中类别：${HIT_LABEL[hit] ?? hit}）。`,
+  ].join('\n')
+}
+

@@ -337,7 +337,7 @@ test('the page is driven by the official SettingsFormModel over the row namespac
   // the read-back and discard-on-unmount now.
   assert.equal(m.record.scope, m.configForm, 'the model must be bound to the row ConfigForm')
   const fields = m.record.specs.map((spec) => spec.field)
-  assert.deepEqual(fields, ['sensitiveFiles', 'credentialsReadAsk'])
+  assert.deepEqual(fields, ['sensitiveFiles', 'credentialsReadAsk', 'askTimeoutMs'])
   for (const spec of m.record.specs) {
     assert.equal(typeof spec.format, 'function', `${spec.field} needs format`)
     assert.equal(typeof spec.parse, 'function', `${spec.field} needs parse`)

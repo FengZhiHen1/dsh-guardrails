@@ -79,7 +79,7 @@ function captureSpecs() {
 const SPECS = captureSpecs()
 const FIELDS = SPECS.map((spec) => spec.field)
 
-test('the page edits exactly the two top-level Config keys (no more, no fewer)', () => {
+test('the page edits exactly the three top-level Config keys (no more, no fewer)', () => {
   assert.deepEqual([...FIELDS].sort(), [...RULE_KEYS].sort(),
     'page fields must match RULE_KEYS from src/core/rules.js')
   // And the Host schema must have them all, volatile — a non-volatile field
@@ -138,4 +138,21 @@ test('boolean spec round-trips and refuses non-boolean texts', () => {
     evaluateRules({ credentialsReadAsk: spec.parse('false').value }).credentialsReadAsk,
     false,
   )
+})
+
+test('timeout spec round-trips and refuses drafts the Host would refuse', () => {
+  const spec = SPECS.find((s) => s.field === 'askTimeoutMs')
+  assert.ok(spec, 'the page must expose an askTimeoutMs spec')
+  for (const value of [0, 1000, 3_600_000]) {
+    const text = spec.format(value)
+    const write = spec.parse(text)
+    assert.equal(write.kind, 'set')
+    assert.equal(write.value, value)
+    assert.equal(spec.format(write.value), text)
+    // The page accepts exactly what the Host evaluator accepts.
+    assert.equal(evaluateRules({ askTimeoutMs: write.value }).askTimeoutMs, value)
+  }
+  for (const bad of ['-1', '1.5', '3s', '3_600_001', '']) {
+    assert.equal(spec.parse(bad), undefined, `askTimeoutMs spec must reject ${JSON.stringify(bad)}`)
+  }
 })
