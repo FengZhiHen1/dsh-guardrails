@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
       },
     }
     const css = `
-.gr-settings{display:flex;flex-direction:column;color:var(--dsw-alias-label-primary);font:inherit;max-width:680px}
+.gr-settings{box-sizing:border-box;display:flex;flex-direction:column;width:100%;min-width:0;color:var(--dsw-alias-label-primary);font:inherit}
 .gr-settings .gr-note{margin:0 0 12px;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .gr-settings .gr-field{display:flex;flex-direction:column;gap:6px;padding:12px 0;min-width:0}
 .gr-settings .gr-field + .gr-field{border-top:.5px solid var(--dsw-alias-border-l2)}

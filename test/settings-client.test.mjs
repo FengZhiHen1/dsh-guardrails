@@ -32,6 +32,8 @@ test('settings copies the native settings form and disables save until dirty', (
   assert.match(source, /h\(SaveButton, \{ type: 'submit', disabled: locked \|\| !dirty \|\| Boolean\(parsed\.error\)/)
   assert.match(source, /if \(busy\.current \|\| !dirty \|\| parsed\.error \|\| !snapshot\.writable/)
   assert.match(source, /\.gr-settings \.gr-field \+ \.gr-field\{/)
+  assert.match(source, /\.gr-settings\{[^}]*width:100%/)
+  assert.doesNotMatch(source, /\.gr-settings\{[^}]*max-width/)
   assert.match(source, /\.gr-settings \.gr-save\{/)
   assert.match(source, /--dsw-alias-label-primary/)
   assert.match(source, /save: '保存', saving: '保存中…'/)

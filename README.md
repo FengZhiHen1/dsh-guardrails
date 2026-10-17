@@ -1,6 +1,6 @@
 # dsh-guardrails — DSH 工具安全防护
 
-在 Full Access 下为 DSH 受管 AI 工具提供 `Deny / Ask / Allow` 防护，不依赖 Auto Review 的模型判定。源码已重构为官方双 Shell AST 与最终硬门禁，包版本 **3.2.0，尚未发布**；本轮适配 DSH `0.2.1-rc.2`。“V2”是本轮设计资料的方案名，不代表包版本仍为 2.x。
+在 Full Access 下为 DSH 受管 AI 工具提供 `Deny / Ask / Allow` 防护，不依赖 Auto Review 的模型判定。源码已重构为官方双 Shell AST 与最终硬门禁，包版本 **3.2.1，尚未发布**；本轮适配 DSH `0.2.1-rc.2`。“V2”是本轮设计资料的方案名，不代表包版本仍为 2.x。
 
 ## 兼容性
 

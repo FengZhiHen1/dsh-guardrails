@@ -4,7 +4,7 @@
 
 ## 页面设计
 
-采用 DSH 原生设置页单列密度，按官方 `SettingsForm`/`fields` 复制：字段 12px 纵向 padding 与 0.5px 分隔线、13px 标签、34px 控件（0.5px `border-l4`、`--dsw-radius-md`、`bg-layer-3`）、12px 提示、底部 16px 保存行；保存键沿用官方 `.save` 的 13px/`5px 14px`/`label-primary`，类名统一加 `gr-` 前缀并只保留 token 引用。未修改或输入非法时禁用保存，成功保存后回到未修改态、不额外显示成功文案。不 `require` 任何 Harness Client 包——0.2.1 的 platform seed 虽能解析，但属于无插件支持承诺的内部装配件。内容宽度680px上限，窄屏保持单列并允许底部反馈换行。
+采用 DSH 原生设置页单列密度，按官方 `SettingsForm`/`fields` 复制：字段 12px 纵向 padding 与 0.5px 分隔线、13px 标签、34px 控件（0.5px `border-l4`、`--dsw-radius-md`、`bg-layer-3`）、12px 提示、底部 16px 保存行；保存键沿用官方 `.save` 的 13px/`5px 14px`/`label-primary`，类名统一加 `gr-` 前缀并只保留 token 引用。未修改或输入非法时禁用保存，成功保存后回到未修改态、不额外显示成功文案。不 `require` 任何 Harness Client 包——0.2.1 的 platform seed 虽能解析，但属于无插件支持承诺的内部装配件。宽度跟随 Plugins 页内容列（最大 960px），不自设 680px 上限；窄屏保持单列并允许底部反馈换行。
 
 内容优先级：敏感文件多行输入 → 内置保护checkbox → 审批时间秒数 → 保存及状态 → 分隔线后的保护范围与可展开边界说明。配置控件为唯一主任务；只读防护摘要不伪装成实时健康状态。
 
@@ -27,3 +27,5 @@ loading/unavailable/只读各有明确反馈；未修改禁用保存；非法输
 test 实例 0.2.1-rc.2 的安装结果早于本次设置页重排，只证明当时版本；本次未重装或重启实例。当时：官方 `install_bundle` 返回 application=applied、changed=true、version=3.1.0；Host `Config.listConfigs` 可见三项 schema；Client `plugins.row.config` 显示 occupant active；普通 pwsh 命令返回预期输出，证明 guard 已接管且未误拦。
 
 浏览器页面本身仍需用户刷新后走查：输入、保存成功/失败反馈、明暗主题与窄屏布局；复制字段与保存键同官方并排的几何、焦点、禁用一致性同样未走查。Inspect 只证明注册与 schema，不证明视觉与交互。本机仓库规则将页面级检查交用户，本轮未运行浏览器自动化，未声称视觉验收完成。
+
+> 2026-10-17 修订：移除内容宽度 680px 上限，改为 `width:100%` 跟随 Plugins 页内容列（最大 960px）；`settings-client.test.mjs` 增加“无 max-width、有 width:100%”源码断言。浏览器视觉与窄屏走查仍未做。
