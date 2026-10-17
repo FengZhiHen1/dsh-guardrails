@@ -34,6 +34,8 @@ test('settings copies the native settings form and disables save until dirty', (
   assert.match(source, /\.gr-settings \.gr-field \+ \.gr-field\{/)
   assert.match(source, /\.gr-settings \.gr-save\{/)
   assert.match(source, /--dsw-alias-label-primary/)
+  assert.match(source, /save: '保存', saving: '保存中…'/)
+  assert.doesNotMatch(source, /保存设置|Save settings/)
   assert.doesNotMatch(source, /#[0-9a-fA-F]{3,8}\b/)
   assert.doesNotMatch(source, /(?:rgba?|hsla?)\(/)
 })
