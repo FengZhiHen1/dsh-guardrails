@@ -152,7 +152,7 @@ corrupt Zstandard session log: first frame is not exactly one header line
    `web-next` profile 在新 HOME 内**由 `dsh plugin add` 重建**（非目录搬迁：旧 profile 的 149 个 reparse point
    用绝对路径回指 `homes\stable-dev`，搬过去等于留一个半坏的预检场）。bundle 栈与依赖 spec 与旧 profile 逐项一致，
    `guardrails` 仍居末位；`--dump-config` exit=0、`dsh-guardrails` 静态判定 = CLIENT ROW。
-   拓扑与工作流（dev 预检 → 通过后升 stable-dev）记于 `docs/dsh-dev-env-config-0.1.2.md`；
+   拓扑与工作流（`test` 实测 → `dev` 启动验证 → `stable-dev` 落地）记于管理仓库 `docs/本机实例与插件操作.md`「实例与控制面」；
    跨实例共用 HOME 已入 AGENTS.md Security 红线。
    遗留：旧 `homes\stable-dev\profiles\web-next` 待新场验证通过后删除（未获指令不动）。
 3. 存量损伤（不阻塞启动）：sweep 报的 seq gap 会话仍在
