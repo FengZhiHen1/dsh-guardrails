@@ -4,8 +4,9 @@
 
 - 版本线从 3.2.1 重置为 0.1.0：DSH 仍处 0.2.1-rc.2 预发布，插件暂不承诺跨宿主版本的 API/配置稳定性；0.x 内破坏性变更升 minor，兼容功能/修复升 patch。
 - 当前源码包含此前未发布的 3.2.0 配置键改名与 3.2.1 设置页改动（宽度跟随内容列、长说明收进 info）；旧 3.x 条目保留为历史，不删除、不改写。
+- 插件卡片与设置页头部使用包图标：36×36 双色盾牌 `icon.svg`；`package.json` 声明 `"icon": "./icon.svg"` 并纳入 `files`。纯静态元数据，不改变运行期行为。
 - test 实例的安装记录仍是 3.1.0；版本号重置不等于已安装版本变化，需重装/重链或新建实例后核对管理面，不能把源码 0.1.0 写成实例已装 0.1.0。
-- 验证：`npm test` 465 项（397 通过、0 失败、68 跳过）；`settings-client.test.mjs` 6/6；`node tools/plugin-layering-check.mjs plugins/dsh-guardrails` 通过。
+- 验证：`npm test` 465 项（397 通过、0 失败、68 跳过，约 8.7 秒）；`settings-client.test.mjs` 6/6；`npm pack --dry-run --json` 确认 `icon.svg` 与 `package.json` 进入 tarball；`node tools/plugin-layering-check.mjs plugins/dsh-guardrails` 通过。运行中 test 实例未重装/重启，卡片与设置页头部的实际显示待用户刷新后走查。
 
 > 3.x 为版本线重置前的历史（均未发布），保留备查；当前线从 0.1.0 起。
 

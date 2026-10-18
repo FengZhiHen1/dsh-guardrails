@@ -2,6 +2,7 @@
   "name": "dsh-guardrails",
   "version": "0.1.0",
   "description": "Official Shell AST guard, precise sensitive-file approvals and credential redaction for DSH",
+  "icon": "./icon.svg",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -35,6 +36,7 @@
   },
   "files": [
     "index.js",
+    "icon.svg",
     "src/",
     "vendor/",
     "docs/",
