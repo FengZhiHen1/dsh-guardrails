@@ -92,8 +92,10 @@ export function createShellParsers(options = {}) {
     // npm packing on Windows drops Unix executable bits; restore only the verified binary.
     if (process.platform !== 'win32') await chmod(url, 0o755);
     if (task.stopped) throw task.stopped;
+    // `-ln` selects the language dialect: bash or posix (shfmt's POSIX mode). Never guess.
+    const languageDialect = task.dialect === 'posix' ? 'posix' : 'bash';
     const text = await new Promise((resolve, reject) => {
-      const child = trackChild(spawnProcess(fileURLToPath(url), ['-ln', 'bash', '--to-json'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
+      const child = trackChild(spawnProcess(fileURLToPath(url), ['-ln', languageDialect, '--to-json'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
       task.kill = () => child.kill();
       const chunks = [];
       let size = 0;
@@ -116,7 +118,7 @@ export function createShellParsers(options = {}) {
       queue.splice(i, 1);
       active++;
       running.add(task);
-      const work = task.dialect === 'bash' ? parseBash(task.source, task) : new Promise((resolve, reject) => {
+      const work = (task.dialect === 'bash' || task.dialect === 'posix') ? parseBash(task.source, task) : new Promise((resolve, reject) => {
         const child = ensurePwsh();
         const reqId = ++requestSequence;
         pwshRequest = { resolve, reject, reqId, child, stderrBytes: 0 };
@@ -132,7 +134,7 @@ export function createShellParsers(options = {}) {
     async parse(dialect, source, { signal } = {}) {
       if (disposed) throw failure('DISPOSED', 'Shell parsers disposed');
       if (dialect === 'pwsh') dialect = 'powershell';
-      if (!['bash', 'powershell'].includes(dialect)) throw failure('DIALECT', 'Unsupported shell dialect');
+      if (!['bash', 'powershell', 'posix'].includes(dialect)) throw failure('DIALECT', 'Unsupported shell dialect');
       if (typeof source !== 'string' || Buffer.byteLength(source) > limits.maxInputBytes) throw failure('INPUT_LIMIT', 'Shell input exceeded budget or is not text');
       if (signal?.aborted) throw failure('CANCELLED', 'Shell parsing cancelled');
       if (queue.length >= limits.maxQueue) throw failure('BUSY', 'Shell parser queue full');

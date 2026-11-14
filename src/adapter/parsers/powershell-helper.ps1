@@ -94,7 +94,65 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             }
             if (-not $defined) { $unknown.Add('PowerShell member/type expression'); break }
         }
-        $response = @{ reqId = $request.reqId; commands = @($commands.ToArray()); unknown = @($unknown.ToArray()) }
+        # State-invalidating statement semantics. These constructs can change variables, the
+        # environment or the working directory, or gate/repeat execution, so any fixed target
+        # set derived from the literal command list is not trustworthy. Flag explicitly even
+        # when no command node was produced (e.g. a bare `$env:X = 'v'` assignment).
+        $assignNodes = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)
+        foreach ($a in $assignNodes) {
+            $isEnv = $false
+            $left = $a.Left
+            if ($left -is [System.Management.Automation.Language.ConvertExpressionAst]) { $left = $left.Child }
+            if ($left -is [System.Management.Automation.Language.VariableExpressionAst] -and $left.VariablePath.UserPath -imatch '^env:') { $isEnv = $true }
+            if ($isEnv) { $unknown.Add('PowerShell environment variable assignment changes state') }
+            else { $unknown.Add('PowerShell variable assignment changes state') }
+        }
+        $loopNodes = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.LoopStatementAst] }, $true)
+        foreach ($loop in $loopNodes) { $unknown.Add('PowerShell loop statement repeats execution') }
+        $ifNodes = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] }, $true)
+        foreach ($ifNode in $ifNodes) { $unknown.Add('PowerShell conditional statement gates execution') }
+        $tryNodes = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] }, $true)
+        foreach ($tryNode in $tryNodes) { $unknown.Add('PowerShell try/catch statement gates execution') }
+        $switchNodes = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.SwitchStatementAst] }, $true)
+        foreach ($switchNode in $switchNodes) { $unknown.Add('PowerShell switch statement gates execution') }
+        $trapNodes = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TrapStatementAst] }, $true)
+        foreach ($trapNode in $trapNodes) { $unknown.Add('PowerShell trap statement installs a handler') }
+        # Implicit startup code: `#requires` can auto-import modules/assemblies/snapins at run
+        # time (before any command runs). Non-empty requirements are executable and NOT proven
+        # by the command list alone. A bare `#requires -Version` gate is benign.
+        $req = $ast.ScriptRequirements
+        if ($null -ne $req) {
+            if ($null -ne $req.RequiredModules -and $req.RequiredModules.Count -gt 0) { $unknown.Add('#requires -Modules auto-imports modules at runtime') }
+            if ($null -ne $req.RequiredAssemblies -and $req.RequiredAssemblies.Count -gt 0) { $unknown.Add('#requires -Assembly loads assemblies at runtime') }
+            if ($null -ne $req.RequiredPSSnapins -and $req.RequiredPSSnapins.Count -gt 0) { $unknown.Add('#requires -PSSnapin loads snapins at runtime') }
+        }
+        # `using` statements run module/assembly/namespace resolution before commands execute.
+        # Flag EVERY using statement (including `using namespace`) so unnamed startup-time
+        # resolution is never silently trusted; nothing is executed here.
+        if ($null -ne $ast.UsingStatements -and $ast.UsingStatements.Count -gt 0) {
+            $unknown.Add('PowerShell using statement runs module/assembly/namespace resolution at startup')
+        }
+        # Executable/declarative constructs that can run code or load types but produce no
+        # CommandAst (attribute arguments, type/class definitions, type constraints, data
+        # blocks, dynamic parameters). Flag conservatively.
+        $executableTypes = @(
+            'System.Management.Automation.Language.TypeDefinitionAst',
+            'System.Management.Automation.Language.FunctionMemberAst',
+            'System.Management.Automation.Language.DataStatementAst',
+            'System.Management.Automation.Language.DynamicParamBlockAst',
+            'System.Management.Automation.Language.AttributeAst',
+            'System.Management.Automation.Language.TypeConstraintAst'
+        )
+        $execNodes = $ast.FindAll({ param($n) $executableTypes -contains $n.GetType().FullName }, $true)
+        foreach ($execNode in $execNodes) {
+            $typeName = $execNode.GetType().Name
+            $unknown.Add("PowerShell $typeName construct can execute or load code")
+        }
+        # Deduplicate unknown reasons while preserving order.
+        $unknownUnique = [Collections.Generic.List[string]]::new()
+        $seenUnknown = @{}
+        foreach ($reason in $unknown) { if (-not $seenUnknown.ContainsKey($reason)) { $seenUnknown[$reason] = $true; $unknownUnique.Add($reason) } }
+        $response = @{ reqId = $request.reqId; commands = @($commands.ToArray()); unknown = @($unknownUnique.ToArray()) }
         [Console]::WriteLine((ConvertTo-Json -InputObject $response -Depth 20 -Compress))
     } catch {
         [Console]::WriteLine((ConvertTo-Json -InputObject @{ reqId = $request.reqId; error = 'PowerShell parser rejected input' } -Compress))

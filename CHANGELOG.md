@@ -1,328 +1,201 @@
 # Changelog
 
-## 0.1.1（2026-11-12）
+本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
-- 声明口径统一：`engines.dsh` 由缺省改为 `>=0.2.1-rc.2 <0.3.0-0`（此后宿主侧版本门禁只读 `engines.dsh`，不再依赖 peer 推断）；`@deepseek-ai/dsh-settings` peer 同步改为同一区间，与 `ctx.settings` 的实际使用对应。
-- 行为零变化：不改任何运行期代码。已在 DSH 0.2.2-rc.1 上实测加载（插件 `fiberPhase=active`，设置页与工具护栏均可用）。
-- 兼容面：同时覆盖 0.2.1-rc.2 与 0.2.2-rc.1；上限 `<0.3.0-0` 表示未对 0.3 作承诺。
+## 0.2.0
 
-## 0.1.0（2026-10-17，版本线重置，未发布）
+### 灾难性删除标准、git 分级与框架工具放宽（v4）
+
+- **口径调整**：插件只防**灾难性删除**，分三级——L1 直接拒绝（物理设备、宿主系统整树、`.git` 元数据、销毁 git 历史的子命令）；L2 可识别命令行删除计数，≤20 放行、>20 拒绝；L3 其余一律放行。不再声称“拦截所有删除”。
+- **未知程序名放行**：`Test-Path`/`Copy-Item`/`New-Item`/`whoami` 等未建模程序不再因名字拒绝。执行通道（`env/xargs/sudo/start/source`、WSL、无法分析的 shell 脚本、动态命令文本）仍拒绝。
+- **git 分级与证据计数**：`git` 从命令名拒绝表移除，改由 `assessGit` 分类——允许 `status/log/add/commit/branch/switch/merge/rebase/fetch/pull/reflog/rev-parse`、`worktree add|list|prune`、`branch -D`、`tag -d`、裸 `gc`；立即拒绝 `stash clear|drop`、`gc --prune=now`、`filter-branch`、`filter-repo`、`push --force/-f/--delete/--mirror`、无路径的 `reset --hard`、`reflog expire --expire=now --all`（`DI-GIT-REFUSE`）。`git clean`（非 `-n`）/`restore <paths>`/`worktree remove <path>` 接入 `git-evidence` 模块计数：clean 与 restore >20 拒绝；worktree remove 要求工作树干净（零未跟踪/未提交改动）、非分离 HEAD、非主 worktree、可重建之外的可忽略条目 ≤20；证据模块不可用一律 fail-closed。git 的 allow 命令不进入通用文件扫描。
+- **框架工具放宽**：`create_worktree`、`terminal_open`、**全部** `plugin_manager` 动作放行。
+- **`terminal_send` 就地解析**：其 `text` 按平台方言作为命令行分析——可识别删除照常计数/拒绝，无法分析的文本拒绝；`run_code` 仍整体拒绝。
+- **`copy` 放行 / `move` 计源删除**：`copy` 不删源、不进删除门禁；`move` 的源删除按 L2 计数，>20 拒绝。
+- **边界口径**：工作区之外的删除同样进入 L2 计数（>20 拒绝），不因“在边界外”本身拒绝；物理设备/系统树/`.git` 的 L1 保留。
+- 设置页保护范围与能力边界文案按灾难标准改写（中英一致）。决策见 [DSR-020](docs/decisions/DSR-020-灾难性删除标准.md)。
+
+### 语言运行时放行、shell 脚本分析与统一删除强提示（v3）
+
+- **放行语言运行时脚本**：`node/nodejs/python/python3/py/perl/ruby/php/deno/bun/uv` 作为不透明脚本运行器直接允许（不产生删除操作、不计数）。内联代码开关（`node -e/--eval/-p/--print/-i`、`python -c`、`perl -e/-E`、`ruby -e`、`php -r`、stdin `-`）仍以 `DI-INLINE-CODE` 拒绝。
+- **shell 脚本文件 AST 分析**：`bash/sh/dash/zsh <脚本文件>` 与 `pwsh/powershell -File <脚本文件>` 在字面路径、存在、常规非链接文件、≤1MiB、编码可判定（UTF-8（含 BOM）、UTF-16LE BOM）时读取文本按该方言解析并计数其内删除；缺失/非常规/过大/编码未知/`source`/`eval`/动态构造→unknown 拒绝。不支持 `./x.sh` 路径限定可执行或 `cmd /c file.bat`。既有 `bash -c`/`pwsh -Command` 语义不变。
+- **统一删除强提示**（`DELETION_DOCTRINE`）：所有删除相关的拒绝与受保护文件审批附加同一句英文强提示——要求先列明并核对确切文件集，无法枚举即不得删除。
+- 设置页保护范围文案更新：删除需先计数、>20 未白名单拒绝；语言运行时脚本放行；shell 脚本在可分析时按其内容计数、无法证明时拒绝。
+
+### 二次收紧：白名单证据化、挂载边界、预览与边界细化
+
+- 白名单从「形态匹配即减计数」改为**形态匹配 + 证据证明**双重通过才减计数（新增 `disposable-evidence` 证据适配器）：要求可信项目边界精确段包含、非归档/依赖域、非链接逃逸、Git 未跟踪且状态可证、以及配对再生源（Python `.py`、Maven `.java`、TS 有限子集）。未通过一律照常计数。
+- **取消 Cargo 依赖产物自动豁免**：`target/*/deps/*` 照常计数；`Cargo.toml` 仅保留为项目边界 marker。TypeScript 明确**有限子集**支持（显式 `tsBuildInfoFile` 与 `rootDir+outDir` 官方公式；仅 `outFile` 无覆盖时照常计数）。
+- 新增**挂载边界**适配器：Linux 用 `/proc/self/mountinfo` 有界一次快照，拒绝删除目标处/内部的挂载点（含同设备 bind 挂载）与 boundary→target 跨越；挂载清单不可用/畸形/过期→拒绝。Windows 保留既有 metadata/junction 行为。
+- 新增**真实 `Remove-Item -WhatIf` 预览**语义：预览命令不进入删除清单/数量门禁，但仍做路径/凭据扫描；混合调用中真实删除部分仍全量计数；`-Confirm` 非预览。
+- 新增**纯 provider/path 谓词**（`isUnsupportedProviderPath`）：拒绝 `Registry:`/`Variable:`/`FileSystem::`/`http:`/裸 `C:foo` 等非本地文件系统路径，在解析前统一拒绝。
+- **项目边界与执行 cwd 分离**；边界包含按精确段、区分大小写比较；共享单一扫描预算，超预算拒绝；非法文件名（U+FFFD / 非 well-formed）整次清单拒绝，不漏计。
+
+### 严格删除门禁与固定文件级白名单
+
+- 新增**执行前删除计数与 20 文件硬门禁**：整次调用内统计未命中白名单的常规文件 + 删除的链接条目，目录去重单独报告；`<=20` 完整枚举，`>20` 硬拒绝，不声称精确总数或并发原子。
+- 新增**严格未知/不透明拒绝**：未知命令/效果、不透明 shell/解释器/脚本、未知可执行、Git hooks/aliases、分页器、`-exec`、启动/profile 文件、重定向与副作用显式拒绝；未审查工具默认拒绝。
+- 新增 **WSL/跨域删除拒绝**：不假设 `/mnt/X` 映射；Windows 上的 bash 删除域无法对应到 Node 路径时要求改用 literal 的 `Remove-Item`。
+- 新增**固定文件级白名单**（Python 字节码、pytest、mypy、Maven class、TypeScript buildinfo 等）：只识别常规文件、不读内容、不整树豁免、不支持用户自加；命中只减计数不减保护。
+- 新增决策 DSR-019，明确并发与授权边界：审批/自报/dry-run 不构成删除授权，审批后重新计数。
+
+## 0.1.1
+
+- 声明口径统一：`engines.dsh` 由缺省改为 `>=0.2.1-rc.2 <0.3.0-0`；`@deepseek-ai/dsh-settings` peer 同步为同一区间。
+- 行为零变化：不改运行期代码。兼容面覆盖 `0.2.1-rc.2` 与 `0.2.2-rc.1`；上限 `<0.3.0-0` 表示未对 0.3 作承诺。
+
+## 0.1.0（版本线重置，未发布）
 
 - 版本线从 3.2.1 重置为 0.1.0：DSH 仍处 0.2.1-rc.2 预发布，插件暂不承诺跨宿主版本的 API/配置稳定性；0.x 内破坏性变更升 minor，兼容功能/修复升 patch。
-- 当前源码包含此前未发布的 3.2.0 配置键改名与 3.2.1 设置页改动（宽度跟随内容列、长说明收进 info）；旧 3.x 条目保留为历史，不删除、不改写。
-- 插件卡片与设置页头部使用包图标：36×36 双色盾牌 `icon.svg`；`package.json` 声明 `"icon": "./icon.svg"` 并纳入 `files`。纯静态元数据，不改变运行期行为。
-- test 实例的安装记录仍是 3.1.0；版本号重置不等于已安装版本变化，需重装/重链或新建实例后核对管理面，不能把源码 0.1.0 写成实例已装 0.1.0。
-- 验证：`npm test` 465 项（397 通过、0 失败、68 跳过，约 8.7 秒）；`settings-client.test.mjs` 6/6；`npm pack --dry-run --json` 确认 `icon.svg` 与 `package.json` 进入 tarball；`node tools/plugin-layering-check.mjs plugins/dsh-guardrails` 通过。运行中 test 实例未重装/重启，卡片与设置页头部的实际显示待用户刷新后走查。
+- 当前源码包含此前未发布的 3.2.0 配置键改名与 3.2.1 设置页改动；旧 3.x 条目保留为历史。
+- 插件卡片与设置页头部使用包图标：36×36 双色盾牌 `icon.svg`（纯静态元数据）。
 
-> 3.x 为版本线重置前的历史（均未发布），保留备查；当前线从 0.1.0 起。
+## 3.2.1（未发布）
 
-## 3.2.1（2026-10-17，未发布）
+- 设置页移除内容宽度 680px 上限，改为跟随 Plugins 页内容列（最大 960px）。
+- 设置页优先简洁：字段长说明收进标签旁的 info 展开器，可见区只保留短提示与校验错误。
 
-- 设置页移除内容宽度 680px 上限，宽度改为跟随 Plugins 页内容列（最大 960px），不再在 960 列里留下空列；`settings-client.test.mjs` 增加对应源码断言。浏览器视觉与窄屏走查未做。
-- 设置页优先简洁：字段长说明收进标签旁的 info 展开器（原生 button + `aria-expanded`/`aria-controls` + `role="region"`，复制官方 Info 图标）；可见区只保留短提示与校验错误；`settings-client.test.mjs` 增加 info 断言（6/6），全量 465 项（397 通过、0 失败、68 跳过）。浏览器视觉、info 展开与窄屏走查未做。
+## 3.2.0（未发布）
 
-## 3.2.0（2026-10-17，配置键改名，未发布）
+- 配置键 `credentialsReadAsk` 更名为 `builtinSensitiveAsk`：旧名把范围说窄成“凭据”、动作说窄成“读”，而名单实际包含系统凭据库与分页/休眠文件。不提供别名，旧键按 `unknown config key` 在挂载时显式失败。决定见 [DSR-018](docs/decisions/DSR-018-内置敏感文件名单改名.md)。
+- 设置页文案对齐：字段「敏感文件」改为「自定义敏感文件」，开关改为「内置敏感文件」。
 
-- 配置键 `credentialsReadAsk` 更名为 `builtinSensitiveAsk`。旧名把范围说窄成“凭据”、把动作说窄成“读”，而名单实际包含系统凭据库与分页/休眠文件，语义已覆盖读/导出/写/删/移。旧名只存在于未发布的 2.0.0–3.1.0 开发线，本机 profile 无持久化值；不提供别名，旧键按 `unknown config key` 在挂载时显式失败。
-- 设置页文案对齐：字段「敏感文件」改为「自定义敏感文件」，开关改为「内置敏感文件」，提示列出实际四类；行为、判定与审批语义零变化。决定见 [DSR-018](docs/decisions/DSR-018-内置敏感文件名单改名.md)。
-- 验证：以 0.2.1-rc.2 运行时全量 464 项（400 通过、0 失败、64 条已声明语料跳过）；未重装、未重启 test 实例，现场经 HMR 已加载新 schema。
+## 3.1.0（适配 DSH 0.2.1-rc.2，未发布）
 
-## 3.1.0（2026-10-17，适配 DSH 0.2.1-rc.2，未发布）
+- 目标运行时升级到 `0.2.1-rc.2`：`@deepseek-ai/dsh-settings` peer 下限抬到 `^0.2.1-rc.2`；0.2.0 及更早会被 peer 门禁禁用。
+- 设置页改用官方 `plugins.row.config` + `ctx.configForms.get('guardrails')`：订阅 Host 快照、读取 revision/writable、一次 `mutate` 提交三字段；字段几何、保存键与文案对齐官方 `SettingsForm`/`fields`；只用主题 token，不引用 Harness Client 包。
+- `run_code` 适配 0.2.1 的 Agent `ctx`/`workingDirectory` 契约；仅测试夹具适配，生产防护语义不变。
 
-- 目标运行时升级到 `0.2.1-rc.2`：`@deepseek-ai/dsh-settings` peer 下限抬到 `^0.2.1-rc.2`；0.2.0 及更早会被 peer 门禁禁用，不静默降级。
-- 设置页改用 0.2.1 的官方 `plugins.row.config` + `ctx.configForms.get('guardrails')`：订阅 Host 快照、读取 revision/writable、一次 `mutate` 提交三字段；不依赖页面一次性 `props.form`。设置页按官方 `SettingsForm`/`fields` 复制：字段 12px 纵向 padding + 0.5px 分隔线，34px 控件与 `--dsw-radius-md`、`bg-layer-3`，保存键沿用官方 `.save` 的 13px/`5px 14px`/`label-primary`，文案用官方「保存」/「Save」，保存中「保存中…」/「Saving…」；类名统一 `gr-` 前缀、只用 token，不 `require` 任何 Harness Client 包。未修改或输入非法时禁用保存，成功保存后回到未修改态，不额外显示成功文案。保留原生主题、双语 locale 和秒/毫秒转换；移除未保存标记，离开页面即丢弃草稿。
-- 0.2.1 的 `run_code` 需要 Agent `ctx` 与 `workingDirectory` 服务，PTC 释放走 `agent.ctx.effect`；仅测试夹具适配，生产防护语义不变。
-- 以 0.2.1-rc.2 运行时全量验证 464 项：400 通过、0 失败、64 条已声明语料跳过，约 10.9 秒。test 实例 `install_bundle` 返回 `applied`（changed=true，version=3.1.0），Host Config schema 与 Client slot occupant 均可见，普通 pwsh 命令放行验证通过。
-- 尚未完成：浏览器页面保存/明暗/窄屏走查、Linux 实跑、97,050 历史回放、完整启动门禁。决定与边界见 [设置页记录](docs/verification/2026-10-17-settings-ui.md)。
+## 3.0.0（实施中、未发布）
 
-## 3.0.0（计划，2026-10-17，实施中、未发布）
+- 方案对应计划包版本 3.0.0：从 ask-only/依赖 Auto Review 改为 Full Access 下 `Deny > Ask > Allow`；官方持久 pwsh helper + 固定官方 shfmt v3.12.0 typed AST，目标 Windows x64、Linux x64/arm64，不保留自研 tokenizer 回退。决定见 [DSR-017](docs/decisions/DSR-017-官方AST与最终硬门禁.md)。
+- 异步 pre-execute 分析，以同 execution 对象 WeakMap 关联，同步 guard 做最终门禁；解析器/协议/关联结果故障 fail-closed。
+- `sensitiveFiles` 保持 Profile 精确文件；审批自有默认 120000 ms，legacy `0` 映射 120000 ms。
+- 候选 Git/链删/云/数据库/容器/系统逐命令矩阵不默认启用。
 
-本轮“V2”方案对应计划包版本 3.0.0；下列为已确认重构目标，最终实现和通过结果由主 agent 补入验证记录，不表示已安装部署。决定见 [DSR-017](docs/decisions/DSR-017-官方AST与最终硬门禁.md)。
+## 2.1.0（未发布）
 
-- 从 ask-only/依赖 Auto Review 改为 Full Access 下 `Deny > Ask > Allow`；官方持久 pwsh helper + 固定官方 shfmt v3.12.0 typed AST，目标 Windows x64、Linux x64/arm64，不保留自研 tokenizer 回退。
-- 异步 pre-execute 分析，以同 execution 对象 WeakMap 关联，同步 guard 做最终门禁；解析器/协议/关联结果故障 fail-closed，语义 Unknown 不自动 Deny。
-- `credentialsReadAsk` 保留名称，扩展为敏感内容读/导出/写/删/移；`sensitiveFiles` 保持 Profile 精确文件。审批自有默认 120000 ms，legacy `0` 映射 120000 ms，不再无限等待。
-- 官方 schema 自动设置取代旧 client 自绘。高置信凭据结果完整遮罩和内联凭据纠正型 Deny 按已确认政策实施，Native/PTC 真正出口范围待验，不承诺零泄漏。
-- 候选 Git/链删/云/数据库/容器/系统逐命令矩阵不默认启用；普通清理与正常非强制 Worktree 回收保持低干预。
-- 初始基准：73 tests 通过、约 406 ms；`pnpm test` 自动依赖安装 EPERM 失败，直接 Node 测试通过。该结果不是重构最终验证。未完成 Linux 实跑、97,050 历史回放或本轮安装部署，见 [验证记录](docs/verification/2026-10-17-v2-refactor.md)。
-
-以下 2.x/1.x 条目保留历史语义和取证，不构成本轮验收。
-
-## 2.1.0（2026-10-17，未发布）
-
-**新增：插件自有审批超时**（`askTimeoutMs`），决策记录见 [DSR-016](docs/decisions/DSR-016-插件自有审批超时.md)——收窄 DSR-015 的 T-A 边界（全局等待上限仍属上游，本插件只约束自己发起的 ask）。
+**新增：插件自有审批超时**（`askTimeoutMs`），决策见 [DSR-016](docs/decisions/DSR-016-插件自有审批超时.md)——收窄 DSR-015 的 T-A 边界（全局等待上限仍属上游，本插件只约束自己发起的 ask）。
 
 - 配置新增 `askTimeoutMs`（整数毫秒，默认 `0` = 关闭，上限 3600000，全 `.volatile()`）；`0` 时仍返回原生 `{ kind: 'ask' }`，行为零变化。
-- `> 0` 时插件自己调用 `approval.request({ …, signal: AbortSignal.any([exec.signal, 计时器]) })`：到点 abort，客户端弹窗随 `signal` 收起，工具调用以**明确的自动拒绝**结束（文案明示"不是用户拒绝、不要反复重试"），控制台记 `[guardrails] ask timed out after Nms`。
-- 审批层失败改为 **fail-closed**（无 approval 服务 / 无 agent / 请求抛错 → deny）；判定层异常仍 fail-open（DSR-015 不变）。
-- 结果映射与 `tools/serviceAsk` 逐字对齐，落在新的 `src/core/ask-decision.js`；词表外的结果一律拒绝（绝不读成放行）。
+- `> 0` 时插件自己调用 `approval.request`：到点 abort，客户端弹窗随 `signal` 收起，工具调用以明确的自动拒绝结束（文案明示“不是用户拒绝、不要反复重试”）。
+- 审批层失败改为 **fail-closed**；判定层异常仍 fail-open（DSR-015 不变）。
 - 配置页新增「审批超时（毫秒）」行（数字输入 + 本地校验 + 覆盖/重置徽标）。
-- 测试 58 → **73 例**（新增 `test/ask-timeout.test.mjs` 15 例：默认不接管、授权放行、计时器清理、拒绝/不可用/无通道文案、调用方取消、超时触发、超时不放行、请求抛错 fail-closed、审计行恰一条、未知结果 fail-closed、非敏感不触达、挂载校验）。
-- 实例验证（test，0.2.0-rc.2，2026-10-17）：配 `askTimeoutMs: 2000` 后读合成凭据 fixture 不点弹窗，约 2 s 返回超时自动拒绝，审计 `asked` → `cancelled`；改值/改源码均热生效。取证见 `docs/technical-details/部署.md`「v2.1.0 实例门禁」。
-- 已知边界：超时与用户取消在审计里同为 `cancelled`（结果词表封闭）；只约束本插件发起的审批，Auto Review 等来源的弹窗仍无超时。
 
-## 2.0.0（2026-10-16，未发布）
+## 2.0.0（未发布）
 
-**不兼容重构：从「guard 硬阻断」到「pre-execute 原生审批」的职责收缩**，按 `references/dsh-guardrails` 已确认设计基线（B / B-2 / C / A / T-A，2026-10-16 六轮研讨）实施；决策记录见 [DSR-015](docs/decisions/DSR-015-审批式敏感读与职责收缩.md)。
+**不兼容重构：从「guard 硬阻断」到「pre-execute 原生审批」的职责收缩**，决策见 [DSR-015](docs/decisions/DSR-015-审批式敏感读与职责收缩.md)。
 
-### 语义变化（破坏性）
-
-- **不再拒绝任何调用**：删除 `ctx.tools.guard` 钩子与全部 deny 路径；对敏感文件**内容读取**返回 `tools/pre-execute` `{ kind: 'ask' }`，由 DSH 原生一次性审批（allow-once）决定，拒绝/取消/无审批通道时不执行。
-- **规则收缩为两层**：内置窄凭据名单（具名私钥、注册表令牌、AWS credentials、Hive/转储、DSH 凭据文件）+ 用户标记的精确绝对路径（`sensitiveFiles`）。
-- **退役类别**：`.env` 全局拦截、`.git` 内部拦截、系统区写（W0）、破坏性命令八子族、`unverifiable` fail-safe、目录段/密钥后缀/浏览器/DPAPI 规则——上下文相关判断交 DSH 原生 Auto Review 与 OS 权限。
+- **不再拒绝任何调用**：删除 `ctx.tools.guard` 钩子与全部 deny 路径；对敏感文件**内容读取**返回 `tools/pre-execute` `{ kind: 'ask' }`，由 DSH 原生一次性审批（allow-once）决定。
+- **规则收缩为两层**：内置窄凭据名单 + 用户标记的精确绝对路径（`sensitiveFiles`）。
+- **退役类别**：`.env` 全局拦截、`.git` 内部拦截、系统区写、破坏性命令子族、`unverifiable` fail-safe、目录段/密钥后缀/浏览器/DPAPI 规则——上下文相关判断交 DSH 原生 Auto Review 与 OS 权限。
 - **触发面收窄为读取**：`read`/`read_image`/单文件 `grep`；`glob`、目录级搜索、一切写改删不触发。
-- **配置换代**：`sensitiveFiles: string[]`（相对路径/通配符挂载即失败）+ `credentialsReadAsk: boolean`，两字段全 `.volatile()`；v1 的六键配置不再被接受（挂载报 unknown config key）。
-- **peer 抬到 `@deepseek-ai/dsh-settings ^0.2.0-rc.2`**：在 0.1.7-rc.2 上该行被 peer 门禁静默禁用；升级顺序=先实例后插件，旧运行时用 v1.7.0 发布物。
+- **配置换代**：`sensitiveFiles: string[]` + `credentialsReadAsk: boolean`，两字段全 `.volatile()`；v1 的六键配置不再被接受。
 
-### 客户端
-
-- 配置卡片改为「内置名单开关 + 标记路径编辑器（每行一个绝对路径，本地校验绝对性与通配符）」，仍由官方 `SettingsForm`/`SettingsFormModel` 驱动；slot 键与命名空间不变（`dsh-guardrails#guardrails` / `guardrails`）。
-
-### 测试与工具
-
-- 测试矩阵重写为 V2 语义：58 例全绿（目标匹配/退役消融/配置校验/生命周期/设置接缝/客户端布线/审批文案），行覆盖 99.22%。
-- 删除 `check-command.js`/`command.js`/`destructive.js`/`deny-messages.js` 与 `tools/corpus-replay.mjs`（其依赖的会话日志格式知识已随 format v4 过时）；`corpus` npm 脚本移除。
-- `verify/run-verify.mjs` 干净安装断言更新到新文件清单；组合断言、覆盖率门禁、tarball 冒烟保持。
-
-### 审批超时（T-A）结论
-
-DSH `0.2.0-rc.2` 原生审批链**没有等待超时**（源码核查 2026-10-16）；无人值守姿态为会话 `approval policy = never`。统一等待上限属 DSH Approval Service / Host answerer 公共边界，本插件不实现。
-
-### 待办（部署侧）
-
-- test 实测场重挂 + 实例级门禁（启动冒烟、真实 ask 弹窗、Auto Review 组合、`never` 策略行为）——须用户授权启动 test 实例。
-- web profile 当前钉在 v1.7.0 发布物（`github:#fb587cb`）；迁移 v2 须先升实例到 0.2.0-rc.2，再过 test 门禁后换 ref。
-
-## 1.7.0（2026-10-06）
-
-### test 实测门禁：已重挂 test 实测场并完成实例级启动门禁（2026-10-06）
-
-用户授权后以 `link:` 源码直挂重挂 `homes\test`（bundles = base + web-app + **dsh-guardrails**；挂载时该实例 `running=false`，不构成共用 HOME）。用户启动 test 实例后完成门禁：
-
-| 门禁项 | 结果 |
-| --- | --- |
-| `--dump-config` | ✅ 1257 行、`id: guardrails` **恰 1 次**、来源 `# == dsh-guardrails`、**无 `disabled`** |
-| 无 `N entries did not activate` / `startup failed` / `disabling profile plugin` | ✅ 当前启动块（挂载后那次）**全部 0 次** |
-| 行达 ACTIVE | ✅ RPC `POST /api/settings/describe` 返回 `ns:"guardrails"` + 六字段齐现（`describe()` 按 `fiber.state === ACTIVE` 过滤，见 `settings/src/index.ts:307`；六字段齐现即全 volatile） |
-| 构建新鲜度 | ✅ 进程启动 12:32:01 晚于挂载 12:27:17 |
-| **功能冒烟** | ⏳ **待用户手动做**（用户选择不发提示词）——判据见 `technical-details/部署.md` 该节 ⑦ |
-
-⚠️ 实测踩到的判读陷阱：该实例日志是**跨多次启动的追加文件、无行内时间戳**，历史块长期留着 `2 entries did not activate` 与 skill-manager/unity-search 的 `webServer` 报错。**全文 grep 会把历史告警误判为本次失败**；须按最后一次启动边界切片，或直接用 RPC（不依赖日志）。本次已确认当前组合里根本没有这两个插件，故其报错必属历史。
+## 1.7.0
 
 ### 安全修复：深度上界曾可致「系统区写」绕过（DSR-012 后果条更正）
 
-- **原判被实测推翻**：`MAX_SUBEXPRESSION_DEPTH = 8` 的注释称"停止展开是保守方向，因为外层已看见文本"。实测证明该论断**只对全文本正则类成立**，对**片段解析类不成立**：
-  - 判据设计（避开"顶层已命中"的混淆）：同一文本比较「完整判定（会递归）」与「仅跑本级（depth=MAX）」。两者同拦 ⇒ 递归未参与；只有「完整拦 / 仅本级放」才证明递归必要。凭据/env/git/machine 全部属前者（任意深度都由顶层文本扫描命中）。
-  - **唯有 `system.write` 依赖递归**：depth≥1 时顶层片段只剩 `writeoutput`，系统区写需解析出 write 动词 + 静态路径。
-  - **绕过实证**：`Set-Content C:/Windows/x y` 包裹 **9 层** `Write-Output "$( ... )"` ⇒ 放行（0..8 层拦）；并用临时文件验证 **PowerShell 真的执行**了内层写。
-- **修复**：到界不再 `return undefined`，改为 **fail-closed**（子表达式未展开即拒绝），并由既有 `unverifiable` 键门控（DSR-006：每层可配；复用"无法静态验证即拒绝"的同一语义，不新增配置面）。
-- **误伤实测**：26,834 条真实命令中嵌套深度 ≥8 的 **0 条**（分布 0→21280 / 1→5420 / 2→64）⇒ 新增误伤 **0**。
-- **消融**：把到界分支改回旧行为后，2 个新用例精确转红。
+- **原判被实测推翻**：子表达式展开深度上限的注释原称“停止展开是保守方向，因为外层已看见文本”。实测证明该论断只对全文本正则类成立，对片段解析类不成立——`Set-Content <系统区路径>` 经多层 `Write-Output "$( ... )"` 包裹可绕过；到界现改为 **fail-closed**。
+- 误伤实测：真实命令语料中嵌套深度 ≥ 上限的条目为 0，新增误伤 0。
 
 ### 安全修复：私钥后缀进入命令文本通道（DSR-014）
 
-- **缺口**：后缀规则此前只在**路径层**，文本层没有 ⇒ 密钥搬出 `.ssh` 后 `read C:/keys/prod.pem` 拦、而 `ssh -i C:/keys/prod.pem …` **放行**（`~/.ssh/*.pem` 之所以拦得住靠的是**目录段**而非后缀）。
-- **决定（按实测分档，非一刀切）**：新增 `CRED_TEXT_SUFFIXES`（由 `CRED_SUFFIXES` 派生、**去掉 `.key`**）。同一 26,870 条语料逐条看**实际匹配子串**：`.pem/.p12/.pfx/.ppk` 新增 7 条**全部为真**（`cert.pem`、`admin-singapore.pem`）；`.key` 新增 24 条**全部为误报**（`$_.Key`/`event.key`/`i.key`/`[section.key`，均为属性访问）⇒ `.key` 有意只留路径层。
-- 两套引用集（宽松/严格）都含该分支（后缀命中即"引用了密钥物质"，与 DSR-013 的读写拆分无关）；`.pub` 照旧排除。
-- **消融**：把 `CRED_TEXT_SUFFIXES` 置空后，2 个新用例精确转红。
-
-### 工具修复：`verify/run-verify.mjs` 不再静默用错目标（TODO 已办结）
-
-- **原状**：四处默认是 `~/.dsh` + nvm4w 遗留全局 CLI（0.1.1 代际），与任何启动器托管实例无关 ⇒ 第 3 步报**假失败** "test 行数=0"，第 4 步因该 HOME 无 `test` profile 立即退出。这正是本仓库反复入册的"静默用错版本、再报假失败"。
-- **修复**：改由 **`dshl env --json` 现查**（instance HOME + version_bin）；**无法解析目标时判 SKIP 而非 FAIL**，并在启动回显里标 `(未解析)`。实测：不设任何变量即正确解析到 `homes\test` / `homes\stable-dev` + `0.1.7-rc.2` bin。
+- **缺口**：后缀规则此前只在路径层，文本层没有，故密钥搬出 `.ssh` 后命令文本通道可放行。
+- **决定**：新增文本后缀匹配（含 `.pem/.p12/.pfx/.ppk`，有意排除 `.key` 以避免属性访问误报）；两套引用集都含该分支，`.pub` 照旧排除。
 
 ### SSH 可用性：`~/.ssh/config` 读放行 + 别名引导（DSR-013）
 
-- **问题**：凭据目录段规则（DSR-002 严格策略）把 `.ssh` 下**一切**文件当密钥物质，其中包含 `~/.ssh/config`。后果有二：① 把"用别名"这条正路堵死——密钥不该由 Agent 持有，推荐的 `ssh <别名>` 需要别名清单，而 config 不可读、`glob ~/.ssh` 也被拦 ⇒ 别名只能靠人肉告知或写进 AGENTS.md 并随之漂移；② 拦截语义与防护目标错位——守卫实际守的是密钥**物质**（`ssh <别名>` 用着私钥却放行，`ssh -i <key>` 才拦），config 这种纯路由信息没有理由按密钥对待。拒绝文案亦只让用户手工处理，未给出 SSH 场景的可行替代路径。
-- **决定（方向 C：具名最小例外 + 文案引导）**：新增 `SAFE_CRED_DIR_FILES`（**按目录段**声明该目录下可豁免的文件名，当前唯一 = `{ .ssh: [config] }`）。例外**只对直接父目录且为末段**的具名文件生效，**且仅限读/列举通道**——`~/.ssh/config` 放行；`id_rsa`、`*.pem`、`known_hosts`、`config.bak`、`sub/config`、`glob ~/.ssh`、`write/edit ~/.ssh/config`、`.kube/config`（真令牌存储）全部维持拦截。目录段正则由 `CRED_DIR_SEGMENTS` + 该表**派生**（不再手写），保持 DSR-004 单一维护点。
-- **读/写通道必须同宽**：例外是只读的，故新增 `CRED_TEXT_REFERENCE_STRICT`，`check-command.js` 按内容级别选用（`read`/`list` 用宽松版，`modify` 与 fail-closed 的 `unknown` 用严格版）；路径通道 `pathTargetsCredentials(resolved, allowSafeDirFiles)` 同样按 `modifying` 取严格版。否则 `Set-Content ~/.ssh/config` 会从 pwsh 通道溜过而 `write` 工具被拦——正是 DSR-004 镜像名单所要防的绕过。
-- **文案**：凭据拒绝消息新增 SSH 引导（走 config 里的 `Host` 别名 `ssh <别名>`；`ssh -G <别名>` 查生效的主机/用户/密钥；不要读密钥、不要用 `-i` 拼路径）。该文案引用 config 路径**不会被自己拦**——避免复现 DSR-010「引用守卫自己的拒绝原文反被拦」那类误伤。
-- **已知缺口（未修，记录在案）**：命令文本的凭据正则不含 `.pem` 等**后缀**匹配，故密钥不在 `.ssh` 下时 `ssh -i C:/keys/x.pem …` 在 pwsh 通道不命中（路径通道仍拦）。此为 DSR-013 之前既有缺口，本次刻意不扩面。
-- 决策见 [DSR-013](docs/decisions/DSR-013-ssh-config安全例外与别名引导.md)；机制见 `technical-details/规则模型.md`、`命令文本分析.md`。
+- **问题**：凭据目录段规则把 `.ssh` 下一切文件当密钥物质，堵死了“用别名”的正路，且把配置读取与密钥物质混为一谈。
+- **决定**：新增具名最小例外——`~/.ssh/config` 在**读/列举**通道放行；`id_rsa`、`*.pem`、`known_hosts`、`config.bak`、`sub/config`、`glob ~/.ssh`、写通道、`.kube/config` 全部维持拦截。读写通道同宽，避免从 pwsh 通道溜过。
 
 ### 误报修复：裸引号输出语句不再被当成动态命令（DSR-012）
 
-- **现象（真实语料取证）**：按 DSH 帧契约解开 `stable-dev` HOME 4 天会话日志，取出 **9062 条真实 pwsh 命令**重跑现行规则 ⇒ **478 条被拦（5.4%）**，其中 **413 条**是 `unverifiable` 的"命令本身是动态的"，而这 413 条里 **397 条（96%）** 的语句头是一个**裸双引号插值字符串**。
-- **根因（范畴错误，非"设变量"）**：`assessUnverifiable` 用 `invocation.cmd.includes('$(')` 判"命令名动态"，而词法把引号吞进词内容、不留边界 ⇒ 语句头 `total: $(x)` 被当成命令词。PowerShell 实测：裸引号串是**输出**语句（`"cmd" arg` 是**语法错误**，不可能带参数）；`$(...) arg` 是**运行时错误**；只有 `&`/`.` 是显式调用。⇒ 修正为：词首为引号且非显式调用 ⇒ 输出，不是命令位置；"命令名动态"须**词首为 `$(`**（`if(...){... "$(...)" ...}` 这类控制表达式不算）。
-- **同批补上方向相反的漏防**（比误伤更该先修）：`tokenizePwsh` 的引号分支把 `$(...)` 吞掉、**不推进 `nested`**，且 `isProseSpan` 把 `$(Get-Content .env)` 判成散文抹掉 ⇒ `Write-Output "$(Get-Content .env)"`、`Write-Output "$(Remove-Item C:\Windows\x -Recurse)"`、`Write-Output "$(git reset --hard)"` **同时逃过内容引用、系统区写、破坏性三层**，实测全部放行。修复：双引号内 `$(...)` 收入 `nested`（单引号是字面量不提，配平引号感知）、`isProseSpan` 只对**单引号**保留散文豁免、`checkCommand` 对子表达式**递归跑全部规则**（`MAX_SUBEXPRESSION_DEPTH = 8`）。
-- **效果（同一 9062 条语料，只改判定）**：被拦 **478 → 76（5.4% → 0.8%）**；**新增误伤 0**；`unverifiable:command` **413 → 3**；检测力 22/22（含 6 条"引号内藏破坏性命令"必须仍被拦）+ 12/12 应放行。
-- 决策与实测表见 [DSR-012](docs/decisions/DSR-012-语句位置与插值子表达式.md)；机制见 `technical-details/命令文本分析.md`「语句位置」「子表达式递归」。
+- **现象**：真实语料中大量以裸双引号插值字符串打头的输出语句被误判“命令名动态”而拦截。
+- **根因**：命令名动态判定存在范畴错误——裸引号串是输出语句，不是命令位置。
+- **同批补上方向相反的漏防**：双引号内 `$(...)` 子表达式曾逃过内容引用、系统区写、破坏性三层，修复为递归跑全部规则。
+- **效果**：被拦率显著下降，新增误伤 0。
 
 ### 修复：审计日志此前无法定位命令
 
-- 审计行上限 140 字符，而拒绝消息前缀已占 **112** ⇒ 日志里命令**只剩 28 字符**，正是上面根因长期无法从日志定位的原因（每条都像以赋值开头）。改为 `AUDIT_LINE_MAX = 400`（覆盖拒绝消息内嵌的 200 字符预览）+ 对 pwsh 追加独立 `[guardrails] denied input:` 行——文本引用类拒绝消息本身**不含命令**，此前事后完全无法归因。
-- **补测（R-16 此前零覆盖）**：新增 `test/audit-log.test.mjs` 7 例，钉住「一次 pwsh 拒绝 = 一条两行日志（受限 rationale + `denied input:`）」「命令 400 字符内逐字可还原、超出以 `…` 标记」「多行命令折叠成单行」「path 通道**不**出第二行（其 reason 已引路径）」「放行调用零日志」「两次拒绝两条、不合并」。经消融验证检测力：把上限退回 140 并摘掉 `denied input:` 行后 **7 例中 5 例转红**（余 2 例不涉及被改代码）。
+- 审计行上限过短，拒绝消息前缀占满后日志里命令几乎不可见；改为更长上限并对 pwsh 追加独立 `denied input:` 行。
 
-### 取证工具入库：`tools/corpus-replay.mjs`
-
-- 替代 `tmp/` 下 15 个各自重复实现「会话日志遍历 + zstd 多帧解码 + 命令抽取」的探针（`tmp/` 已 gitignore ⇒ 每轮清理即丢失）。只读重放真实 pwsh 命令并分类统计，支持 `--json` 快照与 `--baseline` 前后对比（语料规模变化时显式告警）。
-- ❌ 不进 `npm test`：语料位于用户 HOME（AGENTS.md 禁止入仓）、随保留窗口漂移、绝对数每次都变——它是**取证工具**而非测试，其发现固化后才写成 `test/` 里的断言。已显式排除出 `package.json` 的 `files`，不随 npm 发布。
-- 实测（`stable-dev` HOME，4 天窗口）：257 个会话文件、14691 条去重命令、139 条被拦（**0.95%**）；`unverifiable:command` 仅 4 条（DSR-012 前为 413 条量级）。
-
-### 测试与验证
-
-- 测试 145 → **162**：`command.test.mjs` +6（词带引号来源 / 双引号插值提取 / 配平引号感知 / `splitFragments` 新出口 / `isCommandPosition` / `isComputedCommandName`），`guard.integration.test.mjs` +4（DSR-012 端到端正反 3 例 + 单引号字面量 1 例），`audit-log.test.mjs` +7（R-16，见上）。
-- **DSR-013 补测 162 → 169**：`guard.integration.test.mjs` +5（config 读放行 / 写仍拦 / 例外不泄漏到 `config.bak`·`sub/config`·`.kube/config`·`known_hosts`·`id_rsa`·列举 / 拒绝文案可被引用 / credentials 开关仍生效），`rules.test.mjs` +2（数据表驱动的具名例外边界 + 宽松/严格两套引用集对比）。
-- **消融验证检测力**（把 `SAFE_CRED_DIR_FILES` 置空、其余不变）：三个 DSR-013 用例转红；还原后按 SHA256 逐字节核对一致。消融暴露并修掉两处**测试自身缺陷**：① 数据表驱动用例在空表下**空转通过**（已加 `deepEqual` 内容断言）；② 一条"文案不被自拦"用例把功劳记在 DSR-013 上，但 `-m` 是文本参数、本就由 DSR-010 屏蔽 ⇒ 该断言**永远不会失败**——已改为走 `Select-String -Path ~/.ssh/config`（路径能力参数、不被屏蔽）并在注释里更正归因。两次消融均经 `git stash` 对照纯净基线确认。
-- 行覆盖 **98.55%**（门禁 ≥80%）；分层门禁通过（core 6 文件）；`npm run check` 全绿；`quality_floor` **PASS**（0 error）。
-- ⚠️ **`verify/run-verify.mjs` 第 3 步（test profile 组合断言）本次 FAIL**：`homes\test` 的 `test` profile 当前 `dependencies` 0 条、`bundles` 仅 `dsh-base`+`dsh-web-app`（本插件行未装）——这是**部署状态**，与本次源码改动无关（改动只落在 `src/`）。发布/挂载 web 前须先按门禁流程在 test 实例装载本版本并重跑；第 4 步启动冒烟按 `DSH_VERIFY_SKIP_BOOT_SMOKE=1` 跳过，**由用户在启动器侧补做**。
-- ⚠️ 实例级门禁**尚未执行**（需重启 test 实例，agent 不得自行重启）⇒ 按 AGENTS.md，本版本**尚不可发布/挂载 web**。
-
-## 1.6.0（当前，未发布）
+## 1.6.0（未发布）
 
 ### 破坏性变更：适配 DSH `0.1.7-rc.2`（新基线 settings / client 模型换代）
 
-> 用户决策：**执行方案 B（单轨适配 0.1.7-rc.2）**，放弃对 `0.1.2-rc.1` 及更早运行时的兼容（web 稳定实例随后升级）。判定依据均为本机机械取证，非文档字面引用。
-
-- **Host settings 接线整体重写**（旧 API 在新基线**零命中**）：`ctx.settings.installSection(...)` 已从 `dsh-settings` 删除（0.1.7-rc.2 只有 `SettingsForms`）。改为 v0.1.7 官方模型——六个 Config 字段全部加 `.volatile()`，`apply` 内 `ctx.inject(['settings'], sctx => sctx.effect(() => sctx.settings.configure({ auto: false }, ctx.fiber)))` 声明自绘页面策略，guard 在**每次判定时**经 `readConfig()` 读 `ref.get()` 活值。⇒ 设置页保存即提交进运行中的 fiber：**无重挂载、无 `onChange` 回调、无 base-layer 注册**。旧模型里"用户设置文档覆盖 base 层 / provider 卸载回落 entry"的语义随之消失（volatile 引用是唯一真相）。
-- **Client 接线整体重写**：`ctx.settingsScope.bind({...})` 与 `settings.plugin.item` 在新基线**零命中**（后者已由 `plugins.*` 七件套取代）。改为 `ctx.configForms.get(NS)` 读写 + `ctx.configForms.whileServed([NS], …)` 按需挂载，注册槽位为 **`plugins.row.config`**（key = `dsh-guardrails#guardrails`，行页面由此多出「配置」控件）。反应性改走保留舱 `hooks`（每个成员成为 `use<Name>` selector hook），因为页面传入的 `form` prop 是一次性 `{state, mutate}` 快照，不含 `subscribe`。
-- **settings 命名空间改名**：v0.1.7 起命名空间 = **loader 条目 id**，故 `SETTINGS_NS` 由插件自选的 `dsh-guardrails` 改为 **`guardrails`**（与 `cordis.patch.yml` 的行 id 一致）。在 profile 里给该行改名会移动命名空间并使卡片脱钩。
-- **图标名迁移**：新 `ui-primitives` 的 190 个图标导出取消了尺寸后缀（旧 75 个全部消失），`IconChevronDownOutline14` → **`IconChevronDownOutlineRegular`**（尺寸改走 `size` prop）。旧名在现代码中 `undefined`，卡片的 typeof 守卫会静默退化为文本箭头。
-- **`dsh.client.inject` 修正**：移除 `@deepseek-ai/dsh-client-runtime`（**两代部署树中均不存在**——1.x 遗留名，已改名 `dsh-client-modules`），加入真实依赖 `...-ui-plugin-manager`。
-- **peer 范围抬到目标运行时**：`cordis ^4.0.4` / `dsh-settings ^0.1.7-rc.2` / `schemastery ^3.18.4`。0.1.7-rc.2 新增 **peer 版本不兼容门禁**：`@deepseek-ai/dsh*` peer 不满足运行中版本时**整行被自动置 `disabled: true`、插件根本不加载**，实例照常启动、只在 stderr 留一行（最高危的静默变哑）。判定语义为 `semver.satisfies(rt, range, { includePrerelease: true })`。
-- **devDependencies 的 schemastery 同步抬到 `^3.18.4`**：`.volatile()` 在 3.18.2 **不存在**（实测 0 命中；3.18.4 为 28 处），旧版会让 `Config` 在 import 期直接抛错。
-
-### ⚠️ 部署顺序是硬性的（实测复核）
-
-在 `0.1.2-rc.1` 等旧运行时上，本版本**整行不加载**（`Config` 在 import 期调用 `.volatile()` → `TypeError: s.volatile is not a function`，已实跑复现），**不是"只少了配置页"**——旧实例上的硬拦截会静默失效。⇒ **先把实例升到 `0.1.7-rc.2`，再挂载/更新本版本**。
-
-### 文档更正（旧表述在新基线反向失真）
-
-- 删除 README / 需求 R-12 / 部署.md 中「重复 insert 导致整个 profile 启动失败（`duplicate loader entry id`）」的表述——该守卫**已被上游 revert 删除**（`dsh-v0.1.7-rc.2` 源码 0 命中，提交 `e07f41d5fd`），重复 id 改为**静默后者胜出**；`--dump-config` 层两代都不做重复 id 判别，核对只能人工按层级进行。
-- README / 规则模型 / DSR-008 中 `settings.yaml` 相关表述更新为「本 profile 的 `cordis.patch.yml`」（`settings-file` 提供方与 `settings.yaml` 已删除，遗留文件由 settings 服务导入后改名为 `settings.yaml.imported`）。
-- 新增「版本基线」节，写明**不兼容 0.1.2-rc.1 及更早运行时**，以及该结论的三条机械证据。
+- **Host settings 接线整体重写**：改为全 `.volatile()` 字段 + `settings.configure({ auto: false })` 声明自绘页面，guard 每次判定读活值。
+- **Client 接线整体重写**：改为 `ctx.configForms` 读写 + `plugins.row.config` 槽位注册。
+- **settings 命名空间改名**：命名空间 = loader 条目 id，由 `dsh-guardrails` 改为 `guardrails`。
+- **`dsh.client.inject` 修正**：移除不存在的旧 runtime 名，加入真实依赖。
+- **peer 范围抬到目标运行时**：`cordis` / `dsh-settings` / `schemastery` 同步；旧运行时不满足时整行自动禁用（不静默降级）。
+- **部署顺序是硬性的**：旧运行时上 `Config` 在 import 期调用 `.volatile()` 会抛错、整行不加载；必须先把实例升到 `0.1.7-rc.2`，再挂载/更新本版本。
 
 ### 误报修复：引用敏感名不再被当成访问它（DSR-010）
 
-- **现象（实测复现）**：三个文本引用检查（`GIT_DIR_REFERENCE`/`ENV_REFERENCE`/`CRED_TEXT_REFERENCE`）按文本出现判定，于是命令里**引用**敏感名也被硬阻断——`git commit -m "…this shell command references the .git directory…"`（引用的正是本插件自己的拒绝原文）、`git commit -m "fix: load .env earlier"`、`git commit -m "docs: keep .ssh out of the repo"`、`Write-Output "see .git for history"` 全被拦。⇒ 用 `git commit` 记录一份引用了守卫拒绝原文的说明，会被自己的守卫拦住，本轮实测即撞上。
-- **修复**：新增 `maskTextSpans()`（`src/core/command.js`），在**仅这三个文本引用检查**之前把"引用位置"抹成等长空白（偏移不变）：① 引号内**含空白且不含路径分隔符**的分段——含空白、不含分隔符只可能指名当前目录下的单个文件名，而 `.git` 本身不含空白，故该分段不可能是 `.git` 目录；② 文本/模式参数的值（`-match` 族与 `-m`/`-Message`/`-Title`/`-Description`/`-Subject`/`-Body`/`-Comment`）。**路径能力参数一律不豁免**（`-Path`/`-LiteralPath`/`-Filter`/`-Include`/`-Exclude`/`-Pattern`/`-Value`/`-Destination`），含 `"C:\Program Files\x\.git\config"`、`'.git/config'`、`Remove-Item -Recurse -Force .git`、`git cat-file --git-dir=.git` 在内的真实路径引用全部照旧拦截。
-- 决策与安全性论证见 [DSR-010](docs/decisions/DSR-010-文本引用豁免.md)；机制见 `technical-details/命令文本分析.md`「引用豁免」。
-- **已知残余误伤（有意 fail-closed）**：`-Pattern` 的值不豁免（`Select-String -Pattern '\.git'` 仍拦）；无空白且不含分隔符的散文分段不豁免（单独的 `'\.git'` 仍拦）。
+- **现象**：文本引用检查按文本出现判定，于是命令里**引用**敏感名（如提交信息里写着 `.git`/`.env`/`.ssh`）也被误拦。
+- **修复**：新增 `maskTextSpans()`，仅对散文分段与文本/模式参数值做引用豁免；路径能力参数一律不豁免，真实路径引用照旧拦截。
 
-### 测试与验证
+## 1.5.0
 
-- 测试 115 → 120：`config.test.mjs` 重写为 volatile 契约（默认值经 `ref.get()` 断言、**六字段全部 volatile** 的显式断言、非法值仍挂载失败）；`settings.test.mjs` 重写为 v0.1.7 模型（`configure` 页面策略、提交后即时生效、提交一字段不扰动其他字段、无 settings 服务按行配置、非 volatile 手写配置仍可判定）。
-- 测试 120 → 138：`command.test.mjs` +6（`maskTextSpans` 的散文分段 / 含分隔符分段不豁免 / 参数值豁免 / 路径能力参数不豁免 / 偏移不变 / 抹除与否决定引用判定），`guard.integration.test.mjs` +2（DSR-010 引用放行 6 例、真实敏感路径仍拦 10 例，含 `git commit -m "see .git" -- .env` 证明引用不会给旁边的真引用洗白）。
-- 行覆盖 98.22%（门禁 ≥80%）；分层门禁通过（core 6 文件）；`node --check` 全绿；tarball 干净安装 + 导入冒烟通过。
-- **test 实测门禁（2026-09-27，测试实例 `0.1.7-rc.2`）已通过并在 DSR-010 之前完成**：`--dump-config` 184 行无重复 id、启动无 `N entries did not activate`／无 `startup failed`／无 `disabling profile plugin`、功能冒烟实测拦截（`tool/result` `isError: true` + 实例日志 `[guardrails] denied pwsh`）、UI 卡片由用户浏览器确认可见可配。⚠️ **该门禁覆盖的是 DSR-010 之前的代码**；本次改的是 pwsh 命令文本判定，**发布/挂载 web 前须重跑门禁**（需重启测试实例）。
-- ⚠️ `verify/run-verify.mjs` 的**第 4 步（test profile 启动冒烟）会自行 spawn 一个真实实例** ⇒ **agent 不得运行该脚本的完整流程**（AGENTS.md 红线：实例启停一律走启动器 GUI 或 `dshl`；若 `DSH_TEST_HOME` 所指 HOME 已有实例在跑，两者共用同一 HOME 属 Security 红线）。为此新增 `DSH_VERIFY_SKIP_BOOT_SMOKE=1|true|yes` **绕过开关**：跳过第 4 步、其余照跑，跳过以 `⊘` 单独标记且**不计失败**，结尾另行计数（退出码 0，但明写"跳过了 1 步、发布门禁须由用户在启动器侧补做"）——被跳过的运行不会冒充全绿。第 4 步的代码块本身逐字未改（diff 中为上下文而非增删），仅在其外加了 `if/else` 包装。
-- ⚠️ 脚本现在**启动时回显解析后的 launcher / test home / web home / web bin 与第 4 步执行与否**：这四处均 `??` 回落到 `~/.dsh`（遗留全局 HOME），缺变量时第 3 步会对一个与实例无关的 HOME 报出"test 行数=0"这种**假失败**（2026-09-28 实测撞到），回显把"打错靶"变成看得见的事实。
-- agent 侧标准命令（本次实跑：4 步全绿 + 第 4 步显式跳过，4s）：设 `DSH_BIN`/`DSH_WEB_BIN`/`DSH_TEST_HOME`/`DSH_WEB_HOME` 后置 `DSH_VERIFY_SKIP_BOOT_SMOKE=1` 运行。
+### 安全增强（DSR-009——用户数据误删事故复盘入闸）
 
-## 1.5.0（已发布）
-
-### 安全增强（DSR-009——2026-09-10 用户数据误删事故复盘入闸）
-
-- **`destructive.chain`（无门控链删）**：同一 pwsh 调用内 move/copy/rename（源消耗型 mutator）之后经**无错误门**分隔符（`;`/换行/裸`&`）接带爆炸半径标志（`-Recurse`/`-Force`/`-r`/`-f`、del/rd `/s`）的删除 → 硬阻断。事故形态 `Move-Item -LiteralPath "$in\*" …; Remove-Item "$in" -Recurse -Force` 的放大器：前句静默失败（非终止错误）时删除面对的是**从未被搬空的唯一副本目录**。`a && 删除`（`&&` 链直接门控）与 mutator 自带 `-EA Stop` 视为已设门放行；控制流级门（`try/catch`/`if ($?)`）不建模、按误伤方向拦。
-- **`destructive.misuse`（参数误用）**：① `-Literal*` 参数值含 `*`/`?`——`-LiteralPath` 不展开通配符，NTFS 不可能存在此类文件名，语句必败且非终止（事故引信），deny 消息直接教授 `-Path`/精确名两种正解；② removal/mutator 动词的通配解析目标（位置参数/`-Path`）含 `[ ]`——FileSystem provider 按单字符通配类解析（`x[1].md` 亦匹配 `x1.md`），会命中从未指名的文件；`-Include`/`-Exclude`/`-Filter` 值豁免。
-- **词法分隔符保真**：`tokenizePwsh` 的 `&&`/`||` 保留双字符原值（旧实现压扁为 `&`/`|`，"有无错误门"在词法层即丢失——chain 判定的前提）。连带修正：`||` 不再被 `eval`（管道进 shell）与 `bulk`（管道批删）误认为管道（`||` 本就不是管道）。
-- **显式接受的边界（无状态重申）**：跨回合（分离调用）的"删上一回合 move 落点"不判——会话级 move journal 方案经评估**否决**（状态生命周期/别名等价/误伤论证成本与单一收益不成比例，DSR-009 方向 B），由顶层 AGENTS.md 破坏性命令纪律规程补偿；approval 档维持 DSR-006 否决。
-- 配置叶子 6 → 8（`destructive: { …, chain, misuse }`，缺省开，独立可关）；设置卡片、Config schema、`evaluateRules` 随 `CATEGORY_LEAF_KEYS` 自动扩展。
-- README：拦截语义、配置示例、已知限制（无状态边界/脚本文件不可见/`[ ]` 的 Windows 语义）同步。
-
-### 测试与验证
-
-- 测试 110 → 115：misuse 正反例、chain 门控矩阵（`&&` 门/EA Stop 门/无门）、事故命令复演 + 双层独立 ablation、`&&`/`||` 词法保真；既有断言同步（rules/config 叶子表、command 分隔符用例）。
-- 行覆盖 97.91%（门禁 ≥80%）；`check` 全绿；tarball 干净安装 + 导入冒烟通过；web/web-next `--dump-config` 恰一行基线不变。test profile 启动冒烟按 AGENTS.md 红线留待用户经启动器执行（agent 不起进程）。
+- **无门控链删**：同一调用内 move/copy/rename 之后经无错误门分隔符接带爆炸半径标志的删除 → 硬阻断（`&&` 链或 `-EA Stop` 视为已设门放行）。
+- **参数误用**：`-Literal*` 参数值含通配符、或 removal/mutator 的位置/`-Path` 目标含 `[ ]` 通配类 → 拒绝并给出正解。
+- **词法分隔符保真**：`&&`/`||` 保留双字符原值，避免“有无错误门”在词法层丢失。
+- 配置叶子 6 → 8（`destructive` 增加 `chain`、`misuse`，缺省开、独立可关）。
 
 ## 1.4.0（未发布）
 
 ### 修复
 
-- **判定基准目录来源失效（DSR-007）**：旧实现读 `session.meta.cwd`，而 0.1.2-rc.1 的 `Session` 公开面只有 `header`（`meta` 仅是 `create()` 的输入选项）——读取链恒为 `undefined`，base 静默落到部署 fallback 根（DSH 进程启动目录），相对路径判定坐标系错误。改为与官方工具链同一身份：`sandboxPolicy.resolve({ session }).workspaceRoot`（规范化 `session.header.cwd`；agentless 回落部署根；无 sandbox-policy 服务降级为 `''`）。新增 `test/base-dir.test.mjs` 锁定调用形状与降级分支。
-- **设置写入静默吞异常**（质量地板 error）：浏览器半侧 `scope.set/unset` 的裸 `.catch(() => {})` 改为 `console.warn` 留痕——写入失败非致命（快照不动，用户可见未生效），但绝不无声。
+- **判定基准目录来源失效（DSR-007）**：旧实现读会话公开面不存在的字段，base 静默落到部署 fallback 根；改为与官方工具链同一身份的 `sandboxPolicy.resolve().workspaceRoot`。
+- **设置写入静默吞异常**：浏览器半侧写入失败的裸 `.catch(() => {})` 改为 `console.warn` 留痕。
 
 ### 变更
 
-- **结构对齐 core/adapter 单包分层约定**（仓库 0.1.2-rc.1 知识库硬性约定）：`lib/` 四模块迁 `src/core/` 并拆出 `check-command.js`（pwsh 判定管线）与 `deny-messages.js`（文案 + leaf 门控）两个纯模块，core 共六模块（禁 `@deepseek-ai/*` import，仓库分层门禁从空转变为实质生效）；入口迁 `src/adapter/host.js`，包根 `index.js` 变为薄转发；浏览器半侧迁 `src/client/card.js`（`exports["./client"]` 直指，无构建管线不变）。
-- **settings 接线改官方 `installSection`**（0.1.2-rc.1 消费方首选 API）：删除手写 register/effect 回落逻辑；entry config 原样注册为 base 层（原为归一化叶子后注册——resolved 值语义不变，`describe` 的 base 显示形状随官方语义）。
-- **`assessDestructive` 按六子族拆分**（git/machine/eval/cli/bulk/target，与 DSR-006 配置叶子一一同构），主函数降为调度循环；`GuardCard` 拆子组件（Chevron/CardHeader/CategoryRow/UnverifiableRow）。
-- **包元数据对齐（核心包声明按危险类别归位）**：`peerDependencies` 新增 `@deepseek-ai/cordis ^4.0.2` 与 `@deepseek-ai/dsh-settings ^0.1.2-rc.1`（二者不在装载期 import，故无需 devDependencies）；`@deepseek-ai/schemastery` 由 `dependencies` 改判 `peerDependencies ^3.18.2`（范围写法对齐上游 `dsh-settings`）并新增 `devDependencies` 同项——`src/adapter/host.js` 装载期 `import z from '@deepseek-ai/schemastery'`，裸 node 单测必须能解析它，而 profile 侧因自身 `autoInstallPeers: false` 不会把副本装回来。**危险等级分两类，本插件原先只落在较轻的那类上**：`cordis` 与携带 service key 的 `@deepseek-ai/dsh-*` 用 module-local `Symbol()` 作身份（实测 `@deepseek-ai/dsh-tools` lib 内 `const key = Symbol()`），出现第二份物理副本即致命、**版本相同也致命**——本插件对 `cordis`、`dsh-settings` 一直是 peer，未触雷；`schemastery` 的跨边界身份是 `Symbol.for("schemastery")` / `Symbol.for("ValidationError")`（全局注册表 ⇒ 副本之间同一身份），双副本**不产生身份分裂**（实测私装 3.18.1 与安装树 3.18.2 并存数日、工具调用正常），故 schemastery 这项**属清理（少一份冗余拷贝、消除未来版本漂移）而非修 bug**。生态里两种写法并存而非对错之别：`dshmarket`、`deepseek-harness-background` 走 peer，DSH 一方 18 个包（`dsh-llm`、`dsh-tools`、全部 `dsh-tool-*`…）写在 `dependencies`。分类判据见知识库 `04` §7。启动器依赖自检（doctor）会报这类副本，但其判定逻辑拿库自身版本比 DSH 发布版本，**报出来不等于会出事**。`engines.node` 升 `^22.19.0 || >=24`（0.1.2-rc.1 基线）。
-- **设置卡片改统一保存模型（官方 PluginCard 暂存草稿语义，knowledge/15 §4.1）**：叶子开关不再即点即写——编辑进本地草稿，「保存」经单次 `scope.mutate()` 原子提交全部脏字段（一个 revision 围栏），「放弃」丢弃草稿；header 显示「未保存」pill，保存成功自动折叠，被拒保留草稿并显示 footer 诊断（对齐 skill-manager 生产范例）；行内「重置」保持即时语义（清除用户覆盖，非编辑操作）。
-- **卡片紧凑化**：类别行改为"标题 + 叶子复选框横排 + 行内重置"两行结构（原每叶子一行竖排），复选框用品牌色 token；标题去包名括号（「权限守护」）。
-- **verify 对齐部署现实**：组合断言与启动冒烟改用 `DSH_BIN` 指定的实例版本二进制（AGENTS.md 跨代红线；缺省回落遗留全局 CLI 时打印告警）；双 HOME 支持（`DSH_TEST_HOME`/`DSH_WEB_HOME`，web dump 用 `DSH_WEB_BIN`——web profile 属 stable-dev 实例，跨代各自用所属实例二进制）；tarball 冒烟断言更新为 `src/` 布局。
-- 全部公开符号 JSDoc 化（code-craft 注释标准）；质量地板 0 error（warning 仅余 client 卡片 UI 几何软指标）。
-
-### 测试与验证
-
-- 测试 105 → 110：新增 `test/base-dir.test.mjs`（5 例）；settings 测试按 `installSection` mock 语义重写；全部 mock 的 session 形状修正为 `header.cwd`（真实形状）。
-- 行覆盖 97.87%（门禁 ≥80%）。
+- **结构对齐 core/adapter 单包分层约定**：领域逻辑迁 `src/core/`（禁 `@deepseek-ai/*` import），入口迁 `src/adapter/host.js`，浏览器半侧迁 `src/client/card.js`。
+- **设置卡片改统一保存模型**：叶子开关编辑进本地草稿，「保存」原子提交全部脏字段，「放弃」丢弃草稿。
+- **包元数据对齐（核心包声明按危险类别归位）**：`cordis` 与携带 service key 的 `@deepseek-ai/dsh-*` 用 module-local 身份、必须 peer；`schemastery` 用全局注册表身份、可 deps。
 
 ## 1.3.0（未发布）
 
 ### 修复
 
-- **设置卡片渲染崩溃（slot 注入面协议踩保留键）**：`client.js` 原先按 `inject: () => ({ hooks })` 注册，DSH 渲染器把注入面中**保留键 `hooks`**（成员须为 `{ getSnapshot, subscribe }` 的 `HostObservable` 对）消费成 `use<成员名>` 选择器 hook，`hooks` 键本身不会出现在组件 props——`GuardCard({ hooks })` 解构得到 `undefined`，`hooks.subscribe` 抛 `TypeError`，keyed 条目被渲染器 `reportEntryError` 一次性 abdicate，「插件配置」页无痕（刷新重崩，无任何部署层报错）。改为与 skill-manager 同构的平铺面（`inject: () => face`，`face.scope` 一次性创建、引用稳定），组件按 `{ scope }` 消费。
-- **cordis 4.x 兼容：`ctx.inject()` 不再接受裸字符串依赖名**（dsh 内置 `@deepseek-ai/cordis@4.0.1` 的 `Inject` 只接受数组/对象，裸字符串会在 `Inject.resolve` 的 `Reflect.has` 上抛 `TypeError: Reflect.has called on non-object`，导致 profile 启动失败）。`apply()` 内的 settings 注入改为数组形式 `ctx.inject(['settings'], ...)`；`test/settings.test.mjs` 的 mock 同步按 cordis 4.x 语义接收数组/字符串两种形态。
-- **设置卡片外观对齐官方 PluginCard 几何**：卡片从"裸表单"（纯 div + 内联 style，无折叠壳）改为与官方同构的折叠卡片——`li > button.header（名称/描述/折叠箭头，`aria-expanded` + 本地 `useState` 展开/收起）> body（border-top + margin 0 16px）`；主题 token 全部使用 `--dsw-alias-*`（ui-theme），几何对齐 `PluginCard.module.css`；折叠箭头复用 `@deepseek-ai/dsh-client-ui-primitives` 的 `IconChevronDownOutline14`（缺失时降级为文本箭头，绝不让整卡渲染失败），`dsh.client.inject` 相应补 `@deepseek-ai/dsh-client-ui-primitives`（shell-seeded static UI library，无需 client entry）。写入仍为即时模型（无暂存表单，故无保存/放弃 footer）。
+- **设置卡片渲染崩溃**：注入面误用保留键导致组件解构 `undefined`；改为与官方同构的平铺面。
+- **cordis 4.x 兼容**：`ctx.inject()` 不再接受裸字符串依赖名，改为数组形式。
+- **设置卡片外观对齐官方 PluginCard 几何**：折叠卡片 + 主题 token，图标缺失时降级为文本箭头。
 
 ### 变更
 
-- **设置页配置入口（官方 settings 卡片范式）**：配置现在可出现在 设置 → 插件 → **插件配置**——
-  - Host 半侧注册 `dsh-guardrails` settings 命名空间：插件行 config 作为 **base 层**，用户设置文档覆盖它，**提交即热生效**（settings 服务卸载时回落行配置，无 settings 服务时完全按行配置工作）；
-  - 浏览器半侧新增 `client.js`（DSH client 模块系统的惰性 CJS bundle）：向 `settings.plugin.item` 按同名 key 注册卡片（每个防御层叶子开关 + 已覆盖标记/重置 + 写回 `settings.yaml`），与 Host 命名空间自动配对；
-  - `package.json`：`exports["./client"]`、`dsh.client`（platform web，inject runtime/ui-settings）、`files` 加入 `client.js`。
-- 版本 1.3.0。
-
-### 测试与验证
-
-- 新增 `test/settings.test.mjs`：命名空间注册与 base 层、用户覆盖热生效（含 v1 布尔形态归一化）、provider 卸载回落 entry、无 settings 服务兼容。
-- `verify` 冒烟断言加入 `client.js` 随包检查。
+- **设置页配置入口（官方 settings 卡片范式）**：配置可出现在 设置 → 插件 → 插件配置；Host 注册命名空间 + 浏览器半侧注册卡片。
 
 ## 1.2.0（未发布）
 
 ### 变更
 
-- **配置入口按 DSH 官方范式（0.1.1）**：插件导出 Schemastery `Config` schema（新增运行时依赖 `@deepseek-ai/schemastery`），loader 在 `apply` 前验证行内 `config` 块并填充默认值（默认全开）——非法类型在加载期报 `ValidationError` 并挂载失败；插件形态改为官方具名导出（`name` / `inject` / `Config` / `apply`，移除 default export）。
-- **bundle 行不再显式列默认值**：默认值只属于 plugin config boundary（schema 的 `.default()`），`cordis.patch.yml` 行只保留 `id`/`name`；未知键/未知子键仍由 `evaluateRules` 拒绝（schema 对象对未知键透传）。
-
-### 测试与验证
-
-- 新增 `test/config.test.mjs`：schema 默认值填充、对象形式缺省子键补全、非法类型拒绝。
-- 冒烟断言更新为具名导出形态（`name`/`apply`/`Config`）。
+- **配置入口按 DSH 官方范式**：导出 Schemastery `Config` schema，loader 在 `apply` 前验证并填充默认值；插件形态改为官方具名导出。
+- **bundle 行不再显式列默认值**：默认值只属于 schema 的 `.default()`。
 
 ### 发布与开源
 
-- 开源协议：MIT（`LICENSE`，Copyright © 2026 FengZhiHen1）；`package.json` 补充 `license` 与 `repository` 字段。
-- 源码仓库：`github.com/FengZhiHen1/dsh-guardrails`；web profile 改由 `github:` 钉 ref 的 git 依赖安装（发布物形态，非源码直挂）。
+- 开源协议 MIT；源码仓库 `github.com/FengZhiHen1/dsh-guardrails`。
 
 ## 1.1.0（未发布）
 
 ### 变更
 
-- **防御层全量配置化（DSR-006）**：所有防御层改为叶子级可配——类别键接受布尔（= 整类开/关）或对象（= 按操作/子族细分，子键缺省继承 true），缺省全开：
-  - 操作级叶子：`env`/`git` 为 `{ read, modify }`，`credentials` 为 `{ read, modify, list }`，`system` 为 `{ write }`；
-  - `destructive` 由总开关拆为六个独立子族 `{ git, machine, eval, cli, bulk, target }`（分组：git 高危 / 机器级与清空 / 不可信执行 / 数据破坏 CLI / 管道批删 / 删除目标分析）；
-  - 新增 `unverifiable` 键（动态 `$()` 目标 fail-safe，缺省开——由"不可关"改为可关，README 标注风险）；
-  - 命令文本层按动词分类（`classifyVerb` → read/modify/list）匹配对应操作叶子，与路径层语义一致。
-- **向后兼容**：v1 五键布尔写法继续有效（等价于对应类别全开/全关）；非法配置（未知键、未知子键、非布尔、非对象、数组）挂载即失败。
-
-### 测试与验证
-
-- 新增叶子矩阵用例：`evaluateRules` 归一化/布尔兼容/非法值、`classifyVerb`/`assessContentClass`、destructive 六子族独立门控、集成层 op 级叶子与 `unverifiable` 开关。
-- 覆盖率门禁维持 → `npm run verify` 全绿。
+- **防御层全量配置化（DSR-006）**：所有防御层改为叶子级可配——类别键接受布尔（整类开关）或对象（按操作/子族细分，缺省全开）；`destructive` 拆为 git/machine/eval/cli/bulk/target 六子族；新增 `unverifiable` 键。
+- **向后兼容**：v1 五键布尔写法继续有效；非法配置挂载即失败。
 
 ## 1.0.0（未发布）
 
 ### 变更
 
-- **sessions 类别移除**：`.dsh` 目录（含 `sessions/` 会话历史）不再被拦截，读/写/改/删与列举全部放行（配置键 `sessions` 随之移除，传入即报 unknown key）。凭据文件名单（`.dsh` 下的 `.credentials.yaml`、`.auteur-media-secret` 等）不受影响。
+- **sessions 类别移除**：`.dsh` 目录（含会话历史）不再被拦截，读写改删与列举全部放行；凭据文件名单不受影响。
 
 ### 安全增强
-- **system 类别（W0，DSR-001/DSR-005 落地）**：写入 Windows 系统区（`C:\Windows`/`C:\Program Files`/`C:\Program Files (x86)`/`C:\ProgramData`/`C:\Recovery`、用户启动目录、PowerShell Profile）硬阻断；读与列举放行。覆盖 write/edit 工具与 pwsh 写类动词/重定向/cd 链。
-- **credentials 范围 B 名单**：新增 `.git-credentials`、`NTUSER.DAT`（含事务日志）、`UsrClass.dat`、`pagefile.sys`、`hiberfil.sys`、浏览器资料（Chrome/Edge/Firefox）、Windows 凭据/DPAPI（`Microsoft\Credentials`、`Microsoft\Protect`）、系统 Hive（`System32\config\SAM`/`SECURITY`/`SYSTEM`）；命令文本引用同步扩充。
-- **绝对盘根删除拦截**：`Remove-Item C:\`/`D:\`/`/` 及 `C:\*` 通配形态、`rd C:\ /s /q` 等不再放行；`$pwd\*` 形态并入工作区根删除判定。
 
-### 配置与健壮性
-- 新增 `system` 配置键（缺省全开）；`cordis.patch.yml` 显式列出全部六个开关。
-- **配置校验**：未知键、非布尔值、非对象配置在挂载时失败并给出可操作错误（不再静默强转）。
-- `package.json` 声明 `engines.node >= 20`。
-
-### 测试与验证
-- 新增生命周期测试（mount/dispose/remount ×20、HMR 重放、双挂载不静默去重、非法配置挂载失败）。
-- verify 新增 tarball 干净目录安装 + 导入冒烟；组合断言覆盖 test/web 各恰一行。
-- 覆盖率：行 96.07% / 分支 93.07% / 函数 93.75%（门禁 ≥80%）。
-
-### 文档
-- README 补充覆盖工具清单、系统区矩阵、已知限制与边界、常见错误与排查；同步 web 部署现状（dist tarball 过渡形态）。
-- 设计文档同步：rule-model 范围 B 标记已实现、engineering 模块职责/依赖图/测试矩阵更新、DSR-001 实现状态注记。
+- **system 类别（W0）**：写入 Windows 系统区（`C:\Windows` 等）、用户启动目录、PowerShell Profile 硬阻断；读与列举放行。
+- **credentials 范围 B 名单**：扩充 `.git-credentials`、注册表 Hive、分页/休眠文件、浏览器资料与 DPAPI 等；命令文本引用同步扩充。
+- **绝对盘根删除拦截**：盘根删除及通配形态不再放行；工作区根删除并入判定。

@@ -9,7 +9,7 @@
   | 操作 | 拦否 | 依据 |
   |---|---|---|
   | 按名杀 dsh/node/pwsh 等进程 | 拦 | `destructive.machine` 的 `KILL_TARGET_PATTERN` |
-  | 按 PID 杀进程 | 不拦 | 模式只匹配进程名 |
+  | 按进程 ID 杀进程 | 不拦 | 模式只匹配进程名 |
   | 读写 `$DSH_HOME` 配置面（本 profile 的 `cordis.patch.yml`、profiles 的 package.json；遗留 `settings.yaml`） | 不拦 | 不在任何名单 |
   | 读写 DSH 安装目录 | 不拦 | 同上 |
   | 读写会话日志（.dsh） | 不拦 | DSR-003 重访（混合目录无敏感语义） |

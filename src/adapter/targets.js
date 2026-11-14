@@ -7,7 +7,8 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { extractOperations } from '../core/policy.js'
-import { CRED_BASENAMES, CRED_BASENAME_PREFIXES, CRED_COMBOS } from '../core/rules.js'
+import { CRED_BASENAMES, CRED_BASENAME_PREFIXES, CRED_COMBOS, isEnvLocalCredentialName } from '../core/rules.js'
+import { isUnsupportedProviderPath } from '../core/filesystem-path.js'
 import { matchWindowsDevice, observeWindowsDevices } from './windows-devices.js'
 
 const runFile = promisify(execFile)
@@ -41,6 +42,7 @@ function builtin(target, rules) {
   const basename = parts.at(-1) ?? ''
   if (basename.endsWith('.pub')) return false
   if (CRED_BASENAMES.has(basename)) return true
+  if (isEnvLocalCredentialName(basename)) return true
   if (CRED_BASENAME_PREFIXES.some((prefix) => basename.startsWith(`${prefix}.`))) return true
   return CRED_COMBOS.some((combo) => combo.length <= parts.length && combo.every((part, index) => parts[parts.length - combo.length + index] === part))
 }
@@ -160,8 +162,10 @@ async function collectTargets({ commands = [], cwd, rules, signal } = {}) {
     }
     const localBase = operation.cwd && base ? path.resolve(base, operation.cwd) : base
     if (!path.isAbsolute(operation.path) && !localBase) { observed.unknown = 'cwd'; continue }
-    // Wildcards, providers, remote shares and unresolved expansions are not literal local targets.
-    if (/[*?\u0000]/.test(operation.path) || operation.path.startsWith('\\\\') || operation.path.startsWith('//') || /^[a-z]+:/i.test(operation.path) && !/^[a-z]:[\\/]/i.test(operation.path)) {
+    // Wildcards and remote shares are not literal local targets; provider/scheme paths
+    // (Registry:, HKLM:, FileSystem::, http:, bare drive-relative C:foo) are refused by the
+    // shared pure predicate BEFORE any Node resolution (ENOENT is not a provider defense).
+    if (/[*?\u0000]/.test(operation.path) || operation.path.startsWith('\\\\') || operation.path.startsWith('//') || isUnsupportedProviderPath(operation.path)) {
       observed.unknown = 'nonliteral-or-remote'; continue
     }
     const absolute = path.isAbsolute(operation.path) ? path.normalize(operation.path) : path.resolve(localBase, operation.path)

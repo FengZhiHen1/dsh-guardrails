@@ -38,8 +38,18 @@ export function bashCommands(ast) {
     if (!node || typeof node !== 'object') continue;
     if (Array.isArray(node)) { for (let i = node.length - 1; i >= 0; i--) pending.push({ node: node[i], scope, redirects }); continue; }
     if (node.Type === 'FuncDecl') { functions.add(node.Name?.Value); continue; }
+    // A CallExpr carrying `Assigns` performs shell/state assignments (e.g. `x=/srv`,
+    // `export X=..`). They change state, so any fixed target set from the command list is
+    // not trustworthy; flag explicitly.
+    if (node.Assigns?.length) unknown.add('Bash assignment changes state');
     if (node.Type && !structuralTypes.has(node.Type)) throw new TypeError(`Unsupported Bash AST ${node.Type}`);
     if (node.Type === 'DeclClause' || node.Type === 'LetClause' || node.Type === 'ArithmCmd' || node.Type === 'ArithmExp') unknown.add(`Bash ${node.Type} evaluation`);
+    // Loops and conditional/switch bodies gate or repeat execution: a fixed target set taken
+    // from the literal command list is not trustworthy. Flag explicitly even for literal bodies.
+    if (node.Type === 'ForClause' || node.Type === 'WordIter' || node.Type === 'CStyleLoop') unknown.add('Bash for loop repeats execution');
+    if (node.Type === 'WhileClause') unknown.add('Bash loop repeats execution');
+    if (node.Type === 'IfClause') unknown.add('Bash conditional statement gates execution');
+    if (node.Type === 'CaseClause') unknown.add('Bash case statement gates execution');
     const nextScope = ['CmdSubst', 'ProcSubst', 'Subshell'].includes(node.Type) ? node.Type : scope;
     const nextRedirects = node.Redirs ? node.Redirs.map(redir => {
       if (!Number.isInteger(redir.Op)) throw new TypeError('Malformed shell redirection');

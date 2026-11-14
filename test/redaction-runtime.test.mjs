@@ -13,8 +13,10 @@ const runtimeRequire = anchor ? createRequire(realpathSync(extname(anchor) ? res
 let runtime
 try {
   const load = async name => import(pathToFileURL(runtimeRequire.resolve(name)).href)
-  const [cordis, tools, prompt, ptc] = await Promise.all(['@deepseek-ai/cordis', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-ptc-runtime'].map(load))
-  runtime = { cordis, tools, prompt, ptc }
+  // 0.2.2: the tools service no longer takes a `mode`; native and PTC execution are
+  // separate executor plugins mounted into the composition.
+  const [cordis, tools, prompt, ptc, native] = await Promise.all(['@deepseek-ai/cordis', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-ptc-runtime', '@deepseek-ai/dsh-tool-executor-native'].map(load))
+  runtime = { cordis, tools, prompt, ptc, native }
 } catch (error) {
   if (anchor || error.code !== 'MODULE_NOT_FOUND') throw error
 }
@@ -22,12 +24,21 @@ try {
 const secret = `sk-${'Az78'.repeat(12)}`
 const signal = new AbortController().signal
 
-async function setup(t, mode = 'native') {
+async function setup(t, { ptc = false } = {}) {
   const ctx = new runtime.cordis.Context()
   t.after(() => ctx.fiber.dispose())
   await ctx.plugin(runtime.prompt.default)
-  await ctx.plugin(runtime.tools.default, { mode })
-  // 0.2.1 resolves the Agent working directory and confined PTC authority from services.
+  await ctx.plugin(runtime.tools.default)
+  // 0.2.2 selects execution through a mounted executor, not a tools-service `mode`.
+  // The executor package's module namespace itself is the Cordis plugin (exports apply).
+  // Only ONE executor may be registered per scope, so mount exactly the one under test.
+  if (ptc) {
+    const ptcExecutor = await import(pathToFileURL(runtimeRequire.resolve('@deepseek-ai/dsh-tool-executor-ptc')).href)
+    await ctx.plugin(ptcExecutor)
+  } else {
+    await ctx.plugin(runtime.native)
+  }
+  // Resolve the Agent working directory and confined PTC authority from services.
   ctx.provide('workingDirectory', { ensure: async () => process.cwd() })
   ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'workspace-write', workspaceRoot: process.cwd() }) })
   installRedaction(ctx)
@@ -40,7 +51,15 @@ function register(ctx, name, value, schema = { type: 'string' }, extras = {}) {
     execute: async () => value, ...extras,
   })
 }
-const execute = (ctx, name, extra = {}) => ctx.tools.execute({ callId: 'redaction-fixture', name, arguments: {}, signal, ...extra })
+const execute = async (ctx, name, extra = {}) => {
+  const { arguments: args = {}, ...rest } = extra
+  const settled = await ctx.tools.execute({
+    signal,
+    calls: [{ type: 'tool-call', id: `redaction-${name}`, name, arguments: JSON.stringify(args) }],
+    ...rest,
+  })
+  return settled.results[0].result
+}
 
 test('real ToolRuntime Native validates string replacement; object/meta/error remain bounded residuals', { skip: !runtime && 'Install runtime dependencies or set DSH_RUNTIME_PATH' }, async t => {
   const ctx = await setup(t)
@@ -72,7 +91,9 @@ test('real ToolRuntime Native validates string replacement; object/meta/error re
 })
 
 test('real ToolRuntime PTC bridge separates program values from durable content; log hook runs independently', { skip: !runtime && 'Install runtime dependencies or set DSH_RUNTIME_PATH' }, async t => {
-  const ctx = await setup(t, 'ptc')
+  const ctx = await setup(t, { ptc: true })
+  // 0.2.2: PTC execution is a separate executor plugin (mounted above). The runtime
+  // class registers itself as `ptcRuntime` on construction, resolving the service.
   class FixturePtcRuntime extends runtime.ptc.PtcRuntime {
     language = 'typescript'
     isolation = 'synthetic-in-process'
@@ -94,7 +115,7 @@ test('real ToolRuntime PTC bridge separates program values from durable content;
   // Definition finalization happens after post; the independent log hook masks it.
   register(ctx, 'finalized', 'safe canonical value', { type: 'string' }, { finalizeContent: () => [{ type: 'text', text: secret }] })
   const events = []
-  // 0.2.1 requires an Agent context for release effects and a working directory service.
+  // 0.2.2 requires an Agent context for release effects and a working directory service.
   const agent = { ctx, session: { header: { cwd: process.cwd() }, append: (type, data) => events.push({ type, data }) } }
   const result = await execute(ctx, 'run_code', { arguments: { code: 'fixture', description: 'Redaction bridge fixture' }, agent })
   assert.equal(result.isError, false)

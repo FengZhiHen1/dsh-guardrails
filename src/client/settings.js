@@ -34,8 +34,8 @@ window.__ModuleLoader__.load({
         pathError: '请填写最多 1024 个绝对文件路径；不支持通配符，每个路径最长 32768 个字符。',
         timeoutError: '请输入大于 0 且不超过 3600 的秒数，精度最多为毫秒。',
         scope: '保护范围', scopeHelpLabel: '保护范围说明',
-        scopeBody: '对已识别的物理设备销毁、宿主系统整树破坏及共享 Git 核心数据破坏直接拒绝；敏感文件操作限时审批；普通操作默认允许。',
-        limits: '能力与边界', limitsBody: '仅保护经 DSH 工具发起且可识别的操作。动态路径、脚本内部及目录切换后的相对路径可能无法完整分析。可识别的凭据文本会自动遮罩，但结构化结果、错误与元数据仍可能保留原文。',
+        scopeBody: '插件只防灾难性删除。对物理设备销毁（format/mkfs/diskpart 等）、宿主系统整树破坏、.git 元数据破坏，以及销毁 git 历史的子命令（filter-branch、push --force、无路径的 reset --hard 等）直接拒绝；可识别的命令行删除——包括工作区之外的目标与 move 的源删除——先计数，超过 20 个未白名单条目一律拒绝；无法分析的执行通道（无法证明的 shell 脚本、动态命令文本、WSL 包装）拒绝；敏感文件操作限时审批。其余放行：普通工具、插件管理、常规 git 操作（status/add/commit/log 等）与 copy 不进入删除门禁；git worktree remove 要求工作树干净且可重建之外的可忽略条目不超过 20 个。',
+        limits: '能力与边界', limitsBody: '仅保护经 DSH 工具发起且可识别的操作，不声称拦截全部删除：只有可识别的命令行删除会被计数，程序内部副作用与绕过 DSH 工具通道的调用不在覆盖内。动态路径、脚本内部及目录切换后的相对路径可能无法完整分析。可识别的凭据文本会自动遮罩，但结构化结果、错误与元数据仍可能保留原文。',
       },
       en: {
         summary: 'Block recognized catastrophic operations, approve sensitive-file access and mask recognizable credentials.',
@@ -52,8 +52,8 @@ window.__ModuleLoader__.load({
         pathError: 'Enter up to 1024 absolute file paths without wildcards, each at most 32768 characters.',
         timeoutError: 'Enter seconds greater than 0 and at most 3600, with at most millisecond precision.',
         scope: 'Protection scope', scopeHelpLabel: 'About protection scope',
-        scopeBody: 'Recognized physical-device destruction, host system tree destruction and shared Git core destruction are refused. Sensitive-file operations require bounded approval. Ordinary operations are allowed by default.',
-        limits: 'Capabilities and limits', limitsBody: 'Protection covers recognizable operations dispatched through DSH tools. Dynamic paths, script internals and relative paths after directory changes may not be fully analyzed. Recognizable credential text is masked, but structured results, errors and metadata may retain original text.',
+        scopeBody: 'The plugin defends catastrophic deletion only. Physical-device destruction (format/mkfs/diskpart, etc.), host system tree destruction, .git metadata destruction, and git history-destroying subcommands (filter-branch, push --force, reset --hard without paths) are refused outright. Recognizable command-line deletions — including targets outside the workspace and a move source removal — are counted, and refused above 20 non-whitelisted entries; unanalysable execution channels (unprovable shell scripts, dynamic command text, WSL wrappers) are refused; sensitive-file operations require bounded approval. Everything else passes: ordinary tools, plugin management, normal git operations (status/add/commit/log, etc.) and copy do not enter the deletion gate; git worktree remove requires a clean worktree and no more than 20 non-rebuildable ignored entries.',
+        limits: 'Capabilities and limits', limitsBody: 'Protection covers recognizable operations dispatched through DSH tools and does NOT claim to block all deletion: only recognizable command-line deletions are counted; side effects inside a program, and calls that bypass the DSH tool channel, are out of scope. Dynamic paths, script internals and relative paths after directory changes may not be fully analyzed. Recognizable credential text is masked, but structured results, errors and metadata may retain original text.',
       },
     }
     const helpContent = {

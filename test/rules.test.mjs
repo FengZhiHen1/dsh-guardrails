@@ -10,6 +10,7 @@ import {
   CRED_COMBOS,
   RULE_KEYS,
   evaluateRules,
+  isEnvLocalCredentialName,
 } from '../src/core/rules.js'
 import { pathTargetsCredentials } from '../src/core/path-check.js'
 
@@ -82,6 +83,35 @@ test('DSH-managed credential files stay on the list (DSR-003 intent)', () => {
   assert.equal(pathTargetsCredentials('C:/Users/FengZhiHen/.dsh/.auteur-media-secret'), true)
   // But .dsh itself remains a non-credential directory.
   assert.equal(pathTargetsCredentials('C:/Users/FengZhiHen/.dsh/sessions/abc/session.jsonl.zstd'), false)
+})
+
+// ---------- V4: dotenv credential carriers ----------
+
+test('.env markers are credential carriers (hit side)', () => {
+  // Exact basename markers.
+  assert.equal(CRED_BASENAMES.has('.env'), true)
+  assert.equal(CRED_BASENAMES.has('.env.local'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/.env'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/app/.env'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/app/.env.local'), true)
+  // `.env.*.local` overrides carry real secrets and are matched by prefix+suffix.
+  assert.equal(pathTargetsCredentials('C:/Users/me/app/.env.production.local'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/app/.env.development.local'), true)
+  assert.equal(isEnvLocalCredentialName('.env.staging.local'), true)
+})
+
+test('.env templates are NOT credential carriers (miss side)', () => {
+  // Templates are committed examples without secrets.
+  for (const name of ['.env.example', '.env.sample', '.env.template']) {
+    assert.equal(CRED_BASENAMES.has(name), false, name)
+    assert.equal(isEnvLocalCredentialName(name), false, name)
+    assert.equal(pathTargetsCredentials(`C:/Users/me/app/${name}`), false, name)
+  }
+  // Other dotenv-looking names are not carriers either.
+  for (const name of ['.envrc', '.env.local.bak', 'env', '.environment', '.env.', '.env..local']) {
+    assert.equal(isEnvLocalCredentialName(name), false, name)
+    assert.equal(pathTargetsCredentials(`C:/Users/me/app/${name}`), false, name)
+  }
 })
 
 // ---------- V2 config evaluation ----------

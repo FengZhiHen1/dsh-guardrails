@@ -20,16 +20,22 @@ async function judge(root, commands, config = {}) {
   return { targets, decision: evaluatePolicy({ commands, targets }) }
 }
 
-test('actual exact files ask for direct reads/writes/deletion; unmarked env and metadata allow', async (t) => {
+test('actual exact files ask for direct reads/writes/deletion; .env is a credential carrier (v4)', async (t) => {
   const root = await fixture(t)
   await fs.writeFile(path.join(root, 'secret.env'), 'synthetic fixture')
   await fs.writeFile(path.join(root, '.env'), 'ordinary fixture')
+  await fs.writeFile(path.join(root, 'readme.txt'), 'ordinary fixture')
   const config = { sensitiveFiles: [path.join(root, 'secret.env')] }
   for (const name of ['read', 'write', 'edit', 'delete', 'copy', 'move']) {
     assert.equal((await judge(root, structuredCommands(name, { file_path: 'secret.env' }), config)).decision.kind, 'ask', name)
   }
+  // v4: `.env` is a builtin credential carrier, so reads/greps of it ask rather than allow.
+  for (const name of ['read', 'grep']) {
+    assert.equal((await judge(root, structuredCommands(name, { file_path: '.env' }), config)).decision.kind, 'ask', name)
+  }
+  // A plain non-secret file stays free of the credential channel.
   for (const name of ['read', 'glob']) {
-    assert.equal((await judge(root, structuredCommands(name, { file_path: '.env' }), config)).decision.kind, 'allow')
+    assert.equal((await judge(root, structuredCommands(name, { file_path: 'readme.txt' }), config)).decision.kind, 'allow', name)
   }
   const missingConfig = { sensitiveFiles: [path.join(root, 'missing')] }
   assert.equal((await judge(root, structuredCommands('read', { file_path: 'missing' }), missingConfig)).decision.kind, 'allow')
@@ -40,7 +46,7 @@ test('actual exact files ask for direct reads/writes/deletion; unmarked env and 
 test('directory operations and worktree remove ask only on actual protected files', async (t) => {
   const root = await fixture(t)
   await fs.mkdir(path.join(root, 'wt'))
-  await fs.writeFile(path.join(root, 'wt', '.env'), 'fixture')
+  await fs.writeFile(path.join(root, 'wt', 'readme.txt'), 'fixture')
   const command = [{ name: 'git', args: ['worktree', 'remove', 'wt'] }]
   assert.equal((await judge(root, command)).decision.kind, 'allow')
   await fs.writeFile(path.join(root, 'wt', 'secret.env'), 'fixture')

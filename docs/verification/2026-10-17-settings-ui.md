@@ -1,6 +1,6 @@
 # Guardrails 原生风格设置页
 
-用户：在 DSH 插件管理页调整保护范围和审批时间的本机使用者。主任务：修改三项现有配置，保存后确认生效。入口/标题/返回导航由 DSH 提供；离开不保存即丢弃草稿，不额外显示未保存标记。
+用户：在 DSH 插件管理页调整保护范围和审批时间的使用者。主任务：修改三项现有配置，保存后确认生效。入口/标题/返回导航由 DSH 提供；离开不保存即丢弃草稿，不额外显示未保存标记。
 
 ## 页面设计
 
@@ -20,14 +20,14 @@ loading/unavailable/只读各有明确反馈；未修改禁用保存；非法输
 
 ## 验证与现场边界
 
-0.2.1 运行时全量验证465项：397通过、0失败、68已声明语料skip，约11.5–23秒（本轮 23.2 秒，受本机负载影响；此前 3.2.0 记录为 464/400/64，差异来自本轮 skip 集）。适配覆盖：PTC `run_code` 的 Agent `ctx`/`workingDirectory` 服务与释放钩子、`ctx.configForms` 订阅写入、不完整section派生。命令语料仍只解析不执行。
+0.2.1 运行时全量验证465项：397通过、0失败、68已声明语料skip，约11.5–23秒（本次 23.2 秒，受本地负载影响；此前 3.2.0 记录为 464/400/64，差异来自本轮 skip 集）。适配覆盖：PTC `run_code` 的 Agent `ctx`/`workingDirectory` 服务与释放钩子、`ctx.configForms` 订阅写入、不完整section派生。命令语料仍只解析不执行。
 
 设置页改为复制官方 `SettingsForm`/`fields` 后，`node test/settings-client.test.mjs` 6/6 通过（含“无 Client 包引用”“无字面颜色”“未修改禁用保存”“长说明在 info 展开器”断言）；当前会话已在 danger-full-access 下跑通全量 465 项，先前受限沙箱对插件 `tmp/` 的 `mkdtemp` EPERM 结论保留为历史环境差异。
 
-test 实例 0.2.1-rc.2 的安装结果早于本次设置页重排，只证明当时版本；本次未重装或重启实例。当时：官方 `install_bundle` 返回 application=applied、changed=true、version=3.1.0；Host `Config.listConfigs` 可见三项 schema；Client `plugins.row.config` 显示 occupant active；普通 pwsh 命令返回预期输出，证明 guard 已接管且未误拦。
+验收环境 0.2.1-rc.2 的安装结果早于本次设置页重排，只证明当时版本；本次未重装或重启实例。当时：官方 `install_bundle` 返回 application=applied、changed=true、version=3.1.0；Host `Config.listConfigs` 可见三项 schema；Client `plugins.row.config` 显示 occupant active；普通 pwsh 命令返回预期输出，证明 guard 已接管且未误拦。
 
-浏览器页面本身仍需用户刷新后走查：输入、保存成功/失败反馈、info 展开/收起、明暗主题与窄屏布局；复制字段与保存键同官方并排的几何、焦点、禁用一致性同样未走查。Inspect 只证明注册与 schema，不证明视觉与交互。本机仓库规则将页面级检查交用户，本轮未运行浏览器自动化，未声称视觉验收完成。
+浏览器页面本身仍需用户刷新后走查：输入、保存成功/失败反馈、info 展开/收起、明暗主题与窄屏布局；复制字段与保存键同官方并排的几何、焦点、禁用一致性同样未走查。Inspect 只证明注册与 schema，不证明视觉与交互。页面级检查交用户，本轮未运行浏览器自动化，未声称视觉验收完成。
 
 > 2026-10-17 修订：移除内容宽度 680px 上限，改为 `width:100%` 跟随 Plugins 页内容列（最大 960px）；字段长说明收进标签旁的 info 展开器（原生 button + `aria-expanded`/`aria-controls` + `role="region"`，可见区只留短提示与错误）；`settings-client.test.mjs` 增加对应源码断言（6/6），全量 465 项（397 通过、0 失败、68 跳过）。浏览器视觉、info 展开与窄屏走查仍未做。包版本随后重置为 0.1.0（旧 3.x 保留历史）；test 安装记录仍为 3.1.0，0.1.0 未重装，管理面可能视为降级。
 
-> 2026-10-17 包图标：`package.json` 增加 `"icon": "./icon.svg"` 并纳入 `files`；`icon.svg` 803 B、36×36、自包含双色盾牌。`npm pack --dry-run --json` 确认 tarball 含 `icon.svg`；`npm test` 465 项（397 通过、0 失败、68 跳过）。运行中 test 实例未重装/重启，卡片与设置页头部的实际显示待用户刷新后走查。
+> 2026-10-17 包图标：`package.json` 增加 `"icon": "./icon.svg"` 并纳入 `files`；`icon.svg` 803 B、36×36、自包含双色盾牌。`npm pack --dry-run --json` 确认 tarball 含 `icon.svg`；`npm test` 465 项（397 通过、0 失败、68 跳过）。运行中的实例未重装/重启，卡片与设置页头部的实际显示待用户刷新后走查。

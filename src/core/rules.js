@@ -6,8 +6,20 @@ export const CRED_BASENAMES = new Set([
   'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', 'id_ed25519_sk', 'id_ecdsa_sk',
   '.npmrc', '.pypirc', '.netrc', '.pgpass', '.git-credentials',
   '.credentials.yaml', '.auteur-media-secret',
+  '.env', '.env.local',
   'ntuser.dat', 'usrclass.dat', 'pagefile.sys', 'hiberfil.sys',
 ])
+/** `.env.*.local` dotenv overrides carry real secrets. Prefix+suffix string test:
+ * no regex and no backtracking. `.env.example`/`.env.sample`/`.env.template` are
+ * templates and are deliberately not credential carriers. */
+export const ENV_LOCAL_PREFIX = '.env.'
+export const ENV_LOCAL_SUFFIX = '.local'
+export function isEnvLocalCredentialName(base) {
+  if (typeof base !== 'string') return false
+  return base.length > ENV_LOCAL_PREFIX.length + ENV_LOCAL_SUFFIX.length &&
+    base.startsWith(ENV_LOCAL_PREFIX) &&
+    base.endsWith(ENV_LOCAL_SUFFIX)
+}
 /** Exact trailing path segments, never whole credential directories. */
 export const CRED_COMBOS = [
   ['.aws', 'credentials'], ['system32', 'config', 'sam'],

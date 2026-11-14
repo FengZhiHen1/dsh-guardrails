@@ -46,4 +46,4 @@
 3. Linux实跑、真实历史标注回放、多Agent生产延迟/队列压力、自动设置页面走查和完整部署门禁未完成。
 4. 结构化object/enum value、error/meta/additionalContexts、Native post后的finalizer、预审前输入参数仍可能保留凭据。候选规则仍未默认启用。
 
-原始审查过程数据留管理仓库tmp/guardrails-review供人工核对；稳定接收件以插件测试目录为准。审查目录的implementationStatus/preFixObserved保留当时观测，不用它替代本轮实际回归。未提交推送，未改稳定Profile。
+原始审查过程数据留作人工核对；稳定接收件以插件测试目录为准。审查目录的 implementationStatus/preFixObserved 保留当时观测，不用它替代本轮实际回归。未提交推送，未改稳定环境配置。
