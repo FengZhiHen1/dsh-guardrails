@@ -282,12 +282,14 @@ export async function analyzeShell({ dialect, source, parsers, cwd, signal } = {
   if (!parsers || typeof parsers.parse !== 'function') throw new TypeError('analyzeShell: parsers.parse is required');
   const normalized = normalizeDialect(dialect);
   const budget = { ...DEFAULT_BUDGET };
-  const state = { parses: 0, emitted: 0 };
+  const state = { parses: 0, emitted: 0, sources: [] };
   const unknown = new Set();
 
   const outCommands = [];
   await unwrapInto({ parsers, dialect: normalized, source, domain: 'host', cwd, signal, depth: 0, state, budget, unknown, outCommands });
-  return { commands: outCommands, unknown: [...unknown] };
+  // `sources` are the decoded texts of external script files that were read and analysed.
+  // They are command text for the credential static-text scan; never returned as commands.
+  return { commands: outCommands, unknown: [...unknown], sources: state.sources.slice() };
 }
 
 function normalizeDialect(dialect) {
@@ -307,12 +309,39 @@ async function unwrapInto(ctx) {
   parsed = await ctx.parsers.parse(dialect, source, { signal }); // parser failure propagates (fail-closed)
   for (const reason of parsed.unknown ?? []) unknown.add(String(reason));
   flagStateInvalidation(parsed.commands ?? [], dialect, unknown);
+  // Track a provable literal `cd`/`Set-Location` so a later literal-relative delete is counted
+  // in the directory it really runs in. Only same-invocation, straight-line, host-domain,
+  // directory-verified literal targets update the cwd; anything else stays an explicit
+  // state-invalidation unknown (fail-closed: a delete after an unprovable cd is refused).
+  let trackedCwd = cwd;
   for (const command of parsed.commands ?? []) {
     if (state.emitted >= budget.maxCommands) { unknown.add('Command budget exceeded'); return; }
+    let commandCwd = trackedCwd;
+    const isCdFamily = typeof command.name === 'string' && CD_FAMILY.has(command.name.toLowerCase());
+    if (isCdFamily) {
+      const cdArg = trackableCdArgument(command);
+      const scriptScope = command.scope === undefined || command.scope === 'script' || command.scope === 'file';
+      let updateCwd
+      if (domain === 'host' && scriptScope && typeof trackedCwd === 'string' && cdArg !== null) {
+        const resolved = path.isAbsolute(cdArg) ? path.normalize(cdArg) : path.resolve(trackedCwd, cdArg);
+        try {
+          const info = await fs.lstat(resolved);
+          // A real directory moves the tracked cwd; a missing/non-directory/symlink target
+          // could resolve differently at execution time, so it stays unprovable.
+          if (info.isDirectory() && !info.isSymbolicLink()) updateCwd = resolved;
+        } catch { updateCwd = undefined; }
+      }
+      if (typeof updateCwd === 'string') {
+        trackedCwd = updateCwd;
+        commandCwd = trackedCwd;
+      } else {
+        unknown.add(`State-changing command '${command.name}' invalidates a fixed target set`);
+      }
+    }
     // eslint-disable-next-line no-await-in-loop
-    const handled = await expandWrapper({ ...ctx, command, dialect, domain, cwd, depth, distribution, user, inheritedRedirects });
+    const handled = await expandWrapper({ ...ctx, command, dialect, domain, cwd: commandCwd, depth, distribution, user, inheritedRedirects });
     if (!handled) {
-      emit(outCommands, command, { dialect, domain, cwd, distribution, user, inheritedRedirects });
+      emit(outCommands, command, { dialect, domain, cwd: commandCwd, distribution, user, inheritedRedirects });
       state.emitted += 1;
     }
   }
@@ -321,6 +350,29 @@ async function unwrapInto(ctx) {
 // Commands that mutate shell/session state so a fixed target set is not trustworthy.
 const BASH_STATE_MUTATORS = new Set(['cd', 'pushd', 'popd', 'alias', 'unalias', 'export', 'unset', 'declare', 'typeset', 'local', 'readonly', 'source', '.', 'eval', 'exec', 'trap', 'set', 'shopt', 'enable', 'hash', 'builtin', 'command']);
 const POWERSHELL_STATE_MUTATORS = new Set(['cd', 'set-location', 'sl', 'chdir', 'push-location', 'pop-location', 'set-variable', 'new-variable', 'remove-variable', 'set-item', 'new-item', 'invoke-expression', 'iex', 'import-module', 'set-alias', 'new-alias', 'set-executionpolicy', 'set-psdebug', '.']);
+// cwd-changing commands whose LITERAL target can be tracked (see unwrapInto). pushd/popd
+// change a stack and are intentionally NOT tracked: they stay explicit unknown.
+const CD_FAMILY = new Set(['cd', 'set-location', 'sl', 'chdir']);
+const CD_PATH_OPTIONS = new Set(['-path', '-literalpath']);
+
+/** Return the literal directory argument of a simple `cd`/`Set-Location` command, or null. */
+function literalCdArgument(command) {
+  const args = Array.isArray(command.args) ? command.args : [];
+  if (args.length === 1 && typeof args[0] === 'string') return args[0];
+  if (args.length === 2 && typeof args[0] === 'string' && CD_PATH_OPTIONS.has(args[0].toLowerCase()) && typeof args[1] === 'string') return args[1];
+  return null;
+}
+
+/** A literal cd target is trackable only when it is a plain directory word (no glob, tilde,
+ *  NUL or `..` segment, whose resolution could differ from the shell's real path). */
+function trackableCdArgument(command) {
+  const arg = literalCdArgument(command);
+  if (arg === null || arg.length === 0) return null;
+  if (/[*?\[\]{}]/.test(arg) || arg.includes('\u0000')) return null;
+  if (arg === '~' || arg.startsWith('~/') || arg.startsWith('~\\')) return null;
+  if (arg.split(/[\\/]/).some((segment) => segment === '..')) return null;
+  return arg;
+}
 
 /** Mark state-invalidating command constructs as explicit unknown. */
 function flagStateInvalidation(commands, dialect, unknown) {
@@ -329,6 +381,9 @@ function flagStateInvalidation(commands, dialect, unknown) {
   for (const command of commands) {
     const { trusted, base } = wrapperName(command.name, { posix });
     if (!trusted || base === null) continue;
+    // cwd changes are handled by the literal-cd tracker in unwrapInto; skip them here so a
+    // trackable literal cd is not double-flagged.
+    if (typeof command.name === 'string' && CD_FAMILY.has(command.name.toLowerCase())) continue;
     // State-mutator names are matched case-insensitively here (conservative: flagging more).
     if (mutators.has(base.toLowerCase())) unknown.add(`State-changing command '${base}' invalidates a fixed target set`);
   }
@@ -494,6 +549,8 @@ async function expandScriptFile(ctx, base, scriptFile, innerDialect) {
     unknown.add(`Interpreter '${base}' script file '${String(scriptFile)}' ${loaded.detail}; contents not analyzed`);
     return false;
   }
+  // This decoded script text is command text for the credential static-text scan.
+  if (Array.isArray(ctx.state?.sources)) ctx.state.sources.push(loaded.text);
   const redirects = [...(ctx.inheritedRedirects ?? []), ...wrapperRedirects(ctx.command)];
   try {
     await unwrapInto({

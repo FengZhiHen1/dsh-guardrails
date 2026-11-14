@@ -18,6 +18,7 @@
 - **文件级白名单只减计数、不减保护**：Python 字节码、pytest、mypy、Maven class、TS buildinfo；命中须「形态匹配 + 证据证明」双通过才减计数。Cargo 取消自动豁免（仅保留 `Cargo.toml` 为边界 marker）。只识别常规文件、不读内容、不整树豁免；受保护文件与绝对 Deny 始终生效。
 - `sensitiveFiles` 来自 Profile 的精确文件标记；普通未标记 `.env` 不因名字特殊保护。内置名单开关为 `builtinSensitiveAsk`，覆盖私钥、工具凭据文件、系统凭据库与分页/休眠文件的内容读、导出、写、删、移动；元数据列举和正常间接认证不因此 Ask。
 - 对受管结果中的高置信凭据默认完整遮罩，不为遮罩增加审批。Native/PTC 的真实出口范围仍在验证，不能承诺全部结构化结果、日志或历史会话零泄漏。
+- **定向提示与触发收敛**：所有拒绝与审批统一为 `[GUARDRAILS] DENY|ASK <RULE-ID> (<layer>)` + `Why/Trigger/Effect/Next`（删除类末句保留强提示）；`Trigger` 含具体命令/表达式并脱敏。非删除语义的解析噪声不再拒绝，动态删除/动态命令/通配/执行通道/`>20`/L1 仍拒绝（见 DSR-021）。
 
 只承诺进入 DSH `ctx.tools` 管线的调用；用户手工命令、外部同权限程序、远端执行和外部脚本内部副作用不构成完整覆盖。`run_code` 一律拒绝；`terminal_send` 的文本就地分析、无法分析则拒绝。真正边界是「不经 `ctx.tools` 直接调用 runtime service」。审批、agent 自报或 dry-run 都不构成删除授权；检查与执行间存在 FS 并发竞态，不声称 `<=20` 执行原子。需要强隔离时仍依赖 OS 身份与权限。
 
@@ -25,7 +26,7 @@
 
 PowerShell 使用微软官方 `Parser.ParseInput`，由惰性持久 `pwsh` helper 提供事实；Bash 使用固定本地官方 `shfmt v3.12.0` 的 typed JSON AST，首版二进制目标为 Windows x64、Linux x64/arm64。平台交付目标不等于已经在各平台运行通过。
 
-异步 `tools/pre-execute` 完成官方 AST、递归包装解包、删除意图判定、执行前删除清单与必要审批，将结果绑定同一次 `ToolExecution` 对象的 WeakMap；同步 `ctx.tools.guard` 做最终硬门禁。必检调用遇到解析器、协议或关联结果故障时 fail-closed，不使用旧自研 tokenizer 回退；解析层只负责报告 Unknown，策略层（`assessCommands`）对任何非空 Unknown 都拒绝——只要无法排除删除副作用就拒绝，覆盖旧的 Unknown-Allow 默认。
+异步 `tools/pre-execute` 完成官方 AST、递归包装解包、删除意图判定、执行前删除清单与必要审批，将结果绑定同一次 `ToolExecution` 对象的 WeakMap；同步 `ctx.tools.guard` 做最终硬门禁。必检调用遇到解析器、协议或关联结果故障时 fail-closed，不使用旧自研 tokenizer 回退；解析层只报告 Unknown，策略层只对**与删除意图相关**的 Unknown 拒绝（非删除语义噪声在无真实删除时放行；动态删除、执行通道、>20、L1 仍拒绝），见 [DSR-021](docs/decisions/DSR-021-非删除unknown放行.md)。
 
 ## 配置契约
 

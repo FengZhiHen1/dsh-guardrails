@@ -196,8 +196,10 @@ test('source text is never executed (echoed marker must not run)', async t => {
 test('state-changing commands are always surfaced as explicit unknown', async t => {
   const parsers = createShellParsers();
   t.after(() => parsers.dispose());
-  // Command-visible mutators must carry the explicit state-invalidation label.
-  for (const src of ['cd /srv && rm -rf build', "alias rm='rm -rf'; rm /x", 'source ./env.sh']) {
+  // Command-visible mutators must carry the explicit state-invalidation label. A LITERAL cd
+  // is now tracked (see the cd-tracking tests); a dynamic cd, pushd and alias/source stay
+  // explicit unknown.
+  for (const src of ['cd "$DIR" && rm -rf build', 'pushd /srv && rm -rf build', "alias rm='rm -rf'; rm /x", 'source ./env.sh']) {
     const result = await analyzeShell({ dialect: 'bash', source: src, parsers });
     assert.ok(result.unknown.some(u => /State-changing command/i.test(u)), `missing state unknown for: ${src}`);
   }

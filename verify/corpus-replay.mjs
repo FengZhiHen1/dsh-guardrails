@@ -52,7 +52,11 @@ try {
     }
     for (const absent of entry.absentCommands ?? []) if (parsed?.commands.some(command => matches(command, absent))) mismatches.push('absent-command')
     for (const unknown of entry.expectedUnknown ?? []) {
-      const present = unknown === 'dynamic target' ? parsed?.unknown.includes('Dynamic command or argument') : parsed?.unknown.includes(unknown)
+      const target = unknown === 'dynamic target' ? 'Dynamic command or argument' : unknown
+      // The oracle asserts the diagnostic CATEGORY is present; a parser may append a
+      // concrete expression as `category: detail` for the tool-return Trigger without
+      // changing the category itself.
+      const present = parsed?.unknown.some(value => typeof value === 'string' && (value === target || value.startsWith(`${target}: `)))
       if (!present) mismatches.push('unknown')
     }
     results.push({ id: entry.id, actualKind, ruleId, errorCode, mismatches, commands: parsed?.commands, unknown: parsed?.unknown })

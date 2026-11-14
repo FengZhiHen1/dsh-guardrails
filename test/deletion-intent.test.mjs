@@ -311,12 +311,12 @@ test('neutral command contrast: same command passes without redirection, denies 
   );
 });
 
-test('a neutral value-option with a dynamic (null) value denies', () => {
-  // Get-Content -Path <dynamic> cannot be proven; null must not silently pass.
-  assert.equal(
-    assessCommands([cmd('Get-Content', ['-Path', null], { dialect: 'powershell' })]).denial?.ruleId,
-    'DI-DYNAMIC-ARGUMENT',
-  );
+test('a read-only value-option with a dynamic (null) value is allowed (F3)', () => {
+  // A known read-only command cannot delete through a dynamic value; it is a read target,
+  // so it is allowed (no operation). Deletion commands still deny a dynamic target below.
+  const result = assessCommands([cmd('Get-Content', ['-Path', null], { dialect: 'powershell' })]);
+  assert.equal(result.denial, undefined);
+  assert.deepEqual(result.operations, []);
 });
 
 test('Write-Output -NoEnumerate passes; a bogus -NoNewline for Write-Output denies', () => {
@@ -384,10 +384,10 @@ test('input-only redirection does not by itself deny a neutral command', () => {
   assert.equal(assessCommands([command]).denial, undefined);
 });
 
-test('neutral command with a dynamic (null) operand denies', () => {
-  const { denial } = assessCommands([cmd('echo', [null], { dialect: 'bash' })]);
-  assert.equal(denial?.kind, 'deny');
-  assert.equal(denial?.ruleId, 'DI-DYNAMIC-ARGUMENT');
+test('a read-only command with a dynamic (null) operand is allowed (F3)', () => {
+  const { denial, operations } = assessCommands([cmd('echo', [null], { dialect: 'bash' })]);
+  assert.equal(denial, undefined);
+  assert.deepEqual(operations, []);
 });
 
 test('write redirection denies even on a neutral command', () => {

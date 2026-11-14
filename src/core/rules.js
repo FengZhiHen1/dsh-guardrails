@@ -29,6 +29,32 @@ export const CRED_COMBOS = [
 export const CRED_BASENAME_PREFIXES = ['ntuser.dat', 'usrclass.dat']
 /** Public key suffix excluded from credential-carrier matching. */
 export const PUBLIC_KEY_SUFFIX = '.pub'
+
+/** Lower-cased basenames for a case-insensitive credential-name text scan. */
+const CRED_BASENAME_SET = new Set([...CRED_BASENAMES].map((name) => name.toLowerCase()))
+/** A PEM/DER private-key header in free command text. */
+const PRIVATE_KEY_HEADER = /-----\s*BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/i
+
+/**
+ * Static, allocation-bounded scan for a credential-carrier NAME in arbitrary command text
+ * (a shell command, terminal text, or a script file's decoded source). It matches whole
+ * basenames only, so `.env.example`/`.env.sample`/`.env.template` and path prefixes do not
+ * match. It answers "does this text reference a credential-bearing file?", never "is this a
+ * deletion"; it can only raise an approval, never grant one.
+ */
+export function textMentionsCredential(text) {
+  if (typeof text !== 'string' || text.length === 0) return false
+  if (PRIVATE_KEY_HEADER.test(text)) return true
+  const tokens = text.split(/[\s"'`=:;,,()\[\]{}<>|&]+/)
+  for (const token of tokens) {
+    if (!token) continue
+    const base = token.replace(/\\/g, '/').split('/').pop()
+    if (!base) continue
+    if (CRED_BASENAME_SET.has(base.toLowerCase())) return true
+    if (isEnvLocalCredentialName(base)) return true
+  }
+  return false
+}
 /** Supported settings. */
 export const RULE_KEYS = ['sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs']
 /** Zero is a legacy alias for the bounded default, never unlimited waiting. */

@@ -61,7 +61,7 @@ for (const config of [{}, { askTimeoutMs: 0 }]) {
     t.mock.timers.tick(1)
     const result = await pending
     assert.equal(result.kind, 'deny')
-    assert.match(result.reason, /APPROVAL_TIMEOUT.*120000ms/)
+    assert.match(result.reason, /APPROVAL_TIMEOUT[\s\S]*120000ms/)
     assert.equal(gate.requests[0].signal.aborted, true)
     assert.equal(gate.dispatches(), 0)
     assert.match(gate.guard(), /APPROVAL_TIMEOUT/)
@@ -79,7 +79,7 @@ test('one timely grant dispatches once and clears its timer', async t => {
   assert.equal(request.callId, gate.execution.callId)
   assert.equal(request.agent, gate.execution.agent)
   assert.match(request.reason, /S-F1/)
-  assert.ok(request.reason.length < 600)
+  assert.ok(request.reason.length < 1200)
   t.mock.timers.tick(60000)
   assert.equal(request.signal.aborted, false)
 })

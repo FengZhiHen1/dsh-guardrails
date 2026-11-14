@@ -30,12 +30,13 @@
 
 import z from '@deepseek-ai/schemastery'
 import path from 'node:path'
-import { ASK_TIMEOUT_MAX, evaluateRules } from '../core/rules.js'
+import { ASK_TIMEOUT_MAX, evaluateRules, textMentionsCredential } from '../core/rules.js'
 import { evaluatePolicy, structuredCommands } from '../core/policy.js'
 import { observeTargets } from './targets.js'
 import { createShellParsers } from './parsers/index.mjs'
 import { analyzeShell } from './shell-analysis.mjs'
 import { assessCommands, DELETION_DOCTRINE } from '../core/deletion-intent.js'
+import { renderGuardrailMessage } from '../core/diagnostics.js'
 import { planDeletions } from './deletion-plan.js'
 import { requestApproval, DEFAULT_ASK_TIMEOUT_MS } from './approval.js'
 import { installRedaction } from './redaction.js'
@@ -96,12 +97,16 @@ function isBareErrno(entry) {
 }
 
 /**
- * True for the shell-analysis marker emitted when a state-mutating command changed the
- * session so a fixed delete target set is no longer trustworthy. It only has teeth when the
- * same invocation actually deletes; with no delete it harms nothing to gate.
+ * True for a session-state marker that is NOT deletion evidence by itself: a state-mutating
+ * command that invalidated a fixed target set, or a variable/environment assignment. These
+ * only have teeth when the same invocation actually deletes; with no delete they are noise
+ * (a read-only pipeline that assigns a variable removes nothing). Assignment markers are the
+ * powershell-helper/bash-parser equivalents of the state-changing marker.
  */
 function isStateChangingUnknown(entry) {
-  return typeof entry === 'string' && /^State-changing command\b.*invalidates a fixed target set/.test(entry)
+  if (typeof entry !== 'string') return false
+  if (/^State-changing command\b.*invalidates a fixed target set/.test(entry)) return true
+  return /^(?:Bash assignment changes state|PowerShell (?:environment )?variable assignment changes state)\b/.test(entry)
 }
 
 /** Read-only file tools with known, non-destructive argument semantics. */
@@ -276,6 +281,9 @@ export function apply(ctx, config = {}) {
     const boundary = sandboxWorkspace(execution)
     const unknown = []
     let commands
+    // Command text that participates in the credential static-text scan: the raw shell /
+    // terminal text plus the decoded source of any external script file that was read.
+    let credentialTexts = []
     const shell = commandInputOf(execution)
     const dialect = shell?.dialect
     if (shell) {
@@ -283,6 +291,7 @@ export function apply(ctx, config = {}) {
       const analyzed = await analyzeShell({ dialect: shell.dialect, source: shell.source, parsers, cwd, signal })
       commands = analyzed.commands
       unknown.push(...analyzed.unknown)
+      credentialTexts = [shell.source, ...(Array.isArray(analyzed.sources) ? analyzed.sources : [])]
     } else if (execution.name === 'web_fetch') {
       commands = typeof args?.url === 'string' ? [{ name: 'Invoke-WebRequest', args: [args.url], dialect: 'powershell', domain: 'host' }] : []
     } else {
@@ -392,7 +401,20 @@ export function apply(ctx, config = {}) {
       }
     }
 
+    // Credential static-text scan, narrowed to the "dynamic read" relaxation: only when this
+    // call still contains an unresolved (null) operand can a credential-bearing file name be
+    // read without a resolvable path for the normal path/S-F1 check to catch. When every
+    // argument is resolvable, path-check already owns protection and plain text mentions
+    // (a commit message, a search pattern, an echo) must NOT raise an approval.
+    const hasDynamicOperand = commands.some((entry) =>
+      Array.isArray(entry.args) && entry.args.some((arg) => arg === null))
+    if (decision.kind === 'allow' && hasDynamicOperand && credentialTexts.some((text) => textMentionsCredential(text))) {
+      decision = { kind: 'ask', ruleId: 'S-F1', reason: `S-F1: the command text references a credential-bearing file or private key while a read target is unresolved. Use runtime credential injection or a health check that reports only non-secret status when possible; approval applies only to this call. ${DELETION_DOCTRINE}` }
+    }
+
     if (decision.kind === 'ask') {
+      // Render the ask in the same structured block the agent sees for a denial.
+      decision = { ...decision, reason: renderGuardrailMessage({ kind: 'ask', ruleId: decision.ruleId, reason: decision.reason, unknown, execution }) }
       // Snapshot the inventory signature (a plain string) before the approval wait.
       const before = await deletionSignature(realDeletes, cwd, boundary, rules, signal)
       // If the current inventory already denies (>20 / unknown / .git / link), do not
@@ -438,13 +460,13 @@ export function apply(ctx, config = {}) {
     const result = completed.get(execution)
     if (!result) {
       if (!isAnalysedTool(execution)) {
-        return '[UNKNOWN_TOOL] This tool is not a recognized, analysed capability; dispatch is refused because its file and deletion side effects cannot be proven safe.'
+        return renderGuardrailMessage({ kind: 'deny', ruleId: 'UNKNOWN_TOOL', reason: '[UNKNOWN_TOOL] This tool is not a recognized, analysed capability; dispatch is refused because its file and deletion side effects cannot be proven safe.', execution })
       }
-      return '[ANALYSIS_MISSING] Guardrails has no completed analysis for this exact execution; dispatch refused.'
+      return renderGuardrailMessage({ kind: 'deny', ruleId: 'ANALYSIS_MISSING', reason: '[ANALYSIS_MISSING] Guardrails has no completed analysis for this exact execution; dispatch refused.', execution })
     }
-    if (lifetime.signal.aborted) return '[ANALYSIS_DISPOSED] Guardrails was unloaded during analysis.'
-    if (execution.signal?.aborted) return '[ANALYSIS_CANCELLED] Invocation cancelled.'
-    return result.kind === 'allow' ? undefined : result.reason ?? '[APPROVAL_CANCELLED] No one-time authorization.'
+    if (lifetime.signal.aborted) return renderGuardrailMessage({ kind: 'deny', ruleId: 'ANALYSIS_DISPOSED', reason: '[ANALYSIS_DISPOSED] Guardrails was unloaded during analysis.', execution })
+    if (execution.signal?.aborted) return renderGuardrailMessage({ kind: 'deny', ruleId: 'ANALYSIS_CANCELLED', reason: '[ANALYSIS_CANCELLED] Invocation cancelled.', execution })
+    return result.kind === 'allow' ? undefined : result.reason ?? renderGuardrailMessage({ kind: 'deny', ruleId: 'APPROVAL_CANCELLED', reason: '[APPROVAL_CANCELLED] No one-time authorization.', execution })
   }))
   ctx.effect(() => ctx.on('tools/pre-execute', async (execution, next) => {
     // Framework-safe tools carry no deletion capability; return early so team/inspect/
@@ -457,6 +479,12 @@ export function apply(ctx, config = {}) {
     } catch {
       // Parser diagnostics may contain script source; report only a safe category.
       decision = { kind: 'deny', reason: '[ANALYSIS_UNAVAILABLE] Official syntax or target analysis failed; invocation refused. Check parser availability and valid syntax.', unknown: [] }
+    }
+    // Every non-allow decision is rendered into the fixed structured block once, here at the
+    // single tool-return boundary. The stored decision carries the rendered reason so the
+    // final synchronous guard reports the same text.
+    if (decision.kind !== 'allow') {
+      decision = { ...decision, reason: renderGuardrailMessage({ kind: decision.kind, ruleId: decision.ruleId, reason: decision.reason, unknown: decision.unknown ?? [], execution }) }
     }
     // Unknown diagnostics belong to this invocation; they never create permission.
     completed.set(execution, decision)

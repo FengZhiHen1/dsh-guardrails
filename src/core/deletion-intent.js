@@ -32,7 +32,7 @@ const MAX_COMMANDS = 2048;
 /** Maximum arguments per command keeps classification bounded. */
 const MAX_ARGS = 4096;
 /** English suffix asking for a clearer command; one wording keeps diagnostics stable. */
-const CLEARER = 'Use a clearer, supported command with explicit literal paths and supported options.';
+export const CLEARER = 'Use a clearer, supported command with explicit literal paths and supported options.';
 
 /**
  * Read-only inspection commands that have no filesystem, process or config
@@ -572,9 +572,10 @@ function classifyNeutral(command, name, spec) {
   let literal = false;
   for (let index = 0; index < command.args.length; index += 1) {
     const arg = command.args[index];
-    // A dynamic operand could expand to an option or change the effect; a lone
-    // core layer must not silently pass it, so deny.
-    if (arg === null) return { denial: deny('DI-DYNAMIC-ARGUMENT', `Command "${name}" uses a dynamic argument whose effect cannot be proven; ${CLEARER}`) };
+    // A dynamic operand of a known READ-ONLY command cannot delete: it can only name a value
+    // to read/print. It is allowed (no operation) rather than refused; the credential
+    // static-text check at the host boundary still scans the full command text.
+    if (arg === null) continue;
     if (typeof arg !== 'string') return { denial: deny('DI-MALFORMED', `Command "${name}" has a non-string argument; ${CLEARER}`) };
     if (!literal && arg === '--') { literal = true; continue; }
     if (!literal && /^-{1,2}/.test(arg) && arg !== '-') {
@@ -584,7 +585,8 @@ function classifyNeutral(command, name, spec) {
         const value = command.args[index + 1];
         if (spec.optionalValue?.has(lower)) continue;
         index += 1;
-        if (value === null) return { denial: deny('DI-DYNAMIC-ARGUMENT', `Command "${name}" option "${arg}" has a dynamic value whose effect cannot be proven; ${CLEARER}`) };
+        // A dynamic value for a read-only command is a read target, not a deletion; allow it.
+        if (value === null) continue;
         if (typeof value === 'string') continue;
         return { denial: deny('DI-MALFORMED', `Command "${name}" option "${arg}" has an invalid value; ${CLEARER}`) };
       }
@@ -754,7 +756,7 @@ export function assessCommands(commands, options = {}) {
     const neutral = neutralSet ? neutralSet[name] : undefined;
     if (neutral) {
       const result = classifyNeutral(command, name, neutral);
-      if (result.denial) return { operations: [], denial: result.denial };
+      if (result.denial) return { operations: [], denial: { ...result.denial, reason: withDoctrine(result.denial.reason) } };
       continue;
     }
 
