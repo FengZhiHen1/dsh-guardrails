@@ -119,6 +119,8 @@ export async function mount(t, options = {}) {
   // root, so relative targets and project scoping stay inside the fixture.
   ctx.provide('workingDirectory', { get: () => root, ensure: async () => root })
   ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'workspace-write', workspaceRoot: root }) })
+  const fsLocal = await loadRuntimePackage('@deepseek-ai/dsh-fs-local')
+  await ctx.plugin(fsLocal.default, { cwd: root })
   if (options.approval === 'real-never') {
     await ctx.plugin(runtime.projections.default)
     await ctx.plugin(runtime.userApproval.default, { policy: 'never' })
@@ -160,10 +162,14 @@ export function realSession(id = 'target-runtime') {
 
 /** Register a counting no-op tool body. Dispatch counts are the observable signal. */
 export function registerCounting(ctx, name, counter) {
+  const argument = { pwsh: 'command', bash: 'command', read: 'file_path', apply_patch: 'input' }[name]
+  const parameters = argument
+    ? { type: 'object', properties: { [argument]: { type: 'string' } }, required: [argument] }
+    : { type: 'object' }
   ctx.tools.register({
     name,
     description: 'Synthetic target-runtime fixture tool.',
-    parameters: { type: 'object' },
+    parameters,
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
     execute: async () => { counter.calls += 1; return 'synthetic-noop' },
   })

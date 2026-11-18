@@ -202,8 +202,10 @@ export function installGate(ctx, deps) {
     const fingerprintAfter = afterEvidence?.inventory?.fingerprint
     const versionedBefore = typeof fingerprintBefore === 'string' && fingerprintBefore.length > 0
     const versionedAfter = typeof fingerprintAfter === 'string' && fingerprintAfter.length > 0
-    if (versionedBefore && versionedAfter) return fingerprintBefore !== fingerprintAfter
-    if (beforeVerdict?.kind === 'confirm' && afterVerdict?.kind === 'confirm') {
+    if (versionedBefore !== versionedAfter ||
+      (versionedBefore && fingerprintBefore !== fingerprintAfter)) return true
+    if (beforeVerdict?.kind === 'confirm' && afterVerdict?.kind === 'confirm' &&
+      ruleSignature(beforeVerdict) === ruleSignature(afterVerdict)) {
       return stableKey(beforeVerdict.scope) !== stableKey(afterVerdict.scope)
     }
     return false
@@ -344,7 +346,7 @@ export function installGate(ctx, deps) {
     const budget = askBudget(policy)
     const startedAt = Date.now()
     const grant = await askOnce(execution, askReason.reason, budget, [lifetime.signal, execution.signal])
-    if (!grant.granted) return { kind: 'deny', decision: { ...verdict, reason: grant.reason } }
+    if (!grant.granted) return { kind: 'deny', decision: renderVerdict({ ...verdict, kind: 'deny', reason: grant.reason }) }
     if (signal.aborted || lifetime.signal.aborted) {
       return { kind: 'deny', decision: fault('ANALYSIS_CANCELLED', 'invocation cancelled before dispatch.') }
     }
@@ -401,12 +403,12 @@ export function installGate(ctx, deps) {
       }
       const remaining = budget - (Date.now() - startedAt)
       if (remaining <= 0) {
-        return { kind: 'deny', decision: { ...revisit.verdict, reason: APPROVAL_DENIALS.budget } }
+        return { kind: 'deny', decision: renderVerdict({ ...revisit.verdict, kind: 'deny', reason: APPROVAL_DENIALS.budget }) }
       }
       const reAsk = renderVerdict(revisit.verdict)
       if (reAsk.kind === 'deny') return { kind: 'deny', decision: reAsk }
       const reGrant = await askOnce(execution, reAsk.reason, remaining, [lifetime.signal, execution.signal])
-      if (!reGrant.granted) return { kind: 'deny', decision: { ...revisit.verdict, reason: reGrant.reason } }
+      if (!reGrant.granted) return { kind: 'deny', decision: renderVerdict({ ...revisit.verdict, kind: 'deny', reason: reGrant.reason }) }
       if (lifetime.signal.aborted || execution.signal?.aborted) return denyCancel()
       previous = revisit
     }

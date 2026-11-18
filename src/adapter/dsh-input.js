@@ -95,7 +95,7 @@ function declaredParams(source) {
  */
 function declaresParam(source, key) {
   const params = declaredParams(source)
-  return params === undefined || Object.hasOwn(params, key)
+  return params === undefined || (Object.hasOwn(params.properties ?? {}, key) && params.required?.includes(key))
 }
 
 /**
@@ -252,7 +252,7 @@ function targetOperation({ action, execution, cwd, fsTarget, recursive = false }
     target: { kind: 'exact', paths: [fsTarget] },
     recursive,
     preview: false,
-    condition: 'unconditional',
+    condition: 'certain',
     origin: { entry: execution.name, callId: execution.callId },
   }
 }

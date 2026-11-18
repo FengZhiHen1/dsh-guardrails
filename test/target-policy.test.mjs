@@ -379,6 +379,15 @@ test('decide: unknown and pattern deletion targets confirm data.delete.dynamic w
   assert.ok(decision.scope.notes.some((note) => note.includes('*.tmp')))
 })
 
+test('decide: dynamic deletion without a verifiable scope cannot be confirmed', () => {
+  const result = decide({ ...CLEAN,
+    operations: [{ action: 'delete', target: { kind: 'unknown', reason: 'dynamic target' } }],
+    inventory: { kind: 'exact', count: 0, files: [], links: [], directories: [], roots: [], unknown: ['dynamic target'] },
+  }, {})
+  assert.equal(result.kind, 'deny')
+  assert.equal(result.ruleId, 'data.delete.dynamic')
+})
+
 test('decide: recursion-unproven exact target confirms dynamic', () => {
   const evidence = {
     ...CLEAN,

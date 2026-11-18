@@ -72,7 +72,7 @@ function emitFacts(unit, env, facts) {
           origin,
           context: unit.context,
           condition: fact.condition,
-          recursive: fact.recursive === true,
+          recursive: fact.recursive === 'unknown' ? 'unknown' : fact.recursive === true,
           preview: false,
           details: fact.details,
         });

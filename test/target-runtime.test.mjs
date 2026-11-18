@@ -131,6 +131,26 @@ test('AC-01f: a protected-file read asks once and refuses when the grant is reje
     `the final refusal is rendered by guardrails: ${protectedResult.error?.message}`)
 })
 
+test('GT-08: a protected file changed during approval is refused before dispatch', { skip: gateSkip }, async t => {
+  const root = await harness.fixtureRoot(t, 'changed-after-ask')
+  const marked = join(root, 'protected.txt')
+  await writeFile(marked, 'initial fixture')
+  const { ctx, approvalRequests } = await harness.mount(t, {
+    workingDirectory: root, gate: gateOrThrow(), config: { sensitiveFiles: [marked] },
+    async approval() {
+      await writeFile(marked, 'second version with a different size')
+      return 'allowed-once'
+    },
+  })
+  const counter = { calls: 0 }
+  harness.registerCounting(ctx, 'read', counter)
+  const result = await harness.runTool(ctx, harness.makeAgent(root, ctx).agent, 'read', { file_path: marked })
+  assert.equal(approvalRequests.length, 1)
+  assert.equal(counter.calls, 0)
+  assert.equal(result.isError, true)
+  assert.match(result.error?.message ?? '', /GUARD_SCOPE_CHANGED/)
+})
+
 test('GT-13: the real ApprovalService never policy rejects the protected-read confirmation', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'approval-never')
   const marked = join(root, 'id_rsa')
@@ -255,8 +275,8 @@ test('GT-09/DSR-027: SDK inner apply_patch targets are decided per dispatch, not
   assert.equal(counter.calls, 0, 'the refused inner apply_patch never dispatched its body')
   assert.equal(approvalRequests.length, 1,
     'only the inner dispatch confirmed the bulk patch — the outer program did not re-inventory it')
-  assert.ok(observed.some(entry => entry.name === 'apply_patch' && entry.nested), 'the inner apply_patch reached the gate as its own execution')
-  assert.ok(observed.some(entry => entry.name === 'run_code'), 'the outer run_code reached the gate once')
+  assert.equal(approvalRequests[0].toolName, 'apply_patch', 'the SDK dispatch requested approval for its own tool')
+  assert.equal(observed.filter(entry => entry.name === 'run_code').length, 1, 'the outer run_code reached the gate once')
   assert.match(result.value?.result?.message ?? '', /data\.delete\.bulk|DEL-01|at least 21|limit 20|bulk/i,
     'the inner refusal carries the bulk-deletion signal')
   assert.equal(files.every(file => existsSync(file)), true, 'the managed targets are untouched')
@@ -328,8 +348,6 @@ test('GT-14 (real): the official optional apply_patch definition registers, pass
   await writeFile(join(root, removable), 'x')
   await writeFile(join(root, editable), 'old line\n')
   const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate: gateOrThrow(), approval: 'rejected' })
-  const fsLocal = await harness.loadRuntimePackage('@deepseek-ai/dsh-fs-local')
-  await ctx.plugin(fsLocal.default, { cwd: root })
   const toolFs = await harness.loadRuntimePackage('@deepseek-ai/dsh-tool-fs')
   await ctx.plugin({ name: toolFs.name, inject: toolFs.inject, apply: toolFs.apply, Config: toolFs.Config }, {
     read: false, readImage: false, write: false, edit: false, applyPatch: true,

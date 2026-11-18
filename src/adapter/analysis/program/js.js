@@ -551,11 +551,16 @@ class Analyzer {
       const options = node.arguments[1];
       if (options && this.ts.isObjectLiteralExpression(options)) {
         for (const property of options.properties) {
-          if (this.ts.isPropertyAssignment(property) && this.ts.isIdentifier(property.name) && property.name.text === 'recursive') {
-            recursive = property.initializer.kind === this.ts.SyntaxKind.TrueKeyword;
+          if (this.ts.isSpreadAssignment(property) || this.ts.isComputedPropertyName(property.name)) {
+            recursive = 'unknown';
+          } else if (property.name?.text === 'recursive') {
+            const kind = this.ts.isPropertyAssignment(property) ? property.initializer.kind : undefined;
+            recursive = kind === this.ts.SyntaxKind.TrueKeyword ? true
+              : kind === this.ts.SyntaxKind.FalseKeyword ? false : 'unknown';
           }
         }
       } else if (options) {
+        recursive = 'unknown';
         details = 'options object is not statically known';
       }
     }

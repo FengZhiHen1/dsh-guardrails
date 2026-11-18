@@ -475,19 +475,28 @@ test('the real Windows system tree gets a root identity (Windows only)', { skip:
 /** Fake fs provider per the Inspect `fs` contract: resolve/processPath/stat. */
 function createFsProvider(table) {
   return {
-    async resolve(raw) { return { key: `k:${raw}`, raw } },
+    async resolve(raw) { return { targetKey: `k:${raw}`, raw } },
     processPath(target) { return table.get(target.raw)?.displayPath ?? target.raw },
     async stat(target) {
       const item = table.get(target.raw)
-      return item && item.kind ? { kind: item.kind, version: item.version } : undefined
+      return item ? { type: item.type, version: item.version } : undefined
     },
   }
 }
 
+test('a relative host content path matches the configured absolute file', async () => {
+  const cwd = path.resolve('fixture')
+  const marked = path.join(cwd, 'protected.txt')
+  const operation = { action: 'read-content', context: { domain: 'host', platform: process.platform, cwd },
+    target: { kind: 'exact', paths: ['protected.txt'] }, recursive: false, preview: false, condition: 'certain' }
+  const evidence = await collectEvidence(analysisWith([operation]), { isProtectedPath: (target) => target === marked })
+  assert.deepEqual(evidence.protectedHits, [{ path: marked, action: 'read-content' }])
+})
+
 const fsContext = { domain: 'fs', platform: 'linux' }
 
 test('fs-domain targets resolve, dedupe by key and report display paths', async (t) => {
-  const table = new Map([['vault/secret.env', { kind: 'file', version: 'v1', displayPath: '/ws/secret.env' }]])
+  const table = new Map([['vault/secret.env', { type: 'file', version: 'v1', displayPath: '/ws/secret.env' }]])
   const evidence = await collectEvidence(analysisWith([
     deleteOp({ kind: 'exact', paths: ['vault/secret.env'] }, fsContext),
     { action: 'read-content', target: { kind: 'exact', paths: ['vault/secret.env'] }, context: fsContext, condition: 'certain', recursive: false, preview: false },
@@ -502,11 +511,11 @@ test('fs-domain targets resolve, dedupe by key and report display paths', async 
 
 test('two raw spellings of one fs target count once (key dedupe)', async (t) => {
   const table = new Map([
-    ['a.txt', { kind: 'file', version: 'v1', displayPath: '/ws/a.txt' }],
-    ['./a.txt', { kind: 'file', version: 'v1', displayPath: '/ws/a.txt' }],
+    ['a.txt', { type: 'file', version: 'v1', displayPath: '/ws/a.txt' }],
+    ['./a.txt', { type: 'file', version: 'v1', displayPath: '/ws/a.txt' }],
   ])
   const provider = createFsProvider(table)
-  provider.resolve = async (raw) => ({ key: 'k:same-target', raw }) // both spellings → one key
+  provider.resolve = async (raw) => ({ targetKey: 'k:same-target', raw }) // both spellings share one key
   const evidence = await collectEvidence(analysisWith([
     deleteOp({ kind: 'exact', paths: ['a.txt', './a.txt'] }, fsContext),
   ]), { fsProvider: provider, isProtectedPath: () => false })
@@ -516,7 +525,7 @@ test('two raw spellings of one fs target count once (key dedupe)', async (t) => 
 
 test('an fs version bump changes the fingerprint on an unchanged path', async (t) => {
   const runWith = async (version) => {
-    const table = new Map([['a.txt', { kind: 'file', version, displayPath: '/ws/a.txt' }]])
+    const table = new Map([['a.txt', { type: 'file', version, displayPath: '/ws/a.txt' }]])
     return collectEvidence(analysisWith([
       deleteOp({ kind: 'exact', paths: ['a.txt'] }, fsContext),
     ]), { fsProvider: createFsProvider(table), isProtectedPath: () => false })

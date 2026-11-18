@@ -46,7 +46,7 @@ function harness() {
   const events = new Map()
   const ctx = {
     effect: factory => factory(),
-    tools: { get: () => ({ output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] } }) },
+    tools: { executable: () => ({ output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] } }) },
     on: (name, callback) => { events.set(name, callback); return () => events.delete(name) },
   }
   return { ctx, events }

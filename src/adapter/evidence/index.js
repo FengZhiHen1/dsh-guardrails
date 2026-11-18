@@ -170,6 +170,7 @@ async function collect({
       protectedSeen.add(key)
       protectedHits.push({ path: value, action })
     }
+    return true
   }
 
   // One shared observation counter across the walk, identity probes and evidence checks:
@@ -368,12 +369,11 @@ async function collectIdentities(operation, state, ctx, identities) {
     return
   }
 
-  if (!hostProbes) return
+  if (!hostProbes || operation.preview === true) return
 
-  // 2) Device identity — content writes included: writing raw storage (e.g. to a
-  //    \\.\PhysicalDriveN or /dev/* target) is not a deletion, yet its actual storage
-  //    identity is exactly what the device probes can prove, so device candidates are
-  //    collected for EVERY operation, not only destructive ones.
+  // 2) Raw storage writes can destroy a device without deleting a directory entry.
+  const mayMutate = DESTRUCTIVE.has(action) || action === 'write-content' || action === 'truncate-content' || details.deviceMutation
+  if (!mayMutate) return
   const selector = selectorFromDeviceMutation(details.deviceMutation)
   if (selector) {
     const identity = await observeDeviceSelectorIdentity({ selector, windowsInventory: ctx.windowsInventory, signal: ctx.signal, deadlineAt: ctx.deadlineAt })
@@ -392,6 +392,8 @@ async function collectIdentities(operation, state, ctx, identities) {
     if (ctx.windows) {
       identity = await observeDeviceIdentity({ target: absolute, windowsInventory: ctx.windowsInventory, signal: ctx.signal, deadlineAt: ctx.deadlineAt })
     } else if (ctx.platform === 'linux') {
+      const metadata = await metadataProbe(absolute, { signal: ctx.signal })
+      if ((metadata.state === 'known' && !metadata.stat.isBlockDevice()) || metadata.code === 'ENOENT' || metadata.code === 'ENOTDIR') continue
       identity = await observeLinuxBlockIdentity({ target: absolute, systemTrees: await ctx.getSystemTrees(), signal: ctx.signal, consume: ctx.consume, deadlineAt: ctx.deadlineAt })
     }
     if (identity) identities.push({ ruleId: RULES.device, path: absolute, action })

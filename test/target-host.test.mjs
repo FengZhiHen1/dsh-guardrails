@@ -98,7 +98,7 @@ function officialDefinition(name, param) {
     name,
     execute: async () => ({}),
     ...param !== undefined
-      ? { parameters: { [param]: { type: 'string', required: true, description: `${name} target` } } }
+      ? { parameters: { type: 'object', properties: { [param]: { type: 'string' } }, required: [param] } }
       : {},
   }
 }
@@ -167,7 +167,7 @@ function fakeDeps(overrides = {}) {
       return state.verdict ?? { kind: 'allow' }
     },
     renderDecision(verdict) {
-      return `[GUARDRAILS] ${String(verdict.kind).toUpperCase()} ${verdict.ruleId ?? ''}`.trim()
+      return `[GUARDRAILS] ${String(verdict.kind).toUpperCase()} ${verdict.ruleId ?? ''}\n${verdict.reason ?? ''}`.trim()
     },
     readPolicyCalls: 0,
     readPolicy() {
@@ -320,7 +320,7 @@ test('structured read/write targets become exact fs operations with the same cwd
   assert.deepEqual(op.target, { kind: 'exact', paths: ['secrets.env'] })
   assert.equal(op.recursive, false)
   assert.equal(op.preview, false)
-  assert.equal(op.condition, 'unconditional')
+  assert.equal(op.condition, 'certain')
   assert.equal(op.origin.entry, 'read')
 
   const writePlan = await planExecution(ctx, execution({ name: 'write', args: { file_path: 'out.txt' } }))
@@ -735,7 +735,7 @@ test('revisit denies when script contents changed the analyzed operations while 
   const { ctx, state } = approvalCtx(['allowed-once'])
   const op = (path) => ({
     action: 'delete', context: { domain: 'fs', cwd: 'E:/ws' }, target: { kind: 'exact', paths: [path] },
-    recursive: false, preview: false, condition: 'unconditional',
+    recursive: false, preview: false, condition: 'certain',
   })
   const deps = scenarioDeps({
     analyses: [

@@ -67,7 +67,7 @@ test('real ToolRuntime final guard rejects short-circuited pre-analysis', { skip
   const ctx = await setup(t)
   await ctx.plugin({ name: 'guardrails-test-mount', inject: ['tools'], apply })
   let calls = 0
-  ctx.tools.register({ name: 'pwsh', description: 'Synthetic parser fixture.', parameters: { type: 'object' },
+  ctx.tools.register({ name: 'pwsh', description: 'Synthetic parser fixture.', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     execute: async () => { calls++; return 'safe' } })
   const signal = new AbortController().signal

@@ -825,16 +825,27 @@ function deletionFamilyRule(operations, fallbackKind) {
 function buildDeletionHit(operations, inventory, gitRisk) {
   const delOps = operations.filter((op) => DELETION_ACTIONS.has(op.action) && !op.preview)
   const hits = []
-  const dynamicOps = delOps.filter((op) =>
-    op.target.kind === 'unknown' || op.target.kind === 'pattern' || op.recursive === 'unknown')
+  const dynamicOps = delOps.filter((op) => {
+    // Git supplies its path set through evidence, after the syntax analysis.
+    if (Object.hasOwn(GIT_OP_RULES, op.action) && op.target.reason === 'git-evidence' &&
+      inventory && (inventory.unknown.length === 0 || gitRisk?.paths.length)) return false
+    return op.target.kind === 'unknown' || op.target.kind === 'pattern' || op.recursive === 'unknown'
+  })
 
   if (dynamicOps.length > 0) {
     // Unknown, wildcard, or recursion-unproven targets: the deletion cannot be counted
     // (R-07). Directory contents must not stand in for an unknown target's scope.
     const ruleId = deletionFamilyRule(dynamicOps, 'dynamic')
     const scope = emptyScope()
+    scope.files = inventory?.files ?? []
+    scope.links = inventory?.links ?? []
+    scope.directories = inventory?.directories ?? []
+    scope.roots = [...(inventory?.roots ?? [])]
+    scope.unknown = inventory?.unknown ?? []
     const targets = []
+    let unscoped = false
     for (const op of dynamicOps) {
+      if (op.target.kind === 'unknown' && !op.target.knownScope?.length) unscoped = true
       for (const known of op.target.knownScope ?? []) pushUnique(scope.knownScope, known)
       if (op.target.kind === 'pattern') {
         const label = `pattern ${op.target.pattern || '(unresolved pattern)'} under ${op.target.base || '(unresolved base)'}`
@@ -851,8 +862,9 @@ function buildDeletionHit(operations, inventory, gitRisk) {
     }
     hits.push({
       ruleId,
-      outcome: 'confirm',
-      reason: 'Deletion targets cannot be enumerated (unresolved, wildcard, or recursion-unproven). Confirm with the provable scope; the unenumerable part is stated explicitly. Confirmation is not a standing deletion authorization.',
+      outcome: unscoped ? 'deny' : 'confirm',
+      reason: unscoped ? 'At least one deletion target has no verifiable scope.'
+        : 'Deletion targets cannot be fully enumerated. Confirm the documented scope and its unknown remainder.',
       trigger: asString(dynamicOps[0].target.reason, 'deletion target not enumerable'),
       scope,
       // A dynamic deletion always has an unobserved remainder, so a path allowlist can

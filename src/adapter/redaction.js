@@ -41,7 +41,7 @@ export function installRedaction(ctx) {
         if (result.isError || typeof decision.value !== 'string') return decision
         const replacement = redactText(decision.value)
         if (!replacement.changed) return decision
-        const tool = ctx.tools.get(exec.name, exec.agent)
+        const tool = ctx.tools.executable(exec.name, exec.agent, exec.toolSet)
         return safeStringProjection(tool, exec, replacement.text) ? { ...decision, value: replacement.text } : decision
       }
       if (Object.hasOwn(decision, 'content')) {
@@ -50,7 +50,7 @@ export function installRedaction(ctx) {
       }
       if (!result.isError && typeof result.value === 'string') {
         const replacement = redactText(result.value)
-        if (replacement.changed && safeStringProjection(ctx.tools.get(exec.name, exec.agent), exec, replacement.text)) {
+        if (replacement.changed && safeStringProjection(ctx.tools.executable(exec.name, exec.agent, exec.toolSet), exec, replacement.text)) {
           return { ...decision, value: replacement.text }
         }
       }

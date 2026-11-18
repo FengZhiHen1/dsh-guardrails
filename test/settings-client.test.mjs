@@ -8,7 +8,7 @@ let plugin
 vm.runInNewContext(source, { window: { __ModuleLoader__: { load(entry) {
   plugin = entry.factory(name => {
     assert.equal(name, 'react')
-    return { createElement() {} }
+    return { createElement(type, props) { return { type, props } } }
   })
 } } } })
 const plain = value => JSON.parse(JSON.stringify(value))
@@ -64,15 +64,14 @@ test('settings owns bilingual dictionary and row slot resources for unload', () 
   const disposers = []
   const registrations = []
   const keys = []
-  const form = { getSnapshot: () => ({ status: 'loading' }), subscribe: () => () => {} }
+  const form = { state: { status: 'loading' } }
   const ctx = {
     effect(callback) { disposers.push(callback()) },
     locale: { register(ns, language, dictionary) { keys.push(Object.keys(dictionary).sort()); registrations.push(language); return () => registrations.pop() } },
-    configForms: { get(namespace) { assert.equal(namespace, 'guardrails'); return form } },
-    slots: { inject(name, callback) { assert.equal(name, 'plugins.row.config'); disposers.push(callback()) }, register(options) {
+    slots: { inject(name, callback) { assert.equal(name, 'plugins.row.config'); disposers.push(callback()) }, register(options, render) {
       assert.equal(options.key, 'dsh-guardrails#guardrails')
       assert.equal(options.locale, 'guardrails-settings')
-      assert.equal(options.inject().settingsForm, form)
+      assert.equal(render({ view: 'page', form, t: String }).props.form, form)
       return () => registrations.push('slot-disposed')
     } },
   }

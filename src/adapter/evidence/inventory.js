@@ -155,7 +155,7 @@ export async function observeOperation(state, operation, ctx) {
   // Content/permission actions and proven previews (real -WhatIf / --dry-run) remove
   // nothing: they still get the protected-path scan (R-04 covers reads too) and no count.
   if (!DESTRUCTIVE.has(action) || operation.preview === true) {
-    scanProtection(state, operation, ctx)
+    scanProtection(operation, ctx)
     return
   }
   if (GIT_ACTIONS.has(action)) return observeGitOperation(state, operation, ctx)
@@ -165,12 +165,16 @@ export async function observeOperation(state, operation, ctx) {
   noteUnknown(state, 'domain-unprobed')
 }
 
-/** Protected-path scan for any target expression, including non-counting actions. */
-function scanProtection(state, operation, ctx) {
+/** Resolve literal paths against the verified execution cwd before matching exact marks. */
+function scanProtection(operation, ctx) {
+  if (operation.preview || operation.action === 'metadata') return
   const target = operation.target ?? { kind: 'unknown' }
-  if (target.kind === 'exact') for (const value of (Array.isArray(target.paths) ? target.paths : [])) ctx.noteProtected(value, operation.action)
-  if (target.kind === 'subtree' && typeof target.root === 'string') ctx.noteProtected(target.root, operation.action)
-  if (target.kind === 'pattern' && typeof target.base === 'string') ctx.noteProtected(target.base, operation.action)
+  const context = operation.context ?? {}
+  const cwd = context.domain === 'host' && (context.platform ?? ctx.platform) === ctx.platform ? absoluteCwd(context.cwd) : null
+  const match = (value) => ctx.noteProtected(resolveLocal(value, cwd) ?? value, operation.action)
+  if (target.kind === 'exact') for (const value of (Array.isArray(target.paths) ? target.paths : [])) match(value)
+  if (target.kind === 'subtree') match(target.root)
+  if (target.kind === 'pattern') match(target.base)
 }
 
 // --- host domain -----------------------------------------------------------
@@ -518,10 +522,9 @@ async function evaluateExemption(state, absolute, ctx) {
  * path (lstat/realpath/git) is ever touched. Per the Inspect `fs` contract:
  * - `resolve(raw, {cwd, signal})` → FsTarget for EVERY content path (read/write included,
  *   because a protected alias may only be canonical after resolution);
- * - `processPath(target)` is the display path used for scope lists and protected matching;
- * - `stat(target, signal)` → FsInfo | undefined carries the entry type and `FsVersion`;
- * - dedupe uses the opaque stable target key (target.key, else fileUrl) so two raw
- *   spellings of one target count once, and key+version feed the fingerprint.
+ * - `displayPath` names the target in scope lists and protected matching;
+ * - `stat(target, signal)` gives the version or absence for the approval recheck;
+ * - `targetKey` is opaque. Aliases dedupe by key without treating it as a path.
  */
 async function observeFsOperation(state, operation, ctx) {
   const provider = ctx.fsProvider
@@ -552,8 +555,14 @@ async function observeFsOperation(state, operation, ctx) {
     }
     // Protection matching uses the resolved display path: the alias may be canonical here.
     const displayPath = displayPathOf(provider, resolved, raw)
-    ctx.noteProtected(displayPath, operation.action)
-    if (!counting) continue
+    const stableKey = stableKeyOf(resolved)
+    if (!stableKey) {
+      ctx.noteIssue({ kind: 'invalid-fs-target', reason: 'file provider returned no target identity', path: displayPath })
+      noteFailure(state, 'invalid-fs-target')
+      continue
+    }
+    const protectedPath = ctx.noteProtected(displayPath, operation.action)
+    if (!counting && !protectedPath) continue
     let info
     try {
       info = await provider.stat(resolved, ctx.signal)
@@ -562,18 +571,17 @@ async function observeFsOperation(state, operation, ctx) {
       noteFailure(state, 'entry-unreadable')
       continue
     }
-    if (info === undefined || info === null) continue // provider says absent: known zero
+    state.fsIdentities.push({ key: stableKey, version: fsVersionOf(info) })
+    if (!counting || info === undefined || info === null) continue
     const kind = normalizeFsInfo(info)
     if (kind === 'other') {
       ctx.noteIssue({ kind: 'ambiguous-entry', reason: 'unknown-stat-shape', path: displayPath })
       noteFailure(state, 'ambiguous-entry')
       continue
     }
-    // Dedupe by the opaque stable key: two raw spellings of one target count once.
-    const stableKey = stableKeyOf(provider, resolved)
+    // Two spellings of one target contribute a single deletion entry.
     if (state.seenKeys.has(stableKey)) continue
     state.seenKeys.add(stableKey)
-    state.fsIdentities.push({ key: stableKey, version: fsVersionOf(info) })
     if (kind === 'link') state.links.push(displayPath)
     else if (kind === 'file') state.files.push(displayPath)
     else {
@@ -608,16 +616,8 @@ function displayPathOf(provider, target, raw) {
   return raw
 }
 
-/** Opaque stable target key: target.key when present, else the provider's fileUrl. */
-function stableKeyOf(provider, target) {
-  if (target && typeof target === 'object') {
-    if (typeof target.key === 'string' && target.key !== '') return target.key
-    try {
-      const url = provider.fileUrl?.(target)
-      if (typeof url === 'string' && url !== '') return url
-    } catch { /* fall through */ }
-  }
-  return JSON.stringify(target ?? null)
+function stableKeyOf(target) {
+  return typeof target?.targetKey === 'string' && target.targetKey !== '' ? target.targetKey : undefined
 }
 
 function fsVersionOf(info) {
@@ -625,17 +625,7 @@ function fsVersionOf(info) {
 }
 
 function normalizeFsInfo(info) {
-  if (!info || typeof info !== 'object') return 'other'
-  if (typeof info.kind === 'string') {
-    return { file: 'file', directory: 'directory', link: 'link' }[info.kind] ?? 'other'
-  }
-  if (typeof info.isFile === 'function') {
-    if (info.isSymbolicLink?.()) return 'link'
-    if (info.isFile()) return 'file'
-    if (info.isDirectory()) return 'directory'
-    return 'other'
-  }
-  return 'other'
+  return info.type === 'file' || info.type === 'directory' ? info.type : 'other'
 }
 
 // --- git operations ---------------------------------------------------------
@@ -733,5 +723,4 @@ async function observeGitOperation(state, operation, ctx) {
     return
   }
   state.roots.push(absolute)
-  ctx.noteGitRisk([absolute], `clean (ignored non-rebuildable entries: ${verdict.count})`)
 }
