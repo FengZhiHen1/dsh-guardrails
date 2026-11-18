@@ -2,6 +2,17 @@
 
 本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
+## 0.3.0
+
+- **判定模型重构（三档 + 契约规则号）**：动作收敛为拒绝 / 确认 / 放行；默认放行，只兜「不可逆且高后果」。规则号成为契约（`catastrophic.*`、`data.*`、`credential.*`、`execution.*`），支持按规则号放行、一次性放行与 `tightenOnly` 项目层收紧；灾难身份不可确认、不可配置覆盖。取代 0.2.x 的 L1/L2/L3 口径。见 [DSR-025](docs/decisions/DSR-025-定位重定位与判定模型重构.md)、[规则模型](docs/technical-details/规则模型.md)。
+- **统一执行分析契约**：Bash、PowerShell、Python、JavaScript/TypeScript 共用同一入口与结果形状 `{status, operations, candidates, gaps}`，目标按 `exact|pattern|subtree|unknown` 表达，覆盖缺口与检查故障分离。见 [DSR-027](docs/decisions/DSR-027-统一执行分析契约.md)、[执行分析](docs/technical-details/执行分析.md)。
+- **解释器脚本文件正文不读取（RR-5）**：`python`/`node`/`tsx`/`deno`/`bun` 后接脚本文件只保留外层命令事实并记 `script-file-body-not-analyzed` 缺口放行；Shell 脚本文件仍按内容分析。见 [DSR-028](docs/decisions/DSR-028-解释器脚本文件正文不读取.md)。
+- **覆盖补齐（默认放行不变）**：`find -delete`/`-exec rm`、`xargs`/`parallel` 加字面删除 argv、`shred`、`rsync --delete`、透明包装器（`sudo`/`env`/`nice`/`time`/`stdbuf`/`nohup`/`command`/`exec`/`timeout`）解包、`cmd /c` 删除族、git 工作树状态丢弃类（`checkout -- <path>`/`--force`、`switch --force`、`reset --merge`、`branch -D`、`tag -d`）、程序内联的 `require(...)` 直连链与字面量成员、`wsl` 载荷与 `wsl --unregister`、云/数据库/K8s 的最高危删除子命令（确认档）。见 [DSR-029](docs/decisions/DSR-029-参考覆盖面补齐与反过度防御边界.md)。
+- **反过度防御**：覆盖缺口不升级为拒绝；非宿主执行域与远端删除不落本地盘存，按「域 / 命令范围」确认；只读子命令与 `--dry-run`/`--help`/`--version` 不产生判定；正常用法回归（`git status`/`checkout -b`/`switch`/`branch -d`、无 `-delete` 的 `find`、无 `--delete` 的 `rsync`、`kubectl get`、`aws s3 ls`、`psql -c "SELECT 1"`、`docker ps`、`wsl ls`、`sudo ls` 等）是持续门禁。
+- **事故类防御**：跨层展开的删除目的一律按不可证处理——`rsync --delete` 的目的地必须是字面路径，变量/替换派生目的地按范围确认（2026-11-14 事故根因）；`wsl` 载荷进入分析。
+- **凭据**：词首 `~` 归一为宿主 HOME；内置名单新增精确尾段组合（`.kube/config`、`.docker/config.json`、`.config/gh/hosts.yml`、gcloud 凭据文件、`.azure/accessToken(s).json`）与 `.my.cnf`，仍不按扩展名或目录段整类拦截。
+- **修复**：候选类型名对齐执行分析契约（`dynamic-target` → `unverified-effect`）；所有检查故障统一报告 `execution.check-failed`，不再外泄内部编号。
+
 ## 0.2.1
 
 - **非删除语义误报收敛与定向提示（v6）**：非删除语义的解析 unknown 不再拒绝（变量/环境变量赋值、只读动态参数、只读管道），动态目标删除、动态命令（`& $cmd`/`iex`）、通配、执行通道、`>20`、L1 仍全部拒绝；字面 `cd` 跟踪、PowerShell 字面变量常量传播、成员/类型能力分级与凭据静态文本扫描；tool-return 统一为 `[GUARDRAILS] DENY|ASK <RULE-ID> (<layer>)` + `Why/Trigger/Effect/Next` 五段式（删除类保留强提示）。决策见 [DSR-021](docs/decisions/DSR-021-非删除unknown放行.md)。
