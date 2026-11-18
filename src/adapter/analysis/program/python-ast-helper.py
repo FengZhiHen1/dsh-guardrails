@@ -679,7 +679,7 @@ class Analyzer:
     def report_delete_or_move(self, node, key, args, keywords, env, depth, cond, line, function):
         module, func = key
         if not args:
-            self.add({"t": "candidate", "kind": "dynamic-target",
+            self.add({"t": "candidate", "kind": "unverified-effect",
                       "reason": "%s.%s without a positional target" % (module, func),
                       "condition": cond, "line": line, "function": function})
             return
@@ -690,7 +690,7 @@ class Analyzer:
             if known is None:
                 receiver = self.try_path_value(args[0], env)
                 known = [receiver] if receiver else None
-            fact = {"t": "candidate", "kind": "dynamic-target",
+            fact = {"t": "candidate", "kind": "unverified-effect",
                     "reason": "%s.%s target is not statically evaluable (%s)" % (module, func, exc.reason),
                     "condition": cond, "line": line, "function": function}
             if known:

@@ -604,14 +604,14 @@ class Analyzer {
     if (target.value !== undefined) {
       this.add({ t: 'operation', action: 'delete', target: { kind: 'exact', paths: [target.value] }, recursive, condition: cond, line, ...(details ? { details } : {}), ...(fn ? { function: fn } : {}) });
     } else {
-      this.add({ t: 'candidate', kind: 'dynamic-target', reason: `${member}: ${target.candidateReason}`, condition: cond, line, ...(target.knownScope ? { knownScope: target.knownScope } : {}), ...(fn ? { function: fn } : {}) });
+      this.add({ t: 'candidate', kind: 'unverified-effect', reason: `${member}: ${target.candidateReason}`, condition: cond, line, ...(target.knownScope ? { knownScope: target.knownScope } : {}), ...(fn ? { function: fn } : {}) });
     }
   }
 
   reportMove(node, scope, cond, line, fn) {
     const args = node.arguments;
     if (args.length < 2) {
-      this.add({ t: 'candidate', kind: 'dynamic-target', reason: 'move without statically known source or destination', condition: cond, line, ...(fn ? { function: fn } : {}) });
+      this.add({ t: 'candidate', kind: 'unverified-effect', reason: 'move without statically known source or destination', condition: cond, line, ...(fn ? { function: fn } : {}) });
       return;
     }
     let source;
@@ -620,7 +620,7 @@ class Analyzer {
     try { source = this.evalString(args[0], scope); } catch (error) { if (!(error instanceof Unk)) throw error; issues.push(`source (${error.message})`); }
     try { destination = this.evalString(args[1], scope); } catch (error) { if (!(error instanceof Unk)) throw error; issues.push(`destination (${error.message})`); }
     if (issues.length > 0) {
-      this.add({ t: 'candidate', kind: 'dynamic-target', reason: `move: ${issues.join(', ')} not statically evaluable`, condition: cond, line, ...(fn ? { function: fn } : {}) });
+      this.add({ t: 'candidate', kind: 'unverified-effect', reason: `move: ${issues.join(', ')} not statically evaluable`, condition: cond, line, ...(fn ? { function: fn } : {}) });
       return;
     }
     this.add({ t: 'operation', action: 'move-source', target: { kind: 'exact', paths: [source] }, recursive: false, condition: cond, line, ...(destination ? { details: `destination: ${destination}` } : {}), ...(fn ? { function: fn } : {}) });

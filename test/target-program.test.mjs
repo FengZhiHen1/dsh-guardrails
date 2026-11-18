@@ -116,7 +116,7 @@ test('python: dynamic sink target becomes a candidate', async (t) => { if (!pyth
   const cands = candidates(facts)
   assert.equal(ops_or_empty(operations(facts)), 0)
   assert.equal(cands.length, 1)
-  assert.equal(cands[0].kind, 'dynamic-target')
+  assert.equal(cands[0].kind, 'unverified-effect')
   assert.equal(cands[0].knownScope, undefined)
 })
 
@@ -126,7 +126,7 @@ test('python: enumeration loop reports candidate with verified base as known sco
   const cands = candidates(facts)
   assert.equal(operations(facts).length, 0)
   assert.equal(cands.length, 1)
-  assert.equal(cands[0].kind, 'dynamic-target')
+  assert.equal(cands[0].kind, 'unverified-effect')
   assert.deepEqual(cands[0].knownScope, ['C:/synthetic/work/logs'])
 })
 
