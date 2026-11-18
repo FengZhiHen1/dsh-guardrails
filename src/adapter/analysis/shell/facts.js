@@ -62,13 +62,15 @@ export function computePatterns(args, words, { powershell = false } = {}) {
 
 /**
  * Parallel-to-args boolean vector marking quoted operand words that start with
- * `-`: in POSIX shells a quoted word is a literal VALUE, never an option flag.
- * Only available for POSIX sources — the PowerShell helper output does not
- * carry parameter/literal provenance (documented limitation).
+ * `-` or `~`: in POSIX shells a quoted word is a literal VALUE, never an option
+ * flag and never a tilde expansion. Only available for POSIX sources — the
+ * PowerShell helper output does not carry parameter/literal provenance
+ * (documented limitation).
  */
 export function computeLiteralOperands(words) {
   if (!Array.isArray(words)) return undefined;
-  return words.map((word) => Boolean(word?.quoted && typeof word?.text === 'string' && word.text.startsWith('-')));
+  return words.map((word) => Boolean(word?.quoted && typeof word?.text === 'string' &&
+    (word.text.startsWith('-') || word.text.startsWith('~'))));
 }
 
 /**
@@ -110,7 +112,7 @@ export function mapInterpreterUnknowns(reason) {
 // trustworthy. cwd-changing commands whose LITERAL target can be tracked are
 // handled by the cd tracker and are skipped (pushd/popd change a stack and stay
 // explicit state-mutation gaps).
-export const BASH_STATE_MUTATORS = new Set(['pushd', 'popd', 'alias', 'unalias', 'export', 'unset', 'declare', 'typeset', 'local', 'readonly', 'source', '.', 'eval', 'exec', 'trap', 'set', 'shopt', 'enable', 'hash', 'builtin', 'command']);
+export const BASH_STATE_MUTATORS = new Set(['pushd', 'popd', 'alias', 'unalias', 'export', 'unset', 'declare', 'typeset', 'local', 'readonly', 'source', '.', 'eval', 'exec', 'trap', 'set', 'shopt', 'enable', 'hash', 'builtin']);
 export const POWERSHELL_STATE_MUTATORS = new Set(['push-location', 'pop-location', 'set-variable', 'new-variable', 'remove-variable', 'set-item', 'new-item', 'invoke-expression', 'iex', 'import-module', 'set-alias', 'new-alias', 'set-executionpolicy', 'set-psdebug', '.']);
 export const CD_FAMILY = new Set(['cd', 'set-location', 'sl', 'chdir']);
 const CD_PATH_OPTIONS = new Set(['-path', '-literalpath']);

@@ -7,14 +7,28 @@
  * names `.env.example`/`.env.sample`/`.env.template` were never carriers. */
 export const CRED_BASENAMES = new Set([
   'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', 'id_ed25519_sk', 'id_ecdsa_sk',
-  '.npmrc', '.pypirc', '.netrc', '.pgpass', '.git-credentials',
+  '.npmrc', '.pypirc', '.netrc', '.pgpass', '.git-credentials', '.my.cnf',
   '.credentials.yaml', '.auteur-media-secret',
   'ntuser.dat', 'usrclass.dat', 'pagefile.sys', 'hiberfil.sys',
 ])
-/** Exact trailing path segments, never whole credential directories. */
+/** Exact trailing path segments, never whole credential directories.
+ * The 2026-11 additions are the confirmed core CLI/cloud credential carriers
+ * (kubectl, docker, gh, gcloud, azure, MariaDB/MySQL option file); extension
+ * classes (`.pem`/`.key`) and directory-level entries stay excluded (R-04). */
 export const CRED_COMBOS = [
   ['.aws', 'credentials'], ['system32', 'config', 'sam'],
   ['system32', 'config', 'security'], ['system32', 'config', 'system'],
+  ['.kube', 'config'], ['.docker', 'config.json'],
+  ['.config', 'gh', 'hosts.yml'],
+  ['.config', 'gcloud', 'application_default_credentials.json'],
+  ['.config', 'gcloud', 'credentials.db'], ['.config', 'gcloud', 'access_tokens.db'],
+  // `.config/gcloud/legacy_credentials` is a DIRECTORY (per-account ADC files live
+  // under `<account>/adc.json`); directory-level entries stay excluded (R-04).
+  // Segments compare exactly on POSIX and case-folded on Windows; the entries keep
+  // the canonical spelling of the real carrier files.
+  // MS Learn names the legacy ADAL cache both `accessToken.json` and
+  // `accessTokens.json`; both exact spellings are kept.
+  ['.azure', 'accessTokens.json'], ['.azure', 'accessToken.json'],
 ]
 /** Hive transaction logs retain the inherited protection. */
 export const CRED_BASENAME_PREFIXES = ['ntuser.dat', 'usrclass.dat']

@@ -56,6 +56,15 @@ test('checkSensitiveRead: builtin credential hits', () => {
   assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.ssh/id_rsa'), RULES), 'credentials')
   assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.npmrc'), RULES), 'credentials')
   assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.aws/credentials'), RULES), 'credentials')
+  // 2026-11 confirmed combo additions and the .my.cnf basename.
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.kube/config'), RULES), 'credentials')
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.docker/config.json'), RULES), 'credentials')
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.config/gcloud/credentials.db'), RULES), 'credentials')
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.azure/accessTokens.json'), RULES), 'credentials')
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.my.cnf'), RULES), 'credentials')
+  // Near-misses stay free even though their directory looks like a carrier directory.
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/.kube/config.bak'), RULES), null)
+  assert.equal(checkSensitiveRead(resolvePath(BASE, 'C:/Users/me/notes/.kube/readme.md'), RULES), null)
 })
 
 test('checkSensitiveRead: user-marked exact paths (case-insensitive, separator-insensitive)', () => {
@@ -65,7 +74,9 @@ test('checkSensitiveRead: user-marked exact paths (case-insensitive, separator-i
   )
   assert.equal(checkSensitiveRead('e:/project/app/.env.production', MARKED), 'marked')
   assert.equal(checkSensitiveRead('E:\\Project\\app\\.env.production', MARKED), 'marked')
-  assert.equal(checkSensitiveRead('c:/users/ME/.KUBE/config', MARKED), 'marked')
+  // `.kube/config` joined the builtin combo list (2026-11): the builtin channel
+  // reports first, so a coinciding user mark reads as 'credentials', not 'marked'.
+  assert.equal(checkSensitiveRead('c:/users/ME/.KUBE/config', MARKED), 'credentials')
   // A sibling or subpath is NOT the marked file. `.env` itself is not a builtin
   // carrier (R-05), so a non-carrier sibling is used to show marking does not spread.
   assert.equal(checkSensitiveRead('E:/Project/app/.envrc', MARKED), null)

@@ -701,7 +701,17 @@ async function observeGitOperation(state, operation, ctx) {
     return
   }
   if (action === 'git-restore') {
+    const command = operation.details?.command
     const paths = restorePathsFromDetails(operation)
+    if (command !== 'restore' && command !== 'checkout') {
+      // branch -D / tag -d / forced switch / reset --merge (F-13..F-18): the scope is
+      // a ref or the working-tree state named in the operation's knownScope. No host
+      // probe can prove a pathset here, so record a DELIBERATE unknown — no probe, no
+      // issue — so the policy confirms with the listed scope instead of failing the
+      // check (D1: evidence inability must not become check-failed).
+      noteUnknown(state, 'git-ref-or-state-scope')
+      return
+    }
     if (paths === null) {
       ctx.noteIssue({ kind: 'git-evidence', reason: 'restore-scope-ambiguous' })
       noteFailure(state, 'restore-scope-ambiguous')

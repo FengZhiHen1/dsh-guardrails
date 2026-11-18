@@ -16,6 +16,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { collectEvidence } from '../src/adapter/evidence/index.js'
+import { decide, isProtectedPath } from '../src/core/decision.js'
 import { matchSystemTree, RULES } from '../src/adapter/evidence/identity.js'
 
 /** Create an isolated fixture directory; every entry is created by this task. */
@@ -592,4 +593,89 @@ test('an inline credential flag is forwarded unchanged', async (t) => {
   const root = await makeFixture(t, {})
   const evidence = await collectEvidence(analysisWith([], { inlineCredential: true }), { isProtectedPath: () => false })
   assert.equal(evidence.inlineCredential, true)
+})
+
+// --- git state-form dispatch (F-13..F-18, D1) -------------------------------------
+
+test('git state-form restores dispatch by details.command without probes or issues', async (t) => {
+  const root = await makeFixture(t, {})
+  const gitRun = async () => { throw new Error('no probe expected for state forms') }
+  const evidence = await collectEvidence(analysisWith([
+    {
+      action: 'git-restore', target: { kind: 'unknown', reason: 'git-ref-scope', knownScope: ['refs/heads/feature'] },
+      context: hostContext(root), condition: 'certain', recursive: false, preview: false,
+      details: { command: 'branch', args: ['-D', 'feature'], global: [] },
+    },
+    {
+      action: 'git-restore', target: { kind: 'unknown', reason: 'git-state-scope', knownScope: ['working tree (branch switch discards local changes)'] },
+      context: hostContext(root), condition: 'certain', recursive: false, preview: false,
+      details: { command: 'switch', args: ['--discard-changes', 'main'], global: [] },
+    },
+  ]), { isProtectedPath: () => false, gitRun })
+  assert.equal(evidence.analysisStatus, 'complete')
+  assert.equal(evidence.inventory.kind, 'exact')
+  assert.ok(evidence.inventory.unknown.includes('git-ref-or-state-scope'))
+  assert.deepEqual(evidence.issues, [])
+  // The policy confirms with the listed scope instead of failing the check (D1).
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.git.restore')
+})
+
+test('checkout pathspec restores still count through proveRestore', async (t) => {
+  const root = await makeFixture(t, {})
+  const gitRun = async () => ({ stdout: ' M a.txt\n' })
+  const evidence = await collectEvidence(analysisWith([
+    {
+      action: 'git-restore', target: { kind: 'exact', paths: ['a.txt'] },
+      context: hostContext(root), condition: 'certain', recursive: false, preview: false,
+      details: { command: 'checkout', args: ['--', 'a.txt'], global: [] },
+    },
+  ]), { isProtectedPath: () => false, gitRun })
+  assert.equal(evidence.inventory.count, 1)
+  assert.deepEqual(evidence.issues, [])
+})
+
+test('restore evidence dispatch keeps the legacy restore form intact', async (t) => {
+  const root = await makeFixture(t, {})
+  const gitRun = async () => ({ stdout: ' M b.txt\n' })
+  const evidence = await collectEvidence(analysisWith([
+    {
+      action: 'git-restore', target: { kind: 'unknown', reason: 'git-evidence' },
+      context: hostContext(root), condition: 'certain', recursive: false, preview: false,
+      details: { command: 'restore', args: ['--', 'b.txt'], global: [] },
+    },
+  ]), { isProtectedPath: () => false, gitRun })
+  assert.equal(evidence.inventory.count, 1)
+  assert.deepEqual(evidence.issues, [])
+})
+
+// --- tilde protection (F-24) -------------------------------------------------------
+
+test('tilde-expanded credential reads are protected', async (t) => {
+  const root = await makeFixture(t, {})
+  const credential = path.join(os.homedir(), '.aws', 'credentials')
+  const evidence = await collectEvidence(analysisWith([
+    { action: 'read-content', target: { kind: 'exact', paths: [credential] }, context: hostContext(root), condition: 'certain', recursive: false, preview: false },
+  ]), { isProtectedPath })
+  assert.ok(evidence.protectedHits.some((hit) => hit.path === credential && hit.action === 'read-content'))
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'credential.file.read')
+})
+
+// --- non-host domain deletions (F-33, D2) -------------------------------------------
+
+test('non-host domain deletions confirm dynamically without an inventory failure', async (t) => {
+  const root = await makeFixture(t, { files: ['a.txt'] })
+  const evidence = await collectEvidence(analysisWith([
+    deleteOp({ kind: 'unknown', reason: 'non-host-domain', knownScope: ['wsl: /tmp/x (recursive)'] }, { domain: 'wsl', platform: 'linux' }, { recursive: true }),
+  ]), { isProtectedPath: () => false })
+  assert.ok(evidence.inventory.unknown.includes('domain-unprobed'))
+  assert.equal(evidence.inventory.kind, 'exact')
+  assert.deepEqual(evidence.issues.filter((issue) => issue.kind === 'inventory-failed'), [])
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.delete.dynamic')
+  assert.ok(root) // fixture exists to prove no host path was touched
 })

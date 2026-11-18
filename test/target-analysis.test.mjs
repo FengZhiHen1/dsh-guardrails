@@ -117,3 +117,62 @@ test('inline source text participates in the credential text scan', async (t) =>
   assert.equal(result.status, 'complete')
   assert.equal(result.credentialTextMention, true)
 })
+
+// --- win32 embedded shell texts route through the cmd lexer (F-22) --------------
+
+test('embedded shell text on win32 is analyzed instead of no-provider', async (t) => {
+  const program = { analyze(_unit, env) {
+    env.child({
+      source: { kind: 'inline', text: 'del C:\\fixture\\x.txt & rmdir /s /q build' },
+      language: 'unknown', context: { domain: 'host', platform: 'win32', cwd: 'C:\\fixture' },
+    })
+  } }
+  const analyzer = createFixture(t, { program })
+  const result = await analyzer.analyze({
+    source: { kind: 'inline', text: 'fixture' }, language: 'python',
+    context: { domain: 'host', platform: 'win32', cwd: 'C:\\fixture' }, origin: { entry: 'fixture' },
+  })
+  assert.equal(result.status, 'complete')
+  assert.ok(!result.gaps.some((gap) => gap.kind === 'no-provider'))
+  assert.deepEqual(result.operations[0].target, { kind: 'exact', paths: ['C:\\fixture\\x.txt'] })
+  assert.deepEqual(result.operations[1].target, { kind: 'subtree', root: 'build' })
+})
+
+test('an unknown-dialect inline unit off win32 keeps its no-provider gap', async (t) => {
+  const analyzer = createFixture(t)
+  const result = await analyzer.analyze({
+    source: { kind: 'inline', text: 'rm -rf /tmp/x' }, language: 'unknown',
+    context: { domain: 'host', platform: 'linux' }, origin: { entry: 'fixture' },
+  })
+  assert.ok(result.gaps.some((gap) => gap.kind === 'no-provider'))
+  assert.equal(result.operations.length, 0)
+})
+
+test('cmd /c payload from shell text reaches the cmd lexer end to end', async (t) => {
+  const analyzer = createFixture(t)
+  const result = await analyzer.analyze({
+    source: { kind: 'inline', text: 'cmd /c del C:/x/a.txt' }, language: 'bash',
+    context: { domain: 'host', platform: 'win32', cwd: 'C:\\x' }, origin: { entry: 'fixture' },
+  })
+  assert.equal(result.operations[0]?.action, 'delete')
+  assert.deepEqual(result.operations[0]?.target, { kind: 'exact', paths: ['C:/x/a.txt'] })
+  assert.ok(result.gaps.some((gap) => gap.kind === 'cmd-inline'))
+})
+
+// --- non-host domain deletions (F-33, D2) ----------------------------------------
+
+test('wsl -e deletions avoid the host inventory and list the domain scope', async (t) => {
+  const analyzer = createFixture(t)
+  const result = await analyzer.analyze(invoke('wsl.exe', ['--exec', 'rm', '-rf', '/tmp/x']))
+  assert.equal(result.status, 'complete')
+  assert.equal(result.operations[0]?.action, 'delete')
+  assert.deepEqual(result.operations[0]?.target, { kind: 'unknown', reason: 'non-host-domain', knownScope: ['wsl: /tmp/x (recursive)'] })
+  assert.ok(!result.gaps.some((gap) => gap.kind === 'no-provider'))
+})
+
+test('wsl shells without --exec keep their coverage gap (regression guard)', async (t) => {
+  const analyzer = createFixture(t)
+  const result = await analyzer.analyze(invoke('wsl.exe', ['ls', '/tmp']))
+  assert.ok(result.gaps.some((gap) => gap.kind === 'wsl-shell'))
+  assert.equal(result.operations.length, 0)
+})

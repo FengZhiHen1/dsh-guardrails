@@ -2,6 +2,7 @@ import { constants } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
 import path from 'node:path'
 import { resolveCommand } from './commands.js'
+import { analyzeCmdInline } from './cmd.js'
 import { createShellAnalyzer } from './shell.js'
 import { createProgramAnalyzer } from './program.js'
 import { inlineCredentialDecision } from '../../core/redaction.js'
@@ -260,7 +261,13 @@ export function createExecutionAnalyzer({ limits: overrides = {}, shell, program
             continue
           }
           const provider = providers.get(unit.language)
-          if (!provider && source.kind !== 'package-script') {
+          // Win32 embedded shell texts (os.system / child_process.exec / shell=True)
+          // are honestly `unknown` dialects; on a win32 host the bounded cmd lexer
+          // answers for them (coverage contract §4/§6). Anywhere else they stay a
+          // no-provider gap (D1).
+          const cmdFallback = !provider && source.kind === 'inline' && unit.language === 'unknown' &&
+            (unit.context?.domain ?? 'host') === 'host' && unit.context?.platform === 'win32'
+          if (!provider && !cmdFallback && source.kind !== 'package-script') {
             gap('no-provider')
             continue
           }
@@ -268,6 +275,7 @@ export function createExecutionAnalyzer({ limits: overrides = {}, shell, program
             if (typeof source.text !== 'string') throw new TypeError('Non-text analysis input')
             reserve(Buffer.byteLength(source.text))
             scannedTexts.push(source.text)
+            if (cmdFallback) { analyzeCmdInline(unit, env); continue }
             await provider.analyze(unit, env)
             continue
           }

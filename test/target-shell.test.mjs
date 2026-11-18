@@ -12,6 +12,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createShellAnalyzer } from '../src/adapter/analysis/shell.js';
+import { resolveCommand } from '../src/adapter/analysis/commands.js';
 import { createShellParsers } from '../src/adapter/parsers/index.mjs';
 
 /** Create an analyzer plus an emitter recorder for one test. The analyzer's
@@ -508,4 +509,83 @@ test('the analyzed text is never executed', async (t) => {
   await analyzer.analyze(shellUnit(`echo SOURCE_MUST_NOT_RUN; rm -f /srv/x`), env);
   assert.ok(commandNamed(calls, 'echo'));
   assert.ok(commandNamed(calls, 'rm'));
+});
+
+/** Feed one emitted command fact through the shared catalog and collect operations. */
+function resolveFact(fact, context = { domain: 'host', platform: process.platform, cwd: os.tmpdir() }) {
+  const operations = [];
+  const gaps = [];
+  const candidates = [];
+  // The fact's own context (dialect provenance) must not shadow the fixture cwd.
+  resolveCommand(fact.executable, fact.args, {
+    ...fact.opts, context, origin: { tool: 'fixture' },
+  }, {
+    operation: (action, target, opts) => operations.push({ action, target, ...opts }),
+    gap: (kind) => gaps.push(kind),
+    candidate: (kind) => candidates.push(kind),
+    command: () => {},
+    step: () => {},
+  });
+  return { operations, gaps, candidates };
+}
+
+test('unquoted leading tilde words stay literal text and expand through the catalog', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('rm -rf ~/proj', { context: { domain: 'host', platform: process.platform } }), env);
+  const fact = commandNamed(calls, 'rm');
+  assert.ok(fact, `expected rm fact, got ${JSON.stringify(calls.command)}`);
+  assert.deepEqual(fact.args, ['-rf', '~/proj'], 'the tilde word arrives as literal text');
+  assert.deepEqual(gapKinds(calls), []);
+  const result = resolveFact(fact);
+  assert.equal(result.operations[0].action, 'delete');
+  assert.equal(result.operations[0].target.kind, 'subtree');
+  assert.equal(result.operations[0].target.root, path.join(os.homedir(), 'proj'));
+});
+
+test('a tilde credential read expands to the protected home path', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('cat ~/.aws/credentials', { context: { domain: 'host', platform: process.platform } }), env);
+  const fact = commandNamed(calls, 'cat');
+  assert.ok(fact);
+  assert.deepEqual(fact.args, ['~/.aws/credentials']);
+  const result = resolveFact(fact);
+  assert.equal(result.operations[0].action, 'read-content');
+  assert.deepEqual(result.operations[0].target, { kind: 'exact', paths: [path.join(os.homedir(), '.aws', 'credentials')] });
+});
+
+test('a quoted tilde word is marked as a literal operand, never an expansion', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit(`cat '~/.aws/credentials'`), env);
+  const fact = commandNamed(calls, 'cat');
+  assert.ok(fact);
+  assert.deepEqual(fact.opts.literalOperands, [true]);
+  const result = resolveFact(fact);
+  assert.deepEqual(result.operations[0].target, { kind: 'exact', paths: ['~/.aws/credentials'] });
+});
+
+test('brace expansion and variable words keep their dynamic facts', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('echo {a,b}'), env);
+  const braces = commandNamed(calls, 'echo');
+  assert.deepEqual(braces.args, [null], 'brace expansion stays an unprovable dynamic word');
+  const second = harness(t);
+  await second.analyzer.analyze(shellUnit('rm -rf $X', { context: { domain: 'host', platform: process.platform } }), second.env);
+  const fact = commandNamed(second.calls, 'rm');
+  assert.deepEqual(fact.args, ['-rf', null], 'variable operands stay dynamic');
+  const result = resolveFact(fact);
+  assert.equal(result.operations[0].action, 'delete');
+  assert.equal(result.operations[0].target.kind, 'unknown');
+});
+
+test('transparent `command` executes without a state-mutation gap', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('command rm -rf /srv/x'), env);
+  const fact = commandNamed(calls, 'command');
+  assert.ok(fact, `expected command fact, got ${JSON.stringify(calls.command)}`);
+  assert.deepEqual(fact.args, ['rm', '-rf', '/srv/x']);
+  assert.deepEqual(gapKinds(calls), []);
+  const result = resolveFact(fact, { domain: 'host', platform: 'linux', cwd: '/srv' });
+  assert.equal(result.operations[0].action, 'delete');
+  assert.deepEqual(result.operations[0].target, { kind: 'subtree', root: '/srv/x' });
+  assert.deepEqual(result.candidates, []);
 });

@@ -24,13 +24,15 @@ export const normCompare = (value) => windowsPath(value) ? slash(path.win32.norm
 
 /** Match exact credential names and trailing segment combinations. */
 export function pathTargetsCredentials(resolved) {
+  const fold = windowsPath(resolved)
   const segs = segmentsOf(normCompare(resolved))
   const base = segs.at(-1) ?? ''
   if (base.endsWith(PUBLIC_KEY_SUFFIX)) return false
   if (CRED_BASENAMES.has(base)) return true
   if (CRED_BASENAME_PREFIXES.some((prefix) => base.startsWith(`${prefix}.`))) return true
+  // Combinations keep canonical spelling and follow the path's own case rules.
   return CRED_COMBOS.some((combo) => combo.length <= segs.length &&
-    combo.every((part, index) => segs[segs.length - combo.length + index] === part))
+    combo.every((part, index) => (fold ? part.toLowerCase() : part) === segs[segs.length - combo.length + index]))
 }
 
 /** Identify an exact marked or inherited credential target without filesystem IO. */

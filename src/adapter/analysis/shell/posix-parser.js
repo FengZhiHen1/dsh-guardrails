@@ -72,7 +72,12 @@ function wordInfo(parts, quoted = false) {
       if (part.Value.includes('\\')) return { dynamic: true }; // escape needs expansion; never guess
       if (!quoted) {
         if (/[*?[]/.test(part.Value)) glob = true;
-        if (/[~{}]/.test(part.Value)) return { dynamic: true }; // tilde/brace expansion is unprovable
+        if (part.Value.includes('{') || part.Value.includes('}')) return { dynamic: true }; // brace expansion is unprovable
+        // An unquoted `~` no longer forces a dynamic word: tilde expansion happens
+        // only at the start of a word and resolves to the host home directory, which
+        // commands.js normalizes against os.homedir() (an adapter fact, same trust
+        // level as a verified cd). `~user` forms reach commands.js too and stay
+        // unresolvable there; a tilde mid-word is literal data.
       }
       text += part.Value;
     } else return { dynamic: true }; // ParamExp/CmdSubst/ProcSubst/ArithmExp/ExtGlob/... unprovable

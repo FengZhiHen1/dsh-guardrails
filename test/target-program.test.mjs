@@ -389,6 +389,99 @@ test('js: while/do/for control statements yield reachable sinks, never a fault',
   ])
 })
 
+// ---------------- require direct chains and element members (F-20/21/23) ----------------
+
+test('js: require direct-chain fs.rmSync is an exact recursive delete', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "require('fs').rmSync('C:/synthetic/work/build', { recursive: true });\n"), env)
+  const ops = operations(facts)
+  assert.equal(ops.length, 1)
+  assert.equal(ops[0].action, 'delete')
+  assert.deepEqual(ops[0].target, { kind: 'exact', paths: ['C:/synthetic/work/build'] })
+  assert.equal(ops[0].recursive, true)
+  assert.equal(ops[0].condition, 'certain')
+})
+
+test('js: require direct-chain fs/promises rm and fs-extra remove reach their sinks', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "require('node:fs/promises').rm('C:/synthetic/work/a.txt');\nrequire('fs-extra').remove('C:/synthetic/work/cache');\n"), env)
+  const ops = operations(facts)
+  assert.deepEqual(ops.map(({ action, target, recursive }) => [action, target.paths[0], recursive]), [
+    ['delete', 'C:/synthetic/work/a.txt', false],
+    ['delete', 'C:/synthetic/work/cache', true],
+  ])
+})
+
+test('js: require direct-chain child_process execSync reports a shell child; dynamic command a candidate', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "require('child_process').execSync('rm -rf ./tmp/x');\nrequire('child_process').exec(cmdVar);\n"), env)
+  const kids = children(facts)
+  assert.equal(kids.length, 1)
+  assert.equal(kids[0].input.source.text, 'rm -rf ./tmp/x')
+  const cands = candidates(facts)
+  assert.equal(cands.length, 1)
+  assert.equal(cands[0].kind, 'dynamic-execution')
+})
+
+test('js: string-literal element member fs[\'rmSync\'] is resolved', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "require('fs')['rmSync']('C:/synthetic/work/a.txt', { recursive: true });\n"), env)
+  const ops = operations(facts)
+  assert.equal(ops.length, 1)
+  assert.deepEqual(ops[0].target, { kind: 'exact', paths: ['C:/synthetic/work/a.txt'] })
+  assert.equal(ops[0].recursive, true)
+})
+
+test('js: computed member name on a resolved module is a dynamic-execution candidate', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "const fs = require('fs');\nconst k = 'rmSync';\nfs[k]('C:/synthetic/work/x');\n"), env)
+  assert.equal(operations(facts).length, 0)
+  const cands = candidates(facts)
+  assert.equal(cands.length, 1)
+  assert.equal(cands[0].kind, 'dynamic-execution')
+})
+
+test('js: require of a dynamic module is a candidate, never a silent skip', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "require(m).rmSync('C:/synthetic/work/x');\n"), env)
+  assert.equal(operations(facts).length, 0)
+  const cands = candidates(facts)
+  assert.equal(cands.length, 1)
+  assert.equal(cands[0].kind, 'dynamic-execution')
+})
+
+test('js: execution sink on an unmodeled module chain is a dynamic-execution candidate', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "require('cp').exec(x);\n"), env)
+  assert.equal(operations(facts).length, 0)
+  const cands = candidates(facts)
+  assert.equal(cands.length, 1)
+  assert.equal(cands[0].kind, 'dynamic-execution')
+})
+
+test('js: read-only direct-chain members produce no delete operations', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "require('fs').statSync('C:/synthetic/work/a.txt');\nrequire('fs').readFileSync('C:/synthetic/work/b.txt');\n"), env)
+  const ops = operations(facts)
+  assert.deepEqual(ops.map(op => op.action), ['read-content'])
+  assert.equal(candidates(facts).length, 0)
+})
+
+test('js: literal require calls no longer report opaque-calls', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "const fs = require('fs');\nfs.rmSync('C:/synthetic/work/a.txt');\n"), env)
+  assert.equal(operations(facts).length, 1)
+  assert.equal(gaps(facts).length, 0)
+})
+
+test('js: normal direct-chain calls produce no candidates', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', "require('path').join('a', 'b');\nrequire('util').format('x');\n"), env)
+  assert.equal(operations(facts).length, 0)
+  assert.equal(candidates(facts).length, 0)
+  assert.equal(children(facts).length, 0)
+})
+
 // ---------------- contract-level behavior ----------------
 
 test('unsupported languages report a gap and never throw', async () => {

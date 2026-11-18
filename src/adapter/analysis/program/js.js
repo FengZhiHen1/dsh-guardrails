@@ -18,8 +18,9 @@
 // - tools.* / ctx.tools.* SDK sub-calls are skipped: they pass through their own
 //   guard at dispatch time and must not be judged twice
 // - aliases: import/default/namespace/named, `import x = require(...)`, require()
-//   destructuring, module-level and single-assignment local constants, small
-//   local functions with single-call-site parameter binding
+//   destructuring, require(<string literal>) direct chains, string-literal
+//   element members (fs['rmSync']), module-level and single-assignment local
+//   constants, small local functions with single-call-site parameter binding
 // - reachability: module top level plus called/referenced functions; unreached
 //   functions containing registered sinks are reported as a gap
 
@@ -48,6 +49,15 @@ const FSX_MOVE = new Set(['move', 'moveSync']);
 const RIMRAF_DELETE = new Set(['rimraf', 'sync', 'rimrafSync', 'native']);
 const CP_SHELL = new Set(['exec', 'execSync']);
 const CP_ARGV = new Set(['spawn', 'spawnSync', 'execFile', 'execFileSync']);
+// Execution-sink member names (child_process API). Called through a require
+// direct chain on an UNMODELED module (require('cp').exec(x)) they are dynamic
+// execution, never a silent skip; on modeled modules they flow into the normal
+// dispatch below.
+const CP_SINK_NAMES = new Set([...CP_SHELL, ...CP_ARGV]);
+// Modules with modeled delete/execution sinks: computed member names on their
+// objects (fs[k](x)) surface as dynamic-execution candidates.
+const SINK_MODULES = new Set([...FS_MODULES, ...FS_PROMISES_MODULES, ...FSX_MODULES, ...RIMRAF_MODULES, ...CP_MODULES]);
+const MODELED_MODULES = new Set([...SINK_MODULES, ...PATH_MODULES]);
 
 class Unk extends Error {
   constructor(reason, base = null) { super(reason); this.base = base; }
@@ -122,6 +132,16 @@ class Analyzer {
     if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) {
       const base = this.dotted(node.expression, scope);
       return base ? `${base}.${node.name.text}` : null;
+    }
+    // require(<string literal>) direct chains and string-literal element
+    // members resolve like imports: require('fs').rmSync(...), fs['rmSync'](...).
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require'
+        && node.arguments.length === 1 && ts.isStringLiteral(node.arguments[0])) {
+      return node.arguments[0].text;
+    }
+    if (ts.isElementAccessExpression(node) && node.argumentExpression && ts.isStringLiteral(node.argumentExpression)) {
+      const base = this.dotted(node.expression, scope);
+      return base ? `${base}.${node.argumentExpression.text}` : null;
     }
     return null;
   }
@@ -448,6 +468,9 @@ class Analyzer {
     const line = this.line(node);
     const cond = this.cond(depth);
     const dotted = this.dotted(node.expression, scope);
+    // Root of the callee chain when it is a require(...) call, if any: direct
+    // chains (require('cp').exec(x)) and dynamic-specifier requires.
+    const requireRoot = this.rootRequireCall(node.expression);
 
     // tools.<name> / ctx.tools.<name> SDK sub-calls: own guard at dispatch time.
     if (dotted && (dotted === 'tools' || dotted.startsWith('tools.') || dotted.startsWith('ctx.tools.') || dotted.startsWith('ctx.'))) return;
@@ -462,6 +485,11 @@ class Analyzer {
         this.opaqueCalls.add('require(dynamic)');
         return;
       }
+      // A require(<string literal>) call is a provable binding, not an opaque
+      // surface (R-9): direct-chain and destructuring forms resolve it.
+      if (name === 'require' && node.arguments.length === 1 && ts.isStringLiteral(node.arguments[0])) {
+        return;
+      }
       const binding = scope.get(name);
       if (binding && binding.k === 'func') {
         this.inlineFunction(binding, node, scope, depth, fn);
@@ -471,6 +499,19 @@ class Analyzer {
     }
 
     if (!dotted) {
+      // Counter-examples that must never drop silently: a require of a
+      // dynamically computed module specifier (require(m).rmSync(x)) and a
+      // computed member name on a resolved sink module (fs[k](x)) are
+      // dynamic-execution candidates.
+      if (requireRoot && !ts.isStringLiteral(requireRoot.arguments[0])) {
+        this.add({ t: 'candidate', kind: 'dynamic-execution', reason: 'require() module specifier is not statically known', condition: cond, line, ...(fn ? { function: fn } : {}) });
+      } else if (ts.isElementAccessExpression(node.expression) && node.expression.argumentExpression && !ts.isStringLiteral(node.expression.argumentExpression)) {
+        const base = this.dotted(node.expression.expression, scope);
+        const baseModule = base ? base.split('.')[0] : null;
+        if (baseModule && SINK_MODULES.has(baseModule)) {
+          this.add({ t: 'candidate', kind: 'dynamic-execution', reason: 'member name of a resolved module is computed at runtime', condition: cond, line, ...(fn ? { function: fn } : {}) });
+        }
+      }
       // Method call on a value (e.g. Path(...).unlink()) — try receiver path value.
       if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.name)) {
         if (this.handleValueMethod(node, scope, cond, line, fn)) return;
@@ -536,7 +577,24 @@ class Analyzer {
         return;
       }
     }
+    // Execution-sink names called through a require direct chain on an
+    // unmodeled module (require('cp').exec(x)) are dynamic execution, not a
+    // silent skip. Import/member bindings on unmodeled modules keep their
+    // existing opaque semantics.
+    if (requireRoot && ts.isStringLiteral(requireRoot.arguments[0]) && CP_SINK_NAMES.has(member) && !MODELED_MODULES.has(module)) {
+      this.add({ t: 'candidate', kind: 'dynamic-execution', reason: `execution sink '${member}' on unmodeled module '${module}'`, condition: cond, line, ...(fn ? { function: fn } : {}) });
+      return;
+    }
     for (const arg of node.arguments) this.walkExpression(arg, scope, depth, fn);
+  }
+
+  // Walks a callee chain down to a root require(...) call, if any.
+  rootRequireCall(node) {
+    const ts = this.ts;
+    let current = node;
+    while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) current = current.expression;
+    if (ts.isCallExpression(current) && ts.isIdentifier(current.expression) && current.expression.text === 'require' && current.arguments.length === 1) return current;
+    return null;
   }
 
   handleValueMethod(node, scope, cond, line, fn) {

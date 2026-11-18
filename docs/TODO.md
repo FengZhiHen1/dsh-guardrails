@@ -17,7 +17,11 @@
 - [ ] **平台实跑与性能留证**。完成目标宿主锚点 DSH `0.2.2-rc.2` 的完整安装与平台验收，在技术栈规定的各目标平台运行验收矩阵。分别记录解析器资产来源、校验结果、冷启动和稳态延迟。
 - [ ] **人工标注历史语料回放**：用人工标注的真实语料评估误伤率与漏拦率；不得把合成用例通过率当作历史误伤率。
 - [ ] **未覆盖出口的遮罩边界**：Native finalizer、结构化 value/meta/error/additionalContexts 等出口需要独立上游接口或逐工具契约才能扩大遮罩承诺，目前不承诺这些出口零泄漏。
-- [ ] **候选规则待评审**：Git / 链删 / 云 / 数据库 / 容器 / 系统逐命令矩阵为候选规则，尚未默认启用，须经评审后再决定纳入与门控方式。
+- [ ] **云 / 数据库 / 容器 / 系统逐命令矩阵（全量）**：DSR-029 只实现每类最高危的少数删除子命令（确认档）。其余子命令、只读以外的资源变更与 Secret Manager 厂商子命令仍为候选规则，须评审后再决定纳入与门控方式。
 - [ ] **实测兼容矩阵并声明 peer 范围**。在目标宿主 `0.2.2-rc.2` 上实测本包对 Node 与各宿主包（`@deepseek-ai/cordis`、`@deepseek-ai/dsh-settings`、`@deepseek-ai/schemastery`）的 peer 范围及 DSH 兼容区间；取得实测证据后写入包声明，在此之前包声明只锚定目标版本。见[技术栈设计](技术栈设计.md)「运行时与关键库」。
-- [ ] **决策：透传包装解包语义**。就 `sudo`、`env`、`nice`、`timeout`、`xargs`、`find -exec`、`ssh` 与容器运行时的解包语义作出决策（见 [Shell 语法接入](technical-details/命令文本分析.md)）；确认前按「保留可见 + 风险候选或覆盖缺口」处理，不按文本推断载荷。
+- [ ] **决策：剩余包装层解包语义**。`sudo`、`env`、`nice`、`timeout`、`xargs`、`find -exec` 已按 DSR-029 解包为内层命令事实；`ssh`、容器运行时（`docker run … sh -c`）与域内 `wsl` 命令目录仍待决策。确认前按「保留可见 + 覆盖缺口」处理，不按文本推断载荷。
+- [ ] **无显式路径的管道删除范围**：`Get-ChildItem … | Remove-Item -Force` 一类目前只做候选或缺口，`knownScope` 无法精确到管道源命令（见 DSR-029「未做」）。
+- [ ] **`git rebase --abort` / `merge --abort`**：需要只读探测进行中的状态（`rebase-merge`、`MERGE_HEAD`）后再决定按 `data.git.restore` 分档；未做前不产生判定。
+- [ ] **`cmd.exe` 方言覆盖边界**：`for`/`if`/`%VAR%`、`/k` 交互、`del /s` 通配枚举目前记缺口放行；扩展前需定义可证范围。
+- [ ] **凭据名单候选（需精确文件布局核实）**：`.azure/msal_token_cache.json`（新版 Azure CLI 令牌缓存）、gcloud `legacy_credentials/<account>/adc.json`（目录级不支持，只能按精确文件或 Profile `sensitiveFiles`）。核实前不加入内置名单。
 - [ ] **预览选项语义矩阵**。逐工具按官方语义核对 `--dry-run`、`-WhatIf` 类预览选项；未核对的选项不标预览。见 [Shell 语法接入](technical-details/命令文本分析.md)「覆盖边界与验证要求」。
