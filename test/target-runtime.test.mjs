@@ -119,8 +119,16 @@ test('AC-01f: a protected-file read asks once and refuses when the grant is reje
   assert.equal(protectedResult.isError, true, 'a rejected protected read is refused')
   assert.equal(counter.calls, 1, 'the refused read never dispatches the body')
   assert.equal(approvalRequests.length, 1, 'exactly one confirmation was requested for the protected read')
-  assert.match(protectedResult.error?.message ?? '', /credential\.file\.read|S-F1/i,
-    `the confirmation signal must identify the protected-read rule: ${protectedResult.error?.message}`)
+  // The matrix signal lives in the confirmation request body: the rule id AND the
+  // protected target file list (AC-01f: 确认请求体含目标文件清单). The final refusal
+  // renders the approval outcome on top of the stored decision.
+  const request = approvalRequests[0]
+  assert.equal(request.toolName, 'read')
+  assert.match(request.reason ?? '', /S-F1|credential\.file\.read/i,
+    `the confirmation request identifies the protected-read rule: ${request.reason}`)
+  assert.ok(String(request.reason).includes(marked), 'the confirmation request lists the protected target file')
+  assert.match(protectedResult.error?.message ?? '', /GUARDRAILS/,
+    `the final refusal is rendered by guardrails: ${protectedResult.error?.message}`)
 })
 
 test('GT-13: the real ApprovalService never policy rejects the protected-read confirmation', { skip: gateSkip }, async t => {
