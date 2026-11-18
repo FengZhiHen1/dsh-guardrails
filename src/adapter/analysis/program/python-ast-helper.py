@@ -19,6 +19,10 @@
 #   renames, shutil.move, pathlib Path.unlink/rmdir
 # - execution: os.system/popen, subprocess.run/call/check_call/check_output/
 #   Popen (static argv -> argv fact, static text -> shell fact, dynamic -> candidate)
+# - content access: builtins.open / io.open and pathlib Path.open / read_text /
+#   read_bytes / write_text / write_bytes emit 'read-content' / 'write-content'
+#   with the literal path and mode; unknown mode or target gets a bounded gap
+#   ('content-mode-unknown' / 'content-target-unknown') and no action claim
 # - read-only enumeration feeding a sink (os.listdir/scandir/walk, glob.glob,
 #   Path.iterdir/glob) -> candidate with the verified base as known scope
 # - aliases: plain `import`, `import as`, `from ... import [as]`, module-level
@@ -92,6 +96,25 @@ PATH_FUNC_NAMES = {
 # so the helper reports a 'child-script' fact instead of a plain command.
 BARE_RUNTIMES = {"python", "python3", "pythonw", "py", "node", "nodejs", "tsx", "ts-node", "deno", "bun"}
 RUNTIME_RUN_WRAPPERS = {"uv", "npm", "pnpm", "yarn"}
+
+# pathlib content methods (receiver-verified only; see handle_path_method).
+CONTENT_METHODS = ("open", "read_text", "read_bytes", "write_text", "write_bytes")
+
+
+def classify_open_mode(mode_text):
+    """'read' | 'write' | None. Default and explicit 'r' (incl. 'rb'/'rt') read;
+    any of w/a/x/+ writes (append, exclusive-create, update). Unknown or invalid
+    characters ('U', 'z', …) stay unknown and get bounded diagnostics."""
+    if not isinstance(mode_text, str) or not mode_text:
+        return None
+    chars = set(mode_text)
+    if not chars <= set("rwxab+tBb"):
+        return None
+    if chars & set("wax+"):
+        return "write"
+    if "r" in chars:
+        return "read"
+    return None
 
 
 def is_runtime_spawn(executable, args):
@@ -512,6 +535,45 @@ class Analyzer:
         except Budget:
             raise
 
+    # ---------------- content access (read/write file bodies) ----------------
+
+    def open_mode_text(self, node, first_index=1):
+        """Returns (mode_text, proven). Absent mode means the default 'r'; a
+        present-but-non-literal mode is NOT proven and yields bounded diagnostics.
+        `first_index` is 1 for function calls (path, mode) and 0 for method calls
+        (self is implicit, so the mode is the first argument)."""
+        args = node.args
+        kw = {k.arg: k.value for k in node.keywords if k.arg}
+        mode_node = args[first_index] if len(args) > first_index else kw.get("mode")
+        if mode_node is None:
+            return "r", True
+        if isinstance(mode_node, ast.Constant) and isinstance(mode_node.value, str):
+            return mode_node.value, True
+        return None, False
+
+    def report_content_open(self, node, env, cond, line, function):
+        args = node.args
+        if not args:
+            self.gap("content-target-unknown", "open() without a positional target", line=line, function=function)
+            return
+        try:
+            target = self.eval_str(args[0], env)
+        except Unk as exc:
+            self.gap("content-target-unknown", "target is not statically evaluable (%s)" % exc.reason, line=line, function=function)
+            return
+        mode_text, proven = self.open_mode_text(node)
+        if not proven:
+            self.gap("content-mode-unknown", "mode is not a proven literal", line=line, function=function)
+            return
+        cls = classify_open_mode(mode_text)
+        if cls is None:
+            self.gap("content-mode-unknown", "mode '%s' is not a recognized file mode" % mode_text, line=line, function=function)
+            return
+        self.add({"t": "operation", "action": "read-content" if cls == "read" else "write-content",
+                  "target": {"kind": "exact", "paths": [target]},
+                  "recursive": False, "condition": cond, "line": line, "function": function,
+                  "details": "mode: %s" % mode_text})
+
     # ---------------- expression facts ----------------
 
     def walk_expr_value(self, node, env, depth, function):
@@ -545,6 +607,9 @@ class Analyzer:
                           "reason": "%s() executes dynamically constructed code" % name,
                           "condition": cond, "line": line, "function": function})
                 return
+            if name == "open":
+                self.report_content_open(node, env, cond, line, function)
+                return
             binding = env.get(name)
             if binding is not None and binding[0] == "func":
                 self.inline_function(binding[1], node, env, depth, function)
@@ -572,6 +637,10 @@ class Analyzer:
 
         if key in DELETE_SINKS or key in MOVE_SINKS:
             self.report_delete_or_move(node, key, args, keywords, env, depth, cond, line, function)
+            return
+
+        if key in (("io", "open"), ("builtins", "open")):
+            self.report_content_open(node, env, cond, line, function)
             return
 
         if key in SHELL_SINKS:
@@ -703,9 +772,29 @@ class Analyzer:
     # ---------------- pathlib method sinks ----------------
 
     def handle_path_method(self, node, env, depth, cond, line, function):
-        # Only reached when dotted() is None but the receiver is a Path value.
+        # Only reached when dotted() is None but the receiver may be a Path value.
         attr = node.func.attr
         recv = self.try_path_value(node.func.value, env)
+        if attr in CONTENT_METHODS:
+            if recv is None:
+                self.gap("content-target-unknown",
+                         "content method on a receiver that is not a verified Path value",
+                         line=line, function=function)
+                return True
+            if attr == "open":
+                mode_text, proven = self.open_mode_text(node, first_index=0)
+                cls = classify_open_mode(mode_text) if proven else None
+                if not proven or cls is None:
+                    self.gap("content-mode-unknown", "open() mode is not a proven literal", line=line, function=function)
+                    return True
+            else:
+                cls = "read" if attr.startswith("read") else "write"
+                mode_text = "r" if cls == "read" else "w"
+            self.add({"t": "operation", "action": "read-content" if cls == "read" else "write-content",
+                      "target": {"kind": "exact", "paths": [recv]},
+                      "recursive": False, "condition": cond, "line": line, "function": function,
+                      "details": "mode: %s (%s)" % (mode_text, attr)})
+            return True
         if recv is None:
             return False
         if attr in ("unlink", "rmdir"):
