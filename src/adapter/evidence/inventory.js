@@ -48,7 +48,8 @@ export function createInventoryState() {
     dirTree: new Map(),   // walked directory -> direct-children observation record
     exemptPaths: new Set(), // files whose rebuildable exemption concluded `established`
     seenKeys: new Set(),  // fs-domain dedupe by opaque stable target key
-    fsIdentities: [],     // fs-domain {key, FsVersion} pairs feeding the fingerprint
+    fsIdentities: [],     // backend identity and content version pairs
+    hostVersions: [],     // versions of protected content targets in the host filesystem
     stoppedAtThreshold: false,
     failed: false,        // scan/permission/mount/ambiguous failure observed
   }
@@ -76,7 +77,8 @@ export function finalizeInventory(state) {
   // version bump on an unchanged display path still changes the fingerprint.
   const fsIdentities = state.fsIdentities.map((entry) => `${entry.key}\u0000${entry.version ?? ''}`).sort()
   inventory.fingerprint = createHash('sha256')
-    .update(JSON.stringify([files.sort(), links.sort(), directories.sort(), roots.sort(), unknown.sort(), fsIdentities]))
+    .update(JSON.stringify([files.sort(), links.sort(), directories.sort(), roots.sort(), unknown.sort(), fsIdentities,
+      state.hostVersions.sort((left, right) => left[0].localeCompare(right[0]))]))
     .digest('hex')
   return inventory
 }
@@ -155,7 +157,7 @@ export async function observeOperation(state, operation, ctx) {
   // Content/permission actions and proven previews (real -WhatIf / --dry-run) remove
   // nothing: they still get the protected-path scan (R-04 covers reads too) and no count.
   if (!DESTRUCTIVE.has(action) || operation.preview === true) {
-    scanProtection(operation, ctx)
+    await scanProtection(state, operation, ctx)
     return
   }
   if (GIT_ACTIONS.has(action)) return observeGitOperation(state, operation, ctx)
@@ -166,15 +168,33 @@ export async function observeOperation(state, operation, ctx) {
 }
 
 /** Resolve literal paths against the verified execution cwd before matching exact marks. */
-function scanProtection(operation, ctx) {
+async function scanProtection(state, operation, ctx) {
   if (operation.preview || operation.action === 'metadata') return
   const target = operation.target ?? { kind: 'unknown' }
   const context = operation.context ?? {}
-  const cwd = context.domain === 'host' && (context.platform ?? ctx.platform) === ctx.platform ? absoluteCwd(context.cwd) : null
-  const match = (value) => ctx.noteProtected(resolveLocal(value, cwd) ?? value, operation.action)
-  if (target.kind === 'exact') for (const value of (Array.isArray(target.paths) ? target.paths : [])) match(value)
-  if (target.kind === 'subtree') match(target.root)
-  if (target.kind === 'pattern') match(target.base)
+  if (context.domain !== 'host' || (context.platform ?? ctx.platform) !== ctx.platform) return
+  const cwd = absoluteCwd(context.cwd)
+  if (target.kind !== 'exact') return
+  for (const value of target.paths ?? []) {
+    const absolute = resolveLocal(value, cwd)
+    const marked = ctx.noteProtected(absolute ?? value, operation.action)
+    if (!absolute) continue
+    if (!ctx.consume()) { noteFailure(state, 'budget'); return }
+    try {
+      // Content operations follow links. Check the spelling and the resolved file.
+      const resolved = await fs.realpath(absolute)
+      const resolvedMarked = ctx.noteProtected(resolved, operation.action)
+      if (!marked && !resolvedMarked) continue
+      const info = await fs.stat(resolved, { bigint: true })
+      state.hostVersions.push([absolute, resolved, String(info.dev), String(info.ino), String(info.size), String(info.mtimeNs), String(info.ctimeNs)])
+    } catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+        if (marked) state.hostVersions.push([absolute, 'absent'])
+        continue
+      }
+      ctx.noteIssue({ kind: 'protected-target-unresolved', reason: error.code ?? error.name, path: absolute })
+    }
+  }
 }
 
 // --- host domain -----------------------------------------------------------

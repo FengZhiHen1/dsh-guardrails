@@ -236,6 +236,28 @@ test('ts: fs.rmSync with recursive option joins and propagates recursion', async
   assert.equal(ops[0].recursive, true)
 })
 
+test('ts: file reads, writes and copies report content targets without executing', async (t) => {
+  if (!typescriptReady) return t.skip(typescriptSkipReason)
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('typescript', `
+    import { readFile, writeFile, copyFile } from 'node:fs/promises';
+    await readFile('vault.txt');
+    await writeFile('result.txt', 'data only');
+    await copyFile('source.txt', 'destination.txt');
+  `), env)
+  assert.deepEqual(operations(facts).map(({ action, target }) => [action, target.paths[0]]), [
+    ['read-content', 'vault.txt'], ['write-content', 'result.txt'],
+    ['copy-content', 'source.txt'], ['write-content', 'destination.txt'],
+  ])
+})
+
+test('ts: a dynamic recursive option is never observed as a non-recursive delete', async (t) => {
+  if (!typescriptReady) return t.skip(typescriptSkipReason)
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('typescript', `import { rm } from 'node:fs/promises'; await rm('dir', { recursive: flag });`), env)
+  assert.equal(operations(facts)[0].recursive, 'unknown')
+})
+
 test('ts: local alias const rm = fs.rm reaches the sink', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
   const { env, facts } = makeEnv()
   await analyzer.analyze(unit('typescript', "import fs from 'node:fs';\nconst rm = fs.rm;\nawait rm('C:/synthetic/work/a.txt');\n"), env)

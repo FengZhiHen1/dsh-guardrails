@@ -36,6 +36,13 @@ const PATH_METHODS = new Set(['join', 'resolve', 'dirname', 'basename', 'normali
 
 const FS_DELETE = new Set(['rm', 'rmSync', 'unlink', 'unlinkSync', 'rmdir', 'rmdirSync']);
 const FS_MOVE = new Set(['rename', 'renameSync']);
+const FS_CONTENT = new Map([
+  ['readFile', 'read-content'], ['readFileSync', 'read-content'], ['createReadStream', 'read-content'],
+  ['writeFile', 'write-content'], ['writeFileSync', 'write-content'], ['createWriteStream', 'write-content'],
+  ['appendFile', 'write-content'], ['appendFileSync', 'write-content'],
+  ['truncate', 'truncate-content'], ['truncateSync', 'truncate-content'],
+]);
+const FS_COPY = new Set(['copyFile', 'copyFileSync']);
 const FSX_DELETE = new Set(['remove', 'removeSync', 'emptyDir', 'emptyDirSync']);
 const FSX_MOVE = new Set(['move', 'moveSync']);
 const RIMRAF_DELETE = new Set(['rimraf', 'sync', 'rimrafSync', 'native']);
@@ -474,8 +481,18 @@ class Analyzer {
     const member = members[members.length - 1];
     const chain = members.filter(m => m !== 'promises' && m !== 'posix' && m !== 'win32');
 
-    if (FS_MODULES.has(module) || FS_PROMISES_MODULES.has(module)) {
-      if (chain.length === 1 && FS_DELETE.has(member)) {
+    if ((FS_MODULES.has(module) || FS_PROMISES_MODULES.has(module)) && chain.length === 1) {
+      const contentAction = FS_CONTENT.get(member);
+      if (contentAction) {
+        this.reportContent(contentAction, node.arguments[0], scope, cond, line, fn);
+        return;
+      }
+      if (FS_COPY.has(member)) {
+        this.reportContent('copy-content', node.arguments[0], scope, cond, line, fn);
+        this.reportContent('write-content', node.arguments[1], scope, cond, line, fn);
+        return;
+      }
+      if (FS_DELETE.has(member)) {
         this.reportDelete(node, member, scope, cond, line, fn, { recursiveOption: member === 'rm' || member === 'rmSync' || member === 'rmdir' || member === 'rmdirSync' });
         return;
       }
@@ -541,6 +558,18 @@ class Analyzer {
         if (binding && binding.k === 'enum') receiver = binding.base;
       }
       return { candidateReason: `target is not statically evaluable (${error.message})`, knownScope: receiver ? [receiver] : (error.base ? [error.base] : null) };
+    }
+  }
+
+  reportContent(action, argument, scope, condition, line, fn) {
+    if (!argument) return;
+    try {
+      const value = this.evalString(argument, scope);
+      this.add({ t: 'operation', action, target: { kind: 'exact', paths: [value] }, recursive: false, condition, line,
+        ...(fn ? { function: fn } : {}) });
+    } catch (error) {
+      if (!(error instanceof Unk)) throw error;
+      this.add({ t: 'gap', kind: 'content-target-unresolved', line, ...(fn ? { function: fn } : {}) });
     }
   }
 

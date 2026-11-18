@@ -209,6 +209,26 @@ test('GT-02/GF-07: a prepended pre-execute short-circuit still refuses at the fi
   assert.equal(counter.calls, 1)
 })
 
+test('a program that directly reads a marked file requires approval before PTC execution', { skip: gateSkip }, async t => {
+  const root = await harness.fixtureRoot(t, 'ptc-protected-read')
+  const marked = join(root, 'vault.txt')
+  await writeFile(marked, 'synthetic fixture')
+  let runs = 0
+  const ptcRuntime = harness.fixturePtcRuntime(async () => { runs++; return { logs: [], value: 'executed' } })
+  const { ctx, approvalRequests } = await harness.mount(t, {
+    workingDirectory: root, gate: gateOrThrow(), executor: 'ptc', ptcRuntime, config: { sensitiveFiles: [marked] },
+  })
+  const agent = harness.makeAgent(root, ctx).agent
+  const result = await harness.runTool(ctx, agent, 'run_code', {
+    code: `import { readFile } from 'node:fs/promises'; return await readFile('vault.txt', 'utf8')`,
+    description: 'Synthetic program file-read fixture',
+  })
+  assert.equal(result.isError, true)
+  assert.equal(runs, 0)
+  assert.equal(approvalRequests.length, 1)
+  assert.match(approvalRequests[0].reason, /credential\.file\.read/)
+})
+
 test('GT-09: the outer run_code passes and its SDK inner apply_patch dispatches exactly once', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'ptc-once')
   const target = join(root, 'obsolete.txt')

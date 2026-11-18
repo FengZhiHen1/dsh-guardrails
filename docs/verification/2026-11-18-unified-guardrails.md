@@ -4,7 +4,7 @@
 
 | 检查 | 结果 |
 |---|---|
-| `pnpm verify`（设置 `DSH_RUNTIME_PATH`） | 401 项通过，0 项失败，3 项 Linux 挂载测试按平台跳过 |
+| `pnpm verify`（设置 `DSH_RUNTIME_PATH`） | 422 项通过，0 项失败，3 项 Linux 挂载测试按平台跳过 |
 | 插件分层检查 | 通过 |
 | `npm pack --dry-run --json` | 包清单包含 Host 和 Client 入口、Bundle patch、Python helper 与三种平台的 shfmt 资产 |
 
@@ -13,7 +13,8 @@
 - 普通删除涉及 20 个文件时派发一次。涉及 21 个文件时请求一次确认。收到拒绝后，工具体零次派发。
 - 受保护读需要单次确认。真实 ApprovalService 的 `never` 策略拒绝调用并记录审批事件。确认期间，文件服务报告同一路径的文件版本发生变化时，门禁拒绝派发。
 - 前置监听器短路后，同步门禁拒绝缺少有效结果的必检调用。未接入工具继续走 DSH 权限流程。
-- PTC 外层程序和 SDK 内层工具分别过门禁，内层的大批量补丁只触发一次确认。启用官方 `apply_patch` 的文件工具组合实际更新了临时文件。
+- PTC 外层程序和 SDK 内层工具分别经过门禁。JavaScript 程序直接读取标记文件时，确认发生在程序启动前。内层的大批量补丁只触发一次确认。启用官方 `apply_patch` 的文件工具组合实际更新了临时文件。
+- 合成源码验证了 JavaScript `node:fs` 和 Python `open`、`pathlib.Path` 常见 API 的内容目标提取。解析器不会执行这些样例。
 - Native 单字符串结果和 PTC 持久日志副本验证了凭据遮罩。对其他输出形状的覆盖记录在[测试体系](../technical-details/工程结构与测试体系.md)。
 
 ## 仍需验收
