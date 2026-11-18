@@ -10,7 +10,6 @@ import {
   CRED_COMBOS,
   RULE_KEYS,
   evaluateRules,
-  isEnvLocalCredentialName,
 } from '../src/core/rules.js'
 import { pathTargetsCredentials } from '../src/core/path-check.js'
 
@@ -85,31 +84,29 @@ test('DSH-managed credential files stay on the list (DSR-003 intent)', () => {
   assert.equal(pathTargetsCredentials('C:/Users/FengZhiHen/.dsh/sessions/abc/session.jsonl.zstd'), false)
 })
 
-// ---------- V4: dotenv credential carriers ----------
+// ---------- R-05: ordinary unmarked .env files are not protected ----------
 
-test('.env markers are credential carriers (hit side)', () => {
-  // Exact basename markers.
-  assert.equal(CRED_BASENAMES.has('.env'), true)
-  assert.equal(CRED_BASENAMES.has('.env.local'), true)
-  assert.equal(pathTargetsCredentials('C:/Users/me/.env'), true)
-  assert.equal(pathTargetsCredentials('C:/Users/me/app/.env'), true)
-  assert.equal(pathTargetsCredentials('C:/Users/me/app/.env.local'), true)
-  // `.env.*.local` overrides carry real secrets and are matched by prefix+suffix.
-  assert.equal(pathTargetsCredentials('C:/Users/me/app/.env.production.local'), true)
-  assert.equal(pathTargetsCredentials('C:/Users/me/app/.env.development.local'), true)
-  assert.equal(isEnvLocalCredentialName('.env.staging.local'), true)
-})
-
-test('.env templates are NOT credential carriers (miss side)', () => {
-  // Templates are committed examples without secrets.
-  for (const name of ['.env.example', '.env.sample', '.env.template']) {
+test('dotenv files are NOT builtin credential carriers (R-05)', () => {
+  // Protection for .env-style files comes only from a Profile sensitiveFiles mark.
+  for (const name of ['.env', '.env.local', '.env.production.local', '.env.development.local']) {
     assert.equal(CRED_BASENAMES.has(name), false, name)
-    assert.equal(isEnvLocalCredentialName(name), false, name)
     assert.equal(pathTargetsCredentials(`C:/Users/me/app/${name}`), false, name)
   }
-  // Other dotenv-looking names are not carriers either.
-  for (const name of ['.envrc', '.env.local.bak', 'env', '.environment', '.env.', '.env..local']) {
-    assert.equal(isEnvLocalCredentialName(name), false, name)
+  // The DSR-018 list survivors stay protected.
+  assert.equal(pathTargetsCredentials('C:/Users/me/.npmrc'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/.pypirc'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/.netrc'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/.pgpass'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/.git-credentials'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/FengZhiHen/.dsh/.credentials.yaml'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/FengZhiHen/.dsh/.auteur-media-secret'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/.ssh/id_rsa'), true)
+  assert.equal(pathTargetsCredentials('C:/Users/me/.ssh/id_ed25519'), true)
+})
+
+test('.env templates and near-miss dotenv names are not carriers either', () => {
+  for (const name of ['.env.example', '.env.sample', '.env.template', '.envrc', '.env.local.bak', 'env', '.environment', '.env.', '.env..local']) {
+    assert.equal(CRED_BASENAMES.has(name), false, name)
     assert.equal(pathTargetsCredentials(`C:/Users/me/app/${name}`), false, name)
   }
 })

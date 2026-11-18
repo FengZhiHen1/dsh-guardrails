@@ -77,6 +77,9 @@ test('real ToolRuntime final guard rejects short-circuited pre-analysis', { skip
   const dispose = ctx.on('tools/pre-execute', async () => ({ kind: 'allow' }), { prepend: true })
   const denied = (await call(ctx, 'pwsh', 'short-circuit', { command: "Write-Output 'safe'" }, signal)).results[0].result
   assert.equal(denied.isError, true)
+  // The final-guard fault uses the stable closed-failure rule id; the concrete
+  // stage code stays in the reason for diagnosability.
+  assert.match(denied.error.message, /execution\.check-failed/)
   assert.match(denied.error.message, /ANALYSIS_MISSING/)
   assert.equal(calls, 1)
   dispose()

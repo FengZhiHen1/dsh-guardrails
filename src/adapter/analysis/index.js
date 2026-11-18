@@ -5,6 +5,7 @@ import { resolveCommand } from './commands.js'
 import { createShellAnalyzer } from './shell.js'
 import { createProgramAnalyzer } from './program.js'
 import { inlineCredentialDecision } from '../../core/redaction.js'
+import { textMentionsCredential } from '../../core/rules.js'
 
 // Provisional limits keep analysis bounded while release measurements are pending.
 const DEFAULT_LIMITS = Object.freeze({
@@ -38,6 +39,16 @@ function compareOrder(left, right) {
 }
 
 const hostPaths = (platform) => platform === 'win32' ? path.win32 : path.posix
+
+/** Content actions whose target can be an unresolved dynamic operand (R-04 scan gate). */
+const TEXT_SCAN_ACTIONS = new Set(['read-content', 'copy-content', 'write-content', 'truncate-content', 'delete', 'move-source'])
+
+/** Whether any content operation of this analysis carries an unresolved dynamic operand.
+ * Metadata-only observations never qualify. */
+function hasUnresolvedProtectedOperand(operations) {
+  return operations.some((operation) => TEXT_SCAN_ACTIONS.has(operation.action) &&
+    operation.target?.kind === 'unknown')
+}
 
 function decodeSource(bytes) {
   const utf16 = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le'
@@ -131,6 +142,9 @@ export function createExecutionAnalyzer({ limits: overrides = {}, shell, program
     const result = { status: 'complete', operations: [], candidates: [], gaps: [] }
     const frames = []
     const order = new WeakMap()
+    // Source texts of the units actually analyzed this call (already budget-reserved
+    // references, no extra retention): the credential text scan reads only these.
+    const scannedTexts = []
     let sequence = 0
     let expired = false
     let count = 0
@@ -249,6 +263,7 @@ export function createExecutionAnalyzer({ limits: overrides = {}, shell, program
           if (source.kind === 'inline') {
             if (typeof source.text !== 'string') throw new TypeError('Non-text analysis input')
             reserve(Buffer.byteLength(source.text))
+            scannedTexts.push(source.text)
             await provider.analyze(unit, env)
             continue
           }
@@ -283,6 +298,7 @@ export function createExecutionAnalyzer({ limits: overrides = {}, shell, program
             continue
           }
           reserve(read.size)
+          scannedTexts.push(read.text)
           unit.ancestors = [...unit.ancestors, key]
           unit.origin = { ...unit.origin, file: filename }
           if (source.kind === 'package-script') {
@@ -301,6 +317,14 @@ export function createExecutionAnalyzer({ limits: overrides = {}, shell, program
           if (!(error instanceof LocalBudgetError)) throw error
           gap(error.message)
         }
+      }
+      // Credential text scan (规则模型「凭据防泄露」R-04): only when this call carries an
+      // unresolved dynamic operand on a content action, the actually analyzed source
+      // texts are scanned; a hit only raises a confirmation. No plaintext enters the
+      // result — the flag is a boolean.
+      if (hasUnresolvedProtectedOperand(result.operations) &&
+        scannedTexts.some((text) => textMentionsCredential(text))) {
+        result.credentialTextMention = true
       }
       checkDeadline()
       return result

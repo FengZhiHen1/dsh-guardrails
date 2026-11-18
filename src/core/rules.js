@@ -1,25 +1,16 @@
 // rules — profile-owned exact files and the inherited narrow credential list.
 // Candidate credential families are not added without policy approval.
 
-/** Inherited exact credential-carrier names; public keys remain excluded. */
+/** Inherited exact credential-carrier names; public keys remain excluded.
+ * Ordinary (unmarked) `.env` files are deliberately absent: only a Profile
+ * `sensitiveFiles` mark protects them (需求 R-05, DSR-015 C+A); the template
+ * names `.env.example`/`.env.sample`/`.env.template` were never carriers. */
 export const CRED_BASENAMES = new Set([
   'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', 'id_ed25519_sk', 'id_ecdsa_sk',
   '.npmrc', '.pypirc', '.netrc', '.pgpass', '.git-credentials',
   '.credentials.yaml', '.auteur-media-secret',
-  '.env', '.env.local',
   'ntuser.dat', 'usrclass.dat', 'pagefile.sys', 'hiberfil.sys',
 ])
-/** `.env.*.local` dotenv overrides carry real secrets. Prefix+suffix string test:
- * no regex and no backtracking. `.env.example`/`.env.sample`/`.env.template` are
- * templates and are deliberately not credential carriers. */
-export const ENV_LOCAL_PREFIX = '.env.'
-export const ENV_LOCAL_SUFFIX = '.local'
-export function isEnvLocalCredentialName(base) {
-  if (typeof base !== 'string') return false
-  return base.length > ENV_LOCAL_PREFIX.length + ENV_LOCAL_SUFFIX.length &&
-    base.startsWith(ENV_LOCAL_PREFIX) &&
-    base.endsWith(ENV_LOCAL_SUFFIX)
-}
 /** Exact trailing path segments, never whole credential directories. */
 export const CRED_COMBOS = [
   ['.aws', 'credentials'], ['system32', 'config', 'sam'],
@@ -36,11 +27,11 @@ const CRED_BASENAME_SET = new Set([...CRED_BASENAMES].map((name) => name.toLower
 const PRIVATE_KEY_HEADER = /-----\s*BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/i
 
 /**
- * Static, allocation-bounded scan for a credential-carrier NAME in arbitrary command text
- * (a shell command, terminal text, or a script file's decoded source). It matches whole
- * basenames only, so `.env.example`/`.env.sample`/`.env.template` and path prefixes do not
- * match. It answers "does this text reference a credential-bearing file?", never "is this a
- * deletion"; it can only raise an approval, never grant one.
+ * Static, allocation-bounded scan for a credential-carrier NAME in analyzed command,
+ * terminal, or script text (规则模型「凭据防泄露」R-04). It matches whole basenames only,
+ * so path prefixes do not match; ordinary unmarked `.env` names are absent from the list
+ * and never match (R-05). It answers "does this text reference a credential-bearing file
+ * name or a private key header?"; it can only raise a confirmation, never grant one.
  */
 export function textMentionsCredential(text) {
   if (typeof text !== 'string' || text.length === 0) return false
@@ -51,10 +42,10 @@ export function textMentionsCredential(text) {
     const base = token.replace(/\\/g, '/').split('/').pop()
     if (!base) continue
     if (CRED_BASENAME_SET.has(base.toLowerCase())) return true
-    if (isEnvLocalCredentialName(base)) return true
   }
   return false
 }
+
 /** Supported settings. */
 export const RULE_KEYS = ['sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs']
 /** Zero is a legacy alias for the bounded default, never unlimited waiting. */

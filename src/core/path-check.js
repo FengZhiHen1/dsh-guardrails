@@ -2,7 +2,7 @@
 // Filesystem identities are observed separately by the target adapter.
 
 import path from 'node:path'
-import { CRED_BASENAME_PREFIXES, CRED_BASENAMES, CRED_COMBOS, PUBLIC_KEY_SUFFIX, isEnvLocalCredentialName } from './rules.js'
+import { CRED_BASENAME_PREFIXES, CRED_BASENAMES, CRED_COMBOS, PUBLIC_KEY_SUFFIX } from './rules.js'
 
 const windowsPath = (value) => /^[a-z]:/i.test(value) || value.startsWith('\\\\')
 /** Normalize Windows separators while retaining POSIX filename semantics. */
@@ -28,7 +28,6 @@ export function pathTargetsCredentials(resolved) {
   const base = segs.at(-1) ?? ''
   if (base.endsWith(PUBLIC_KEY_SUFFIX)) return false
   if (CRED_BASENAMES.has(base)) return true
-  if (isEnvLocalCredentialName(base)) return true
   if (CRED_BASENAME_PREFIXES.some((prefix) => base.startsWith(`${prefix}.`))) return true
   return CRED_COMBOS.some((combo) => combo.length <= segs.length &&
     combo.every((part, index) => segs[segs.length - combo.length + index] === part))

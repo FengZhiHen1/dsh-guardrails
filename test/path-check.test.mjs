@@ -66,19 +66,19 @@ test('checkSensitiveRead: user-marked exact paths (case-insensitive, separator-i
   assert.equal(checkSensitiveRead('e:/project/app/.env.production', MARKED), 'marked')
   assert.equal(checkSensitiveRead('E:\\Project\\app\\.env.production', MARKED), 'marked')
   assert.equal(checkSensitiveRead('c:/users/ME/.KUBE/config', MARKED), 'marked')
-  // A sibling or subpath is NOT the marked file. `.env` itself is a builtin credential
-  // carrier since v4, so a non-carrier sibling is used to show marking does not spread.
+  // A sibling or subpath is NOT the marked file. `.env` itself is not a builtin
+  // carrier (R-05), so a non-carrier sibling is used to show marking does not spread.
   assert.equal(checkSensitiveRead('E:/Project/app/.envrc', MARKED), null)
   assert.equal(checkSensitiveRead('E:/Project/app/.env.production.bak', MARKED), null)
   assert.equal(checkSensitiveRead('E:/Project/app/sub/.env.production', MARKED), null)
 })
 
-test('checkSensitiveRead: ordinary files and .env templates stay free; .env carriers match', () => {
+test('checkSensitiveRead: ordinary files and unmarked .env stay free; only marked or carrier names hit', () => {
   assert.equal(checkSensitiveRead(resolvePath(BASE, 'src/core/rules.js'), RULES), null)
-  // v4 decision: dotenv files are credential carriers; templates are not.
-  assert.equal(checkSensitiveRead(resolvePath(BASE, '.env'), RULES), 'credentials')
-  assert.equal(checkSensitiveRead(resolvePath(BASE, '.env.local'), RULES), 'credentials')
-  assert.equal(checkSensitiveRead(resolvePath(BASE, '.env.prod.local'), RULES), 'credentials')
+  // R-05: ordinary unmarked dotenv files are not protected; only a Profile mark does.
+  assert.equal(checkSensitiveRead(resolvePath(BASE, '.env'), RULES), null)
+  assert.equal(checkSensitiveRead(resolvePath(BASE, '.env.local'), RULES), null)
+  assert.equal(checkSensitiveRead(resolvePath(BASE, '.env.prod.local'), RULES), null)
   assert.equal(checkSensitiveRead(resolvePath(BASE, '.env.example'), RULES), null)
   assert.equal(checkSensitiveRead(resolvePath(BASE, '.env.sample'), RULES), null)
   assert.equal(checkSensitiveRead(resolvePath(BASE, '.env.template'), RULES), null)

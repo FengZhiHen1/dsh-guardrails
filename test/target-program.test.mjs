@@ -355,6 +355,40 @@ test('ts: pure computation unit reports no deletion facts', async (t) => { if (!
   assert.equal(commands(facts).length, 0)
 })
 
+test('js: while statement walks its body without faulting (regression)', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', `
+    const fs = require('node:fs');
+    let done = false;
+    while (!done) {
+      fs.unlinkSync('C:/synthetic/work/tmp.txt');
+      done = true;
+    }
+  `), env)
+  const ops = operations(facts)
+  assert.equal(ops.length, 1)
+  assert.equal(ops[0].action, 'delete')
+  assert.deepEqual(ops[0].target, { kind: 'exact', paths: ['C:/synthetic/work/tmp.txt'] })
+  assert.equal(ops[0].condition, 'possible')
+})
+
+test('js: while/do/for control statements yield reachable sinks, never a fault', async (t) => { if (!typescriptReady) return t.skip(typescriptSkipReason);
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('javascript', `
+    const fs = require('node:fs');
+    let guard = 3;
+    while (guard > 0) { fs.rmSync('C:/synthetic/work/w', { recursive: true }); guard--; }
+    do { fs.rmSync('C:/synthetic/work/d'); } while (false);
+    for (let i = 0; i < 2; i++) { fs.unlinkSync('C:/synthetic/work/f'); }
+  `), env)
+  const ops = operations(facts)
+  assert.deepEqual(ops.map(({ action, target, recursive }) => [action, target.paths[0], recursive]), [
+    ['delete', 'C:/synthetic/work/w', true],
+    ['delete', 'C:/synthetic/work/d', false],
+    ['delete', 'C:/synthetic/work/f', false],
+  ])
+})
+
 // ---------------- contract-level behavior ----------------
 
 test('unsupported languages report a gap and never throw', async () => {
@@ -387,7 +421,7 @@ test('aborted signal reports nothing', async () => {
   assert.equal(facts.length, 0)
 })
 
-test('steps are reported through env.step', async () => {
+test('steps are reported through env.step', async (t) => { if (!pythonReady) return t.skip(pythonSkipReason);
   const { env, facts, steps } = makeEnv()
   await analyzer.analyze(unit('python', 'x = 1\n'), env)
   assert.ok(steps() > 0)

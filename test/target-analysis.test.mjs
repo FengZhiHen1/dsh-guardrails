@@ -90,3 +90,43 @@ test('read-only text carrying deletion syntax does not produce an operation', as
   assert.equal(result.status, 'complete')
   assert.equal(result.operations.length, 0)
 })
+
+// --- credential text scan (规则模型「凭据防泄露」R-04) ---------------------------------
+
+test('credential text scan fires with an unresolved operand and a protected basename', async (t) => {
+  const shell = { analyze(_unit, env) { env.operation('delete', { kind: 'unknown', reason: 'unresolved variable $t' }) } }
+  const analyzer = createFixture(t, { shell })
+  const hit = await analyzer.analyze({ source: { kind: 'inline', text: 'copy C:/Users/me/.npmrc somewhere' }, language: 'bash', context })
+  assert.equal(hit.status, 'complete')
+  assert.equal(hit.credentialTextMention, true)
+})
+
+test('credential text scan matches a private key header but never an unmarked .env name', async (t) => {
+  const shell = { analyze(_unit, env) { env.operation('read-content', { kind: 'unknown', reason: 'unresolved variable $t' }) } }
+  const analyzer = createFixture(t, { shell })
+  const keyHeader = await analyzer.analyze({ source: { kind: 'inline', text: 'Get-Content -----BEGIN RSA PRIVATE KEY-----' }, language: 'powershell', context })
+  assert.equal(keyHeader.credentialTextMention, true)
+  const envMiss = await analyzer.analyze({ source: { kind: 'inline', text: 'copy C:/app/.env somewhere' }, language: 'bash', context })
+  assert.equal(envMiss.credentialTextMention, undefined)
+  const templateMiss = await analyzer.analyze({ source: { kind: 'inline', text: 'copy C:/app/.env.example somewhere' }, language: 'bash', context })
+  assert.equal(templateMiss.credentialTextMention, undefined)
+})
+
+test('an exact operand alone does not trigger the credential text scan', async (t) => {
+  const shell = { analyze(_unit, env) { env.operation('delete', { kind: 'exact', paths: ['one.txt'] }) } }
+  const analyzer = createFixture(t, { shell })
+  const miss = await analyzer.analyze({ source: { kind: 'inline', text: 'copy C:/Users/me/.npmrc somewhere' }, language: 'bash', context })
+  assert.equal(miss.credentialTextMention, undefined)
+})
+
+test('file source text participates in the credential text scan', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'guardrails-analysis-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const filename = path.join(root, 'fixture.py')
+  await writeFile(filename, 'shutil.copy("C:/Users/me/.npmrc", out)')
+  const program = { analyze(_unit, env) { env.operation('delete', { kind: 'unknown', reason: 'unresolved target' }) } }
+  const analyzer = createFixture(t, { program })
+  const result = await analyzer.analyze(invoke('python', ['fixture.py'], root))
+  assert.equal(result.status, 'complete')
+  assert.equal(result.credentialTextMention, true)
+})

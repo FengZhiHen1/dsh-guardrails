@@ -42,7 +42,7 @@ test('normalizePolicy: defaults for empty and missing config', () => {
     assert.equal(policy.askTimeoutMs, 120000)
     assert.deepEqual(policy.rules, {})
     assert.deepEqual(policy.allowOnce, [])
-    assert.equal(policy.tightenOnly, false)
+    assert.equal(policy.tightenOnly, true) // protective default (受保护项始终生效)
     assert.deepEqual(policy.configIssues, [])
   }
   // Non-object config degrades to protective defaults with a reported issue (R-20).
@@ -115,6 +115,12 @@ test('normalizePolicy: invalid values degrade per field while valid restrictive 
   assert.equal(dropped.count, 3)
 })
 
+test('normalizePolicy: explicit tightenOnly false is rejected and recorded, never relaxes', () => {
+  const policy = normalizePolicy({ tightenOnly: false })
+  assert.equal(policy.tightenOnly, true)
+  assert.deepEqual(policy.configIssues, [{ code: 'tighten-only-false-rejected', count: 1 }])
+})
+
 test('normalizePolicy: allowOnce is catalog-restricted even in call-scoped mode', () => {
   const call = normalizePolicy({
     allowOnce: ['data.delete.bulk', CHECK_FAILED_RULE, 'data.delete.bulkk', ''],
@@ -174,10 +180,14 @@ test('isProtectedPath: builtin credential basenames with platform case semantics
   assert.equal(isProtectedPath('/home/me/.SSH/ID_RSA', policy, undefined), true) // unknown folds
 })
 
-test('isProtectedPath: env-local overrides, hive prefixes, combos, .pub exclusion', () => {
+test('isProtectedPath: dotenv names stay free; hive prefixes, combos, .pub exclusion keep their semantics', () => {
   const policy = normalizePolicy({})
-  assert.equal(isProtectedPath('D:/proj/.env.dev.local', policy, 'win32'), true)
+  // R-05: ordinary unmarked .env names are not builtin protected paths.
+  assert.equal(isProtectedPath('D:/proj/.env.dev.local', policy, 'win32'), false)
+  assert.equal(isProtectedPath('D:/proj/.env', policy, 'win32'), false)
   assert.equal(isProtectedPath('D:/proj/.env.example', policy, 'win32'), false)
+  // DSR-018 list survivors stay protected.
+  assert.equal(isProtectedPath('C:/Users/me/.npmrc', policy, 'win32'), true)
   assert.equal(isProtectedPath('C:/Windows/System32/config/SAM', policy, 'win32'), true)
   assert.equal(isProtectedPath('C:/Users/me/NTUSER.DAT.LOG1', policy, 'win32'), true)
   assert.equal(isProtectedPath('/home/me/.ssh/id_rsa.pub', policy, 'linux'), false)
@@ -213,7 +223,7 @@ test('decide: catastrophic identity denies first and is never waivable', () => {
   const policy = normalizePolicy({
     rules: { 'catastrophic.device': { enabled: false } },
     allowOnce: ['catastrophic.device'],
-    tightenOnly: false,
+    tightenOnly: true,
   })
   const decision = decide(evidence, policy)
   assert.equal(decision.kind, 'deny')
@@ -481,6 +491,74 @@ test('decide: inline credential denies correctively (R-11)', () => {
   assert.equal(decision.ruleId, 'credential.inline')
 })
 
+// ---------------------------------------------------------------------------
+// decide — credential text scan (R-04 凭据防泄露)
+// ---------------------------------------------------------------------------
+
+test('decide: credentialTextMention confirms credential.file.read for a read-face call', () => {
+  const decision = decide({
+    ...CLEAN,
+    operations: [{ action: 'read-content', target: { kind: 'unknown', reason: 'unresolved variable $t' }, preview: false }],
+    credentialTextMention: true,
+  }, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'credential.file.read')
+  assert.ok(decision.scope.notes.some((note) => note.includes('credential name referenced in text')))
+})
+
+test('decide: a mutate operation upgrades the text-scan hit to credential.file.mutate', () => {
+  const decision = decide({
+    ...CLEAN,
+    operations: [
+      { action: 'read-content', target: { kind: 'unknown', reason: 'unresolved variable $t', knownScope: ['E:/build'] }, preview: false },
+      { action: 'delete', target: { kind: 'unknown', reason: 'unresolved variable $t', knownScope: ['E:/build'] }, preview: false },
+    ],
+    inventory: { kind: 'exact', count: 0, files: [], links: [], directories: [], roots: [], unknown: [] },
+    credentialTextMention: true,
+  }, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'credential.file.mutate')
+  assert.deepEqual(decision.ruleIds, ['data.delete.dynamic', 'credential.file.mutate'])
+})
+
+test('decide: no flag or false flag never produces the text-scan confirmation', () => {
+  const readFace = { ...CLEAN, operations: [{ action: 'read-content', target: { kind: 'unknown', reason: 'u' } }] }
+  assert.equal(decide(readFace, {}).kind, 'allow')
+  assert.equal(decide({ ...readFace, credentialTextMention: false }, {}).kind, 'allow')
+  // Metadata operations are not in the mutate set: they never upgrade the rule.
+  const metadataOnly = {
+    ...CLEAN,
+    operations: [{ action: 'metadata', target: { kind: 'unknown', reason: 'u' } }],
+    credentialTextMention: true,
+  }
+  const decision = decide(metadataOnly, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'credential.file.read')
+})
+
+test('decide: protectedHits already carrying the same rule suppresses the duplicate text-scan hit', () => {
+  const decision = decide({
+    ...CLEAN,
+    operations: [{ action: 'read-content', target: { kind: 'unknown', reason: 'u' } }],
+    protectedHits: [{ path: 'C:/Users/me/.npmrc', action: 'read-content' }],
+    credentialTextMention: true,
+  }, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'credential.file.read')
+  assert.deepEqual(decision.ruleIds, ['credential.file.read'])
+})
+
+test('decide: the text-scan hit is not waivable by allowOnce or rule config', () => {
+  const evidence = {
+    ...CLEAN,
+    operations: [{ action: 'read-content', target: { kind: 'unknown', reason: 'u' } }],
+    credentialTextMention: true,
+  }
+  const decision = decide(evidence, normalizePolicy({ allowOnce: ['credential.file.read'], rules: { 'credential.file.read': { enabled: false } } }))
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'credential.file.read')
+})
+
 test('decide: credential confirm priority over deletion confirms, merged into one request', () => {
   const files = Array.from({ length: 30 }, (_, index) => `E:/f${index}`)
   const decision = decide({
@@ -598,7 +676,7 @@ test('decide: allowOnce waives once for the current call; adapter consumes the i
   assert.deepEqual(decision.waived, ['data.delete.bulk'])
 })
 
-test('decide: tightenOnly locks credential rules but leaves other rules configurable', () => {
+test('decide: tightenOnly is true by default and permanently locks credential rules', () => {
   const evidence = { ...CLEAN, protectedHits: [{ path: '/a/.env', action: 'read-content' }] }
   const locked = decide(evidence, normalizePolicy({
     tightenOnly: true,
@@ -608,11 +686,14 @@ test('decide: tightenOnly locks credential rules but leaves other rules configur
   assert.equal(locked.kind, 'confirm')
   assert.equal(locked.ruleId, 'credential.file.read')
 
-  const unlocked = decide(evidence, normalizePolicy({
+  // The default policy carries no tightenOnly key; credential rules still stay
+  // locked (受保护项始终生效), so there is no unlock path for them at all.
+  const defaultLocked = decide(evidence, normalizePolicy({
     rules: { 'credential.file.read': { enabled: false } },
     allowOnce: ['credential.file.read'],
   }))
-  assert.equal(unlocked.kind, 'allow')
+  assert.equal(defaultLocked.kind, 'confirm')
+  assert.equal(defaultLocked.ruleId, 'credential.file.read')
 
   const dataWaived = decide({
     ...CLEAN,

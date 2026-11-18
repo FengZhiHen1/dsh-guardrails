@@ -329,13 +329,20 @@ class Analyzer {
       this.walkExpression(statement.expression, scope, depth, fn);
       return;
     }
-    if (ts.isIfStatement(statement) || ts.isWhileStatement(statement)) {
+    if (ts.isIfStatement(statement)) {
       this.walkExpression(statement.expression, scope, depth, fn);
       this.walkStatement(statement.thenStatement, scope, depth + 1, fn);
-      if (ts.isIfStatement(statement) && statement.elseStatement) this.walkStatement(statement.elseStatement, scope, depth + 1, fn);
+      if (statement.elseStatement) this.walkStatement(statement.elseStatement, scope, depth + 1, fn);
       return;
     }
-    if (ts.isForStatement(statement) || ts.isForOfStatement(statement) || ts.isForInStatement(statement) || ts.isWhileStatement(statement)) {
+    // WhileStatement carries its body in `statement` (there is no thenStatement);
+    // reading thenStatement here was the while crash root cause.
+    if (ts.isWhileStatement(statement)) {
+      this.walkExpression(statement.expression, scope, depth, fn);
+      this.walkStatement(statement.statement, scope, depth + 1, fn);
+      return;
+    }
+    if (ts.isForStatement(statement) || ts.isForOfStatement(statement) || ts.isForInStatement(statement)) {
       if (ts.isForStatement(statement)) {
         if (statement.initializer) this.walkNode(statement.initializer, scope, depth, fn);
         if (statement.condition) this.walkExpression(statement.condition, scope, depth, fn);

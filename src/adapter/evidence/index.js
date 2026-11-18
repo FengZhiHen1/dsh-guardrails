@@ -328,8 +328,9 @@ async function collect({
     exemptions: state.exemptions,
     issues,
   }
-  // Host collection forwards the analysis credential flag unchanged (credential face).
+  // Host collection forwards the analysis credential flags unchanged (credential face).
   if (analysis.inlineCredential !== undefined) result.inlineCredential = analysis.inlineCredential
+  if (analysis.credentialTextMention !== undefined) result.credentialTextMention = analysis.credentialTextMention
   if (gitRisk) result.gitRisk = gitRisk
   return result
 }

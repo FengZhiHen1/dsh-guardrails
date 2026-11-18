@@ -113,6 +113,8 @@ const ALL_OFFICIAL = {
   write: officialDefinition('write', 'file_path'),
   edit: officialDefinition('edit', 'file_path'),
   apply_patch: officialDefinition('apply_patch', 'input'),
+  grep: officialDefinition('grep', 'pattern'),
+  glob: officialDefinition('glob', 'pattern'),
 }
 
 /** Pre-execute listener extracted from the installed gate. */
@@ -195,12 +197,18 @@ test('requiresAnalysis is true only for official analyzed faces with official sh
     definitions: ALL_OFFICIAL,
     services: { ptcRuntime: { language: 'TypeScript' } },
   })
-  for (const name of ['pwsh', 'bash', 'terminal_send', 'run_code', 'web_fetch', 'read', 'write', 'edit', 'apply_patch', 'read_image']) {
+  for (const name of ['pwsh', 'bash', 'terminal_send', 'run_code', 'web_fetch', 'read', 'write', 'edit', 'apply_patch', 'read_image', 'grep', 'glob']) {
     assert.equal(requiresAnalysis(ctx, execution({ name })), true, name)
   }
-  for (const name of ['web_search', 'grep', 'glob', 'delete', 'move', 'copy', 'totally_unknown', 'mcp:thing']) {
+  for (const name of ['web_search', 'delete', 'move', 'copy', 'totally_unknown', 'mcp:thing']) {
     assert.equal(requiresAnalysis(ctx, execution({ name })), false, name)
   }
+})
+
+test('a grep registration without the official pattern shape is not classified', () => {
+  const shadow = { name: 'grep', execute: async () => ({}), parameters: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] } }
+  const { ctx } = fakeCtx({ definitions: { grep: shadow } })
+  assert.equal(requiresAnalysis(ctx, execution({ name: 'grep' })), false)
 })
 
 test('run_code is the reserved transport: it classifies only with an active ptcRuntime', () => {
@@ -415,6 +423,109 @@ test('hasInlineHttpCredential matches only userinfo form with a password', () =>
   assert.equal(hasInlineHttpCredential('https://host/x?password=p'), false)
   assert.equal(hasInlineHttpCredential('not a url'), false)
   assert.equal(hasInlineHttpCredential(undefined), false)
+})
+
+test('web_fetch never produces deletion analysis, even with inline credentials', async () => {
+  const { ctx } = fakeCtx({ definitions: ALL_OFFICIAL })
+  const plan = await planExecution(ctx, execution({ name: 'web_fetch', args: { url: 'https://user:s3cret-password@host.example/x' } }))
+  assert.equal(plan.kind, 'structured')
+  assert.equal(plan.analysis.status, 'complete')
+  assert.equal(plan.analysis.inlineCredential, true)
+  assert.deepEqual(plan.analysis.operations, [])
+  assert.deepEqual(plan.analysis.candidates, [])
+  assert.deepEqual(plan.analysis.gaps, [])
+})
+
+// ---------------------------------------------------------------------------
+// Official search tools: grep / glob front door (DSR-015)
+
+/** FsProvider fake with the real resolve/stat result shapes (targetKey + displayPath). */
+function searchFsFake() {
+  return {
+    async resolve(target, options) {
+      const cwd = typeof options?.cwd === 'string' ? options.cwd.replace(/[\\/]+$/, '') : ''
+      const shown = cwd ? `${cwd}/${target}` : target
+      return { resolved: target, targetKey: `k:${shown}`, displayPath: shown }
+    },
+    async stat() {
+      return { type: 'file', version: 1 }
+    },
+  }
+}
+
+test('grep on an explicit protected file plans read-content and the decision asks once', async () => {
+  const { ctx } = fakeCtx({ definitions: ALL_OFFICIAL })
+  const plan = await planExecution(ctx, execution({ name: 'grep', args: { pattern: 'token', path: 'secrets.env' } }))
+  assert.equal(plan.kind, 'structured')
+  assert.equal(plan.analysis.status, 'complete')
+  const op = plan.analysis.operations[0]
+  assert.equal(op.action, 'read-content')
+  assert.deepEqual(op.target, { kind: 'exact', paths: ['secrets.env'] })
+  assert.deepEqual(op.context, { domain: 'fs', cwd: 'E:/ws' })
+  assert.equal(op.origin.entry, 'grep')
+
+  // Evidence layer over the plan: the protected path surfaces with the read action,
+  // and the pure decision point returns the credential.file.read confirmation.
+  const { collectEvidence } = await import('../src/adapter/evidence/index.js')
+  const { decide, isProtectedPath } = await import('../src/core/decision.js')
+  const policy = { sensitiveFiles: ['E:/ws/secrets.env'] }
+  const evidence = await collectEvidence(plan.analysis, { policy, fsProvider: searchFsFake(), isProtectedPath })
+  assert.ok(evidence.protectedHits.some((hit) => hit.path === 'E:/ws/secrets.env' && hit.action === 'read-content'),
+    JSON.stringify(evidence.protectedHits))
+  const verdict = decide(evidence, policy)
+  assert.equal(verdict.kind, 'confirm')
+  assert.equal(verdict.ruleId, 'credential.file.read')
+})
+
+test('grep include filters matches only; a missing path records no target (DSR-015)', async () => {
+  const { ctx } = fakeCtx({ definitions: ALL_OFFICIAL })
+  const withInclude = await planExecution(ctx, execution({ name: 'grep', args: { pattern: 'token', path: 'notes.txt', include: '*.md' } }))
+  assert.equal(withInclude.analysis.status, 'complete')
+  assert.equal(withInclude.analysis.operations[0].action, 'read-content')
+  assert.deepEqual(withInclude.analysis.operations[0].target, { kind: 'exact', paths: ['notes.txt'] })
+
+  const workspaceScan = await planExecution(ctx, execution({ name: 'grep', args: { pattern: 'token' } }))
+  assert.equal(workspaceScan.kind, 'structured')
+  assert.equal(workspaceScan.analysis.status, 'complete')
+  assert.deepEqual(workspaceScan.analysis.operations, [])
+
+  // Even a builtin-named workspace scan never yields a protected hit: directory-level
+  // search never triggers (DSR-015).
+  const { collectEvidence } = await import('../src/adapter/evidence/index.js')
+  const { decide, isProtectedPath } = await import('../src/core/decision.js')
+  const evidence = await collectEvidence(workspaceScan.analysis, { policy: null, fsProvider: searchFsFake(), isProtectedPath })
+  assert.deepEqual(evidence.protectedHits, [])
+  assert.equal(decide(evidence, null).kind, 'allow')
+})
+
+test('glob plans a metadata query and decide never confirms it (R-04)', async () => {
+  const { ctx } = fakeCtx({ definitions: ALL_OFFICIAL })
+  const plan = await planExecution(ctx, execution({ name: 'glob', args: { pattern: '**/*.env' } }))
+  assert.equal(plan.kind, 'structured')
+  assert.equal(plan.analysis.status, 'complete')
+  const op = plan.analysis.operations[0]
+  assert.equal(op.action, 'metadata')
+  assert.deepEqual(op.target, { kind: 'pattern', base: 'E:/ws', pattern: '**/*.env' })
+  assert.equal(op.origin.entry, 'glob')
+
+  // Even when the search base itself names a builtin carrier, the metadata action
+  // surfaces as a hit but never confirms.
+  const { collectEvidence } = await import('../src/adapter/evidence/index.js')
+  const { decide, isProtectedPath } = await import('../src/core/decision.js')
+  const named = await planExecution(ctx, execution({ name: 'glob', args: { pattern: '**/*', path: '.npmrc' } }))
+  assert.equal(named.analysis.operations[0].action, 'metadata')
+  assert.deepEqual(named.analysis.operations[0].target, { kind: 'pattern', base: '.npmrc', pattern: '**/*' })
+  const evidence = await collectEvidence(named.analysis, { policy: null, fsProvider: searchFsFake(), isProtectedPath })
+  assert.ok(evidence.protectedHits.some((hit) => hit.path === 'E:/ws/.npmrc' && hit.action === 'metadata'),
+    JSON.stringify(evidence.protectedHits))
+  const verdict = decide(evidence, null)
+  assert.equal(verdict.kind, 'allow')
+})
+
+test('glob without a path and without an authoritative base skips instead of inventing one', async () => {
+  const { ctx } = fakeCtx({ definitions: ALL_OFFICIAL, services: { workingDirectory: { get: () => undefined } } })
+  const plan = await planExecution(ctx, execution({ name: 'glob', args: { pattern: '**/*' }, agent: {} }))
+  assert.equal(plan.kind, 'skip')
 })
 
 test('unmodelled tools and absent targets skip analysis', async () => {

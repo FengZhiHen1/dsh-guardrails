@@ -36,6 +36,7 @@
 // remains of the total configured wait.
 
 import { DEFAULT_ASK_TIMEOUT_MS, ASK_TIMEOUT_MAX } from '../core/rules.js'
+import { CHECK_FAILED_RULE } from '../core/decision.js'
 import {
   planExecution,
   requiresAnalysis,
@@ -94,22 +95,26 @@ export function installGate(ctx, deps) {
   })
 
   /**
-   * Stable fault verdict: sanitized, rule-tagged in the core decoder's format
-   * (`[STABLE_ID] body`) so the core renderer can split the rule id. The
-   * optional diagnose member receives the gap list and may render the reason.
+   * Stable fault verdict under the single closed-failure rule id
+   * `execution.check-failed` (规则模型 rule catalog): gate faults are never
+   * catalog rule ids themselves. The concrete fault code and stage stay in the
+   * reason text so the denial remains diagnosable; raw command text and
+   * arguments never enter reasons. The optional diagnose member receives the
+   * gap list and may refine the reason.
    */
   function fault(code, detail, gaps = [{ code }]) {
-    const builtin = `[${code}] ${detail}`
+    const builtin = `execution.check-failed (stage ${code}): ${detail}`
     let rendered
     try {
       rendered = diagnose?.(Array.isArray(gaps) ? gaps : [{ code }])
     } catch {
       rendered = undefined
     }
+    const body = typeof rendered === 'string' && rendered.length > 0 ? rendered : detail
     return {
       kind: 'deny',
-      ruleId: code,
-      reason: typeof rendered === 'string' && rendered.length > 0 ? rendered : builtin,
+      ruleId: CHECK_FAILED_RULE,
+      reason: `execution.check-failed (stage ${code}): ${body}`,
     }
   }
 
@@ -225,14 +230,15 @@ export function installGate(ctx, deps) {
     return DEFAULT_ASK_TIMEOUT_MS
   }
 
-  /** Stable, sanitized denial texts for the closed approval-outcome union. */
+  /** Stable, sanitized denial texts for the closed approval-outcome union. The
+   * outcome code stays in the reason text; it is not a catalog rule id. */
   const APPROVAL_DENIALS = {
-    timeout: '[APPROVAL_TIMEOUT] No grant within the configured wait; this is an automatic refusal, not a user rejection. Do not retry with the same parameters; re-issue with a narrower, enumerable scope if the operation is still needed.',
-    rejected: '[APPROVAL_REJECTED] The user rejected this invocation. Do not retry with the same parameters.',
-    cancelled: '[APPROVAL_CANCELLED] The confirmation was cancelled before a decision; invocation refused.',
-    unavailable: '[APPROVAL_UNAVAILABLE] No approval channel or requesting agent is available for this confirmation; invocation refused.',
-    failed: '[APPROVAL_FAILED] The approval request could not be recorded; invocation refused.',
-    budget: '[APPROVAL_TIMEOUT] The bounded wait budget was already spent on the first confirmation; invocation refused. Re-issue the call to start a new bounded confirmation.',
+    timeout: 'APPROVAL_TIMEOUT: No grant within the configured wait; this is an automatic refusal, not a user rejection. Do not retry with the same parameters; re-issue with a narrower, enumerable scope if the operation is still needed.',
+    rejected: 'APPROVAL_REJECTED: The user rejected this invocation. Do not retry with the same parameters.',
+    cancelled: 'APPROVAL_CANCELLED: The confirmation was cancelled before a decision; invocation refused.',
+    unavailable: 'APPROVAL_UNAVAILABLE: No approval channel or requesting agent is available for this confirmation; invocation refused.',
+    failed: 'APPROVAL_FAILED: The approval request could not be recorded; invocation refused.',
+    budget: 'APPROVAL_TIMEOUT: The bounded wait budget was already spent on the first confirmation; invocation refused. Re-issue the call to start a new bounded confirmation.',
   }
 
   /**

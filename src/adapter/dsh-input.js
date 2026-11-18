@@ -19,6 +19,10 @@
 //   fs tools: read/read_image(file_path), write(file_path), edit(file_path),
 //     apply_patch(input) — patch paths are relative to the Session working directory and
 //     parse via the official Codex-style parser (@deepseek-ai/dsh-fs-patch parsePatch).
+//   search tools (@deepseek-ai/dsh-tool-fs-search): grep { pattern, path? file or
+//     directory, include? single glob }, glob { pattern, path? directory }. Only an
+//     explicit string path names a real file; a missing path means a directory-level
+//     search, which never triggers protection (DSR-015: exact-path equality only).
 //   web_fetch args: { url } — standalone HTTP face; only real official params are scanned.
 //
 // Structured file tools never go through the shell/program analyzer (架构「前门分类」).
@@ -45,6 +49,9 @@ const SHELL_TOOLS = new Map([
 /** Structured file tools whose explicit target arguments this module models. */
 const STRUCTURED_TARGET_TOOLS = new Set(['read', 'read_image', 'write', 'edit', 'apply_patch'])
 
+/** Official search tools (content scan vs metadata query), planned per DSR-015. */
+const SEARCH_TOOLS = new Set(['grep', 'glob'])
+
 /** The one argument each classified official tool must declare as required. */
 const EXPECTED_PARAM = new Map([
   ['pwsh', 'command'],
@@ -55,6 +62,8 @@ const EXPECTED_PARAM = new Map([
   ['write', 'file_path'],
   ['edit', 'file_path'],
   ['apply_patch', 'input'],
+  ['grep', 'pattern'],
+  ['glob', 'pattern'],
   ['web_fetch', 'url'],
 ])
 
@@ -130,13 +139,14 @@ const ANALYZED_FACES = new Set([
   RUN_CODE,
   'web_fetch',
   ...STRUCTURED_TARGET_TOOLS,
+  ...SEARCH_TOOLS,
 ])
 
 /**
  * Sync front-door predicate used by both hooks. True only for faces this gate
- * analyzes end to end (command execution face + structured file tools + the
- * standalone HTTP credential face) whose definition passes every check the
- * official contract allows. Never performs IO or parsing.
+ * analyzes end to end (command execution face + structured file tools + official
+ * search tools + the standalone HTTP credential face) whose definition passes every
+ * check the official contract allows. Never performs IO or parsing.
  * @throws when the registry lookup itself fails (bounded fault upstream).
  */
 export function requiresAnalysis(ctx, execution) {
@@ -350,6 +360,11 @@ async function planApplyPatch(ctx, execution, patch, deps) {
   return { kind: 'structured', analysis: structuredAnalysis({ status: 'complete', operations }) }
 }
 
+/** Content action of one structured face: write faces mutate, everything else reads. */
+function contentActionOf(name) {
+  return name === 'write' || name === 'edit' ? 'write-content' : 'read-content'
+}
+
 async function planStructuredTool(ctx, execution, args, deps) {
   const name = execution.name
   if (name === 'apply_patch') {
@@ -369,7 +384,7 @@ async function planStructuredTool(ctx, execution, args, deps) {
     return { kind: 'structured', analysis: structuredAnalysis({
       status: 'partial',
       operations: [targetOperation({
-        action: name === 'read' || name === 'read_image' ? 'read-content' : 'write-content',
+        action: contentActionOf(name),
         execution,
         cwd: undefined,
         fsTarget: target,
@@ -380,11 +395,38 @@ async function planStructuredTool(ctx, execution, args, deps) {
   return { kind: 'structured', analysis: structuredAnalysis({
     status: 'complete',
     operations: [targetOperation({
-      action: name === 'read' || name === 'read_image' ? 'read-content' : 'write-content',
+      action: contentActionOf(name),
       execution,
       cwd,
       fsTarget: target,
     })],
+  }) }
+}
+
+/**
+ * glob: one metadata query (R-04: metadata never confirms, whatever the base names).
+ * The search base is the explicit `path` when given, else the session working
+ * directory. DESIGN_NOTE: with no `path` and no authoritative session cwd the base is
+ * unknown; the gate records no query instead of inventing a base directory.
+ */
+function planGlob(ctx, execution, args) {
+  const cwd = sessionCwd(ctx, execution)
+  const base = typeof args?.path === 'string' && args.path.length > 0
+    ? args.path
+    : (typeof cwd === 'string' && cwd.length > 0 ? cwd : undefined)
+  if (base === undefined) return { kind: 'skip' }
+  const pattern = typeof args?.pattern === 'string' && args.pattern.length > 0 ? args.pattern : undefined
+  return { kind: 'structured', analysis: structuredAnalysis({
+    status: 'complete',
+    operations: [{
+      action: 'metadata',
+      context: { domain: 'fs', ...cwd !== undefined ? { cwd } : {} },
+      target: { kind: 'pattern', base, ...(pattern !== undefined ? { pattern } : {}) },
+      recursive: false,
+      preview: false,
+      condition: 'certain',
+      origin: { entry: execution.name, callId: execution.callId },
+    }],
   }) }
 }
 
@@ -461,6 +503,25 @@ export async function planExecution(ctx, execution, deps = {}) {
       operations: [],
       inlineCredential: hasInlineHttpCredential(args.url),
     }) }
+  }
+
+  // Official search tools (架构「前门分类」+ DSR-015).
+  // grep: an explicit string `path` is the only spelling that can name a real file, so
+  // it plans a read-content exact target — a protected hit then flows through
+  // credential.file.read at the decision point. `include` filters matches only and
+  // never changes the action. A missing path means a directory-level search over the
+  // session workspace: protection is exact-path equality and no exact file is named,
+  // so it never triggers (DSR-015) and the gate records no target rather than
+  // fabricating one.
+  if (name === 'grep') {
+    const explicit = typeof args?.path === 'string' && args.path.length > 0 ? args.path : undefined
+    if (explicit === undefined) {
+      return { kind: 'structured', analysis: structuredAnalysis({ status: 'complete', operations: [] }) }
+    }
+    return planStructuredTool(ctx, execution, args, deps)
+  }
+  if (name === 'glob') {
+    return planGlob(ctx, execution, args)
   }
 
   // Structured file tools: explicit target operations, no command parsing.

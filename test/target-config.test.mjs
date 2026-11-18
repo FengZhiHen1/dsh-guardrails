@@ -14,6 +14,8 @@ test('invalid input falls back to protective defaults without making the bundle 
   assert.deepEqual(config.sensitiveFiles, [])
   assert.equal(config.builtinSensitiveAsk, true)
   assert.equal(config.askTimeoutMs, 120_000)
+  // An explicit false cannot relax protected items; the exported boundary keeps true.
+  assert.equal(config.tightenOnly, true)
 })
 
 test('a valid custom file and short confirmation time pass the exported Config boundary', () => {

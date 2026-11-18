@@ -57,6 +57,13 @@
 //                                        or credential.file.mutate (write/truncate/delete/
 //                                        move-source and any unrecognized action, failing
 //                                        safe); `metadata` hits never confirm (R-04).
+//   credentialTextMention              → confirm credential.file.read or .mutate (R-04
+//                                        credential text scan: a protected credential name
+//                                        was matched in analyzed text while an unresolved
+//                                        dynamic operand existed; mutate when the call has
+//                                        a write/truncate/delete/move-source operation).
+//                                        Skipped when protectedHits already produced a hit
+//                                        under the same rule id.
 //   deletion operations (delete/move-source/git-*) with unknown or pattern targets, or
 //     unproven recursion               → data.delete.dynamic (family rule when the call is
 //                                        uniformly git or move), listing provable scope.
@@ -81,7 +88,7 @@
 // of the hit is allowlisted and nothing in the hit's scope is unobserved, so an allowlist
 // can never waive an unenumerable deletion.
 
-import { CRED_BASENAMES, CRED_BASENAME_PREFIXES, CRED_COMBOS, PUBLIC_KEY_SUFFIX, isEnvLocalCredentialName } from './rules.js'
+import { CRED_BASENAMES, CRED_BASENAME_PREFIXES, CRED_COMBOS, PUBLIC_KEY_SUFFIX } from './rules.js'
 import { redactText } from './redaction.js'
 import { isAbsolutePath, segmentsOf, slash } from './path-check.js'
 import path from 'node:path'
@@ -115,6 +122,8 @@ const GIT_OP_RULES = {
 const GIT_ACTIONS = new Set(Object.keys(GIT_OP_RULES))
 const READ_CONTENT_ACTIONS = new Set(['read-content', 'copy-content'])
 const MUTATE_CONTENT_ACTIONS = new Set(['write-content', 'truncate-content', 'delete', 'move-source'])
+/** R-04 credential text scan: any of these operations upgrades the scan hit to mutate. */
+const TEXT_SCAN_MUTATE_ACTIONS = new Set(['write-content', 'truncate-content', 'delete', 'move-source'])
 
 /** Confirm/deny primary-rule selection order when several hits coexist (规则模型:
  * one merged confirmation; denies keep their own trigger reasons). */
@@ -339,7 +348,7 @@ export function normalizePolicy(config, options = {}) {
     askTimeoutMs: ASK_TIMEOUT_DEFAULT,
     rules: {},
     allowOnce: [],
-    tightenOnly: false,
+    tightenOnly: true,
     configIssues: [],
   }
   const finish = () => {
@@ -458,13 +467,12 @@ export function normalizePolicy(config, options = {}) {
     }
   }
 
-  // tightenOnly: project-layer tightening; an invalid value leans restrictive.
+  // tightenOnly: protective default is true (项目层覆盖只能收紧、不能放松). An explicit
+  // false cannot relax protected items, so it keeps the default and is reported.
   if (config.tightenOnly !== undefined) {
-    if (typeof config.tightenOnly === 'boolean') policy.tightenOnly = config.tightenOnly
-    else {
-      policy.tightenOnly = true
-      issues.add('tighten-only-invalid')
-    }
+    if (config.tightenOnly === true) policy.tightenOnly = true
+    else if (config.tightenOnly === false) issues.add('tighten-only-false-rejected')
+    else issues.add('tighten-only-invalid')
   }
   return finish()
 }
@@ -481,7 +489,6 @@ function matchesBuiltin(rawPath, fold) {
   const baseKey = fold ? base.toLowerCase() : base
   if (baseKey.endsWith(PUBLIC_KEY_SUFFIX)) return false
   if (CRED_BASENAMES.has(baseKey)) return true
-  if (isEnvLocalCredentialName(baseKey)) return true
   if (CRED_BASENAME_PREFIXES.some((prefix) => baseKey.startsWith(`${prefix}.`))) return true
   const tail = fold ? segs.map((segment) => segment.toLowerCase()) : segs
   return CRED_COMBOS.some((combo) => combo.length <= tail.length &&
@@ -810,6 +817,28 @@ function buildCredentialHits(protectedHits) {
   return hits
 }
 
+/** Credential text scan hit (规则模型「凭据防泄露」R-04): analyzed command or script text
+ * referenced a protected credential name while an unresolved dynamic operand existed.
+ * Confirm only, never downgrade; the hit lists no enumerable target and is marked
+ * unobserved, so a path allowlist can never waive it. */
+function buildCredentialTextHits(operations, flagged) {
+  if (flagged !== true) return []
+  const ruleId = operations.some((op) => TEXT_SCAN_MUTATE_ACTIONS.has(op.action))
+    ? 'credential.file.mutate'
+    : 'credential.file.read'
+  const scope = emptyScope()
+  scope.notes.push('unresolved dynamic operand; credential name referenced in text')
+  return [{
+    ruleId,
+    outcome: 'confirm',
+    reason: 'Analyzed command or script text referenced a protected credential name while an unresolved dynamic operand existed. A one-time, time-limited confirmation is required; approval applies only to this call.',
+    trigger: 'credential basename or private-key header matched in analyzed text (unresolved dynamic operand present)',
+    scope,
+    targets: [],
+    unobserved: true,
+  }]
+}
+
 /** Deletion-tier family rule: a uniformly git or move call keeps its catalog rule,
  * anything mixed uses the generic data rule for the given tier
  * (fallbackKind: 'allow' | 'bulk' | 'dynamic'). */
@@ -1031,6 +1060,11 @@ export function decide(evidence, effectivePolicy) {
     hits.push(...buildCredentialHits(protectedHits))
     hits.push(...buildDeletionHit(operations, inventory, gitRisk))
     hits.push(...buildCandidateHits(candidates))
+    // R-04 credential text scan: adds one confirm hit unless protectedHits already
+    // produced a hit under the same rule id (只升不降; no duplicate request).
+    for (const hit of buildCredentialTextHits(operations, evidence.credentialTextMention)) {
+      if (!hits.some((existing) => existing.ruleId === hit.ruleId)) hits.push(hit)
+    }
 
     // 7. Apply per-rule waivers, then combine per 拒绝 > 确认 > 放行.
     const kept = []
