@@ -1,7 +1,4 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
 import test from 'node:test'
 import { createExecutionAnalyzer } from '../src/adapter/analysis/index.js'
 
@@ -27,19 +24,13 @@ test('shares command semantics across direct argument vectors and source adapter
   assert.deepEqual(direct.operations[0].target, { kind: 'exact', paths: ['one.txt'] })
 })
 
-test('a scoped file entry is read as data and preserves child origin', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'guardrails-analysis-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
-  const filename = path.join(root, 'fixture.py')
-  await writeFile(filename, 'parse as data only')
-  const analyzer = createFixture(t, { program: { analyze(unit, env) {
-    assert.equal(unit.source.text, 'parse as data only')
-    env.operation('delete', { kind: 'exact', paths: ['one.txt'] })
-  } } })
-  const result = await analyzer.analyze(invoke('python', ['fixture.py'], root))
-  assert.equal(result.status, 'complete')
-  assert.equal(result.operations[0].origin.file, filename)
-  assert.equal(result.operations[0].origin.parentUnitId, '1')
+test('interpreter script-file bodies are not read (RR-5)', async (t) => {
+  let called = false
+  const analyzer = createFixture(t, { program: { analyze() { called = true } } })
+  const result = await analyzer.analyze(invoke('python', ['fixture.py']))
+  assert.equal(called, false)
+  assert.equal(result.status, 'partial')
+  assert.ok(result.gaps.some((gap) => gap.kind === 'script-file-body-not-analyzed'))
 })
 
 test('analysis preserves prior facts when a nested provider is unavailable', async (t) => {
@@ -119,14 +110,10 @@ test('an exact operand alone does not trigger the credential text scan', async (
   assert.equal(miss.credentialTextMention, undefined)
 })
 
-test('file source text participates in the credential text scan', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'guardrails-analysis-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
-  const filename = path.join(root, 'fixture.py')
-  await writeFile(filename, 'shutil.copy("C:/Users/me/.npmrc", out)')
+test('inline source text participates in the credential text scan', async (t) => {
   const program = { analyze(_unit, env) { env.operation('delete', { kind: 'unknown', reason: 'unresolved target' }) } }
   const analyzer = createFixture(t, { program })
-  const result = await analyzer.analyze(invoke('python', ['fixture.py'], root))
+  const result = await analyzer.analyze(invoke('python', ['-c', 'shutil.copy("C:/Users/me/.npmrc", out)']))
   assert.equal(result.status, 'complete')
   assert.equal(result.credentialTextMention, true)
 })

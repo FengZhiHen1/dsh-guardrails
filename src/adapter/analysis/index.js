@@ -43,6 +43,10 @@ const hostPaths = (platform) => platform === 'win32' ? path.win32 : path.posix
 /** Content actions whose target can be an unresolved dynamic operand (R-04 scan gate). */
 const TEXT_SCAN_ACTIONS = new Set(['read-content', 'copy-content', 'write-content', 'truncate-content', 'delete', 'move-source'])
 
+/** Interpreter script-file bodies are deliberately outside the analyzed surface (RR-5):
+ * only inline `-c`/`-e`/PTC and Shell script files are read. */
+const PROGRAM_FILE_LANGUAGES = new Set(['python', 'javascript', 'typescript'])
+
 /** Whether any content operation of this analysis carries an unresolved dynamic operand.
  * Metadata-only observations never qualify. */
 function hasUnresolvedProtectedOperand(operations) {
@@ -268,6 +272,13 @@ export function createExecutionAnalyzer({ limits: overrides = {}, shell, program
             continue
           }
           if (source.kind !== 'file' && source.kind !== 'package-script') throw new TypeError('Unsupported analysis source')
+          // RR-5 boundary: interpreter script-file bodies are not read or analyzed. The outer
+          // wrapper remains visible; the missing body is a coverage gap, so a call with no other
+          // risk evidence stays allowed with a diagnostic (R-17).
+          if (source.kind === 'file' && PROGRAM_FILE_LANGUAGES.has(unit.language)) {
+            gap('script-file-body-not-analyzed', unit.origin)
+            continue
+          }
           if (unit.context.domain !== 'host' || (unit.context.platform && unit.context.platform !== process.platform)) {
             gap('source-domain')
             continue
