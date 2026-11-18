@@ -656,6 +656,451 @@ function cmdInline(name, args, options, env) {
 }
 
 
+// --- heredoc-fed stdin scripts -------------------------------------------------
+
+/** POSIX shell interpreters whose stdin script a heredoc can feed. The body is
+ * analyzed under the closest supported grammar: bash keeps its dialect, the
+ * others the POSIX dialect (an unsupported construct stays a parse gap, never
+ * a guess). */
+const HEREDOC_SHELL_RECEIVERS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh'])
+
+/** True when the receiver argv leaves the interpreter reading its script from
+ * stdin: no `-c` inline script (possibly clustered) and no script-file
+ * operand. Other options stay; a value-taking option followed by its value
+ * looks like a file operand here, which conservatively keeps the old
+ * coverage-gap behavior for that invocation. */
+function readsStdinScript(args) {
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]
+    if (value === null || typeof value !== 'string') return false
+    if (value === '--') return i === args.length - 1
+    if (value.startsWith('-') && value !== '-') {
+      if (/^-[a-z]*c/iu.test(value)) return false // inline script mode: the heredoc stays data
+      continue
+    }
+    return false // a bare word would be the script file
+  }
+  return true
+}
+
+/** A heredoc attached to a POSIX shell interpreter with no inline script and no
+ * file argument IS the script that interpreter reads from stdin, quoted
+ * delimiter or not (the delimiter only changes variable evaluation, not that
+ * the text executes). The raw body is analyzed as a same-domain child unit.
+ * Receiver option semantics stay on the invocation: `-s` is the explicit
+ * stdin-script mode the body now proves, login/interactive flags still load
+ * startup code, anything else stays an unmodeled option (gap, no candidate).
+ * Returns true when the heredoc body was consumed. */
+function emitHeredocShellChild(name, args, options, env, context = options.context) {
+  const heredocs = Array.isArray(options.heredocs) ? options.heredocs : []
+  const bodies = heredocs.filter((entry) => typeof entry?.body === 'string' && entry.body !== '')
+  if (bodies.length === 0 || !readsStdinScript(args)) return false
+  for (const value of args) {
+    if (typeof value !== 'string' || !value.startsWith('-') || value === '-') continue
+    if (['--noprofile', '--norc', '-s'].includes(value)) continue
+    if (['--login', '-l', '-i'].includes(value)) env.gap('shell-startup', options.origin)
+    else env.gap('interpreter-options', options.origin)
+  }
+  env.child({
+    source: { kind: 'inline', text: bodies.map((entry) => entry.body).join('\n') },
+    language: name === 'bash' ? 'bash' : 'posix',
+    context, condition: options.condition, origin: options.origin,
+  })
+  return true
+}
+
+// --- ssh remote payloads -------------------------------------------------------
+
+/** OpenSSH flags that take a value. A value letter inside a short cluster
+ * cannot be split safely and stays an unmodeled option (gap). The boolean set
+ * only changes local behavior; `-t`/`-T` affect only the TTY and never
+ * introduce a remote command. */
+const SSH_VALUE_FLAGS = new Set(['-b', '-c', '-D', '-E', '-e', '-F', '-I', '-i', '-J', '-L', '-l', '-m', '-O', '-o', '-p', '-Q', '-R', '-S', '-w', '-W'])
+const SSH_BOOLEAN_FLAGS = new Set(['-4', '-6', '-A', '-a', '-B', '-C', '-f', '-G', '-g', '-K', '-k', '-M', '-N', '-n', '-q', '-s', '-T', '-t', '-v', '-x', '-X', '-Y', '-y'])
+const SSH_VALUE_LETTERS = new Set([...'bDEeFIiJLlmOopQRSwWc'])
+
+/** `ssh [options] <host> [command…]`: everything after the destination is one
+ * POSIX shell command line executed in the `ssh` domain; a heredoc fed to a
+ * POSIX shell receiver is that shell's stdin script. A host without a command
+ * and every unmodeled option stay coverage gaps (放行). */
+function sshCommand(args, options, env) {
+  let index = 0
+  while (index < args.length) {
+    const value = args[index]
+    if (typeof value !== 'string') { env.gap('unmodeled-command', options.origin); return }
+    if (value === '--') { index += 1; break }
+    if (value.startsWith('-') && value !== '-') {
+      if (SSH_VALUE_FLAGS.has(value)) {
+        if (index + 1 >= args.length) { env.gap('unmodeled-command', options.origin); return }
+        index += 2
+        continue
+      }
+      if (value.length > 2 && /^-[a-z]+$/iu.test(value)) {
+        const letters = [...value.slice(1)]
+        if (letters.some((letter) => SSH_VALUE_LETTERS.has(letter))) {
+          env.gap('unmodeled-command', options.origin) // a value letter in a cluster cannot be split safely
+          return
+        }
+        if (letters.every((letter) => SSH_BOOLEAN_FLAGS.has(`-${letter}`))) { index += 1; continue }
+        env.gap('unmodeled-command', options.origin)
+        return
+      }
+      const attached = /^-([a-zA-Z])(\S+)$/u.exec(value)
+      if (attached && SSH_VALUE_LETTERS.has(attached[1])) { index += 1; continue }
+      if (value.length === 2 && SSH_BOOLEAN_FLAGS.has(value)) { index += 1; continue }
+      env.gap('unmodeled-command', options.origin)
+      return
+    }
+    break
+  }
+  const destination = args[index]
+  if (typeof destination !== 'string') { env.gap('unmodeled-command', options.origin); return }
+  const rest = args.slice(index + 1)
+  const receiver = rest[0]
+  if (typeof receiver === 'string' && HEREDOC_SHELL_RECEIVERS.has(receiver) &&
+    emitHeredocShellChild(receiver, rest.slice(1), options, env, { domain: 'ssh', platform: 'linux' })) return
+  if (rest.length === 0) { env.gap('unmodeled-command', options.origin); return }
+  const literals = rest.filter((value) => typeof value === 'string')
+  if (literals.length === 0) { env.gap('unmodeled-command', options.origin); return }
+  if (literals.length < rest.length) env.gap('unmodeled-command', options.origin)
+  // The joined text is the literal remainder of the remote argv; local shell
+  // operators cannot appear between the arguments (they never reach ssh).
+  env.child({
+    source: { kind: 'inline', text: literals.join(' ') },
+    language: 'posix',
+    context: { domain: 'ssh', platform: 'linux' },
+    condition: options.condition, origin: options.origin,
+  })
+}
+
+// --- awk system() payloads ------------------------------------------------------
+
+/** Extract the literal argument of each `system("…")` call in an awk program.
+ * Awk string literals and comments never execute, so they are skipped before
+ * matching; only a double-quoted awk string argument is literal. An unterminated
+ * string, a non-string argument or a concatenated argument is dynamic. */
+function awkSystemPrograms(program) {
+  const literal = []
+  let dynamic = false
+  const isSpace = (ch) => ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n'
+  let i = 0
+  while (i < program.length) {
+    const ch = program[i]
+    if (ch === '#') { while (i < program.length && program[i] !== '\n') i += 1; continue }
+    if (ch === '"') {
+      i += 1
+      while (i < program.length && program[i] !== '"') { if (program[i] === '\\') i += 1; i += 1 }
+      i += 1
+      continue
+    }
+    if ((i === 0 || !/[A-Za-z0-9_$]/u.test(program[i - 1])) && /^system\s*\(/u.test(program.slice(i))) {
+      let j = i + program.slice(i).match(/^system\s*\(/u)[0].length
+      while (j < program.length && isSpace(program[j])) j += 1
+      if (program[j] !== '"') { dynamic = true; i = j; continue }
+      j += 1
+      let text = ''
+      let closed = false
+      while (j < program.length) {
+        const c = program[j]
+        if (c === '\\') {
+          const next = program[j + 1]
+          if (next === undefined) break
+          text += next === 'n' ? '\n' : next === 't' ? '\t' : next === 'r' ? '\r' : next
+          j += 2
+          continue
+        }
+        if (c === '"') { closed = true; j += 1; break }
+        text += c
+        j += 1
+      }
+      if (!closed) { dynamic = true; i = j; continue }
+      while (j < program.length && (program[j] === ' ' || program[j] === '\t')) j += 1
+      if (program[j] !== ')') { dynamic = true; i = j; continue } // concatenation or expression argument
+      if (text !== '') literal.push(text)
+      i = j + 1
+      continue
+    }
+    i += 1
+  }
+  return { literal, dynamic }
+}
+
+/** `awk '…system("cmd")…'`: the string literal is a shell command line executed
+ * through /bin/sh in the same execution domain. A non-literal `system()`
+ * argument is the established dynamic-execution candidate. The awk language
+ * surface itself stays an unmodeled-command gap (partial coverage). */
+function awkCommand(args, options, env) {
+  let program
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]
+    if (typeof value !== 'string') break
+    if (value.startsWith('-') && value !== '-') {
+      if (/^-[fFvme]$/u.test(value)) { i += 1; continue } // value-taking short options
+      continue // attached or clustered options cannot hide the program word here
+    }
+    if (value === '--') { program = args[i + 1]; break }
+    program = value
+    break
+  }
+  env.gap('unmodeled-command', options.origin)
+  if (typeof program !== 'string' || program === '') return
+  const { literal, dynamic } = awkSystemPrograms(program)
+  if (dynamic) env.candidate('dynamic-execution', 'Dynamic system() argument was not analyzed', undefined, options.origin)
+  for (const text of literal) {
+    env.child({ source: { kind: 'inline', text }, language: 'posix',
+      context: options.context, condition: options.condition, origin: options.origin })
+  }
+}
+
+// --- tar --remove-files ---------------------------------------------------------
+
+const TAR_BOOLEAN_LETTERS = new Set([...'czjJtxvprukaihlmnMSsUVwWyZPGqABOo'])
+const TAR_VALUE_LETTERS = new Set([...'fbCTKXLgF'])
+const TAR_BOOLEAN_LONGS = new Set(['--create', '--gzip', '--verbose', '--list', '--extract', '--get',
+  '--bzip2', '--xz', '--zstd', '--lzma', '--lzop', '--compress', '--totals', '--dereference',
+  '--one-file-system', '--same-permissions', '--absolute-names', '--no-recursion'])
+
+/** `tar … --remove-files`: archiving deletes the named source members afterwards.
+ * Directory members (trailing separator) delete recursively; a member list that
+ * cannot be fully interpreted (unknown option, dynamic operand) keeps the
+ * visible members as the known scope. Without `--remove-files` the call stays
+ * the existing unmodeled-command gap. */
+function tarCommand(args, options, env) {
+  let removeFiles = false
+  let archiveNamed = false
+  let filesFrom = false
+  let unmodeled = false
+  const positionals = []
+  let i = 0
+  while (i < args.length) {
+    const value = args[i]
+    if (typeof value !== 'string') { positionals.push({ value: null, index: i }); i += 1; continue }
+    if (value === '--') {
+      for (let j = i + 1; j < args.length; j++) positionals.push({ value: args[j], index: j })
+      break
+    }
+    if (value.startsWith('--')) {
+      const eq = value.indexOf('=')
+      const name = eq < 0 ? value : value.slice(0, eq)
+      if (name === '--remove-files') removeFiles = true
+      else if (name === '--file') {
+        archiveNamed = true
+        if (eq < 0) i += 1 // the archive path is the next argument
+      } else if (name === '--files-from' || name === '--exclude-from') {
+        filesFrom = name === '--files-from'
+        if (eq < 0) i += 1
+      } else if (!TAR_BOOLEAN_LONGS.has(name)) unmodeled = true
+      i += 1
+      continue
+    }
+    // GNU old-style: `tar cf out.tgz src/` — a leading all-letters word is a cluster.
+    const isCluster = (value.startsWith('-') && value !== '-' && !value.startsWith('--')) ||
+      (i === 0 && /^[a-zA-Z]+$/u.test(value))
+    if (!isCluster) { positionals.push({ value, index: i }); i += 1; continue }
+    const letters = value.startsWith('-') ? value.slice(1) : value
+    let advance = i + 1
+    for (let k = 0; k < letters.length; k++) {
+      const letter = letters[k]
+      if (letter === 'f') {
+        archiveNamed = true
+        if (letters.slice(k + 1) === '' && advance < args.length && typeof args[advance] === 'string') advance += 1
+        else if (letters.slice(k + 1) === '') unmodeled = true
+        break // the cluster ends at its value letter
+      }
+      if (letter === 'T') {
+        filesFrom = true
+        if (letters.slice(k + 1) === '' && advance < args.length && typeof args[advance] === 'string') advance += 1
+        else if (letters.slice(k + 1) === '') unmodeled = true
+        break // the cluster ends at its value letter
+      }
+      if (TAR_VALUE_LETTERS.has(letter)) {
+        if (letters.slice(k + 1) === '') {
+          if (advance < args.length && typeof args[advance] === 'string') advance += 1
+          else unmodeled = true
+        }
+        break // the cluster ends at its value letter
+      }
+      if (!TAR_BOOLEAN_LETTERS.has(letter)) unmodeled = true
+    }
+    i = advance
+  }
+  if (!removeFiles) { env.gap('unmodeled-command', options.origin); return }
+  const sources = archiveNamed ? positionals : positionals.slice(1)
+  // The member list itself comes from a file (-T/--files-from): the visible
+  // operands cannot stand in for it (find's dynamic-base tier).
+  if (filesFrom) {
+    env.gap('command-options', options.origin)
+    env.candidate('unverified-effect', 'tar --remove-files member list could not be enumerated: it is read from a file', undefined, options.origin)
+    return
+  }
+  if (unmodeled || sources.length === 0) {
+    env.gap('command-options', options.origin)
+    if (sources.length === 0) return
+    // The deletion is proven on the command shape; the visible members stay the
+    // known scope (same treatment as an unprovable find predicate).
+    env.operation('delete', {
+      kind: 'unknown',
+      reason: 'tar-remove-files-members',
+      knownScope: [...sources.filter((source) => typeof source.value === 'string').map(({ value }) => value),
+        'tar --remove-files (member list not fully interpretable)'],
+    }, options)
+    return
+  }
+  for (const source of sources) {
+    const dirLike = typeof source.value === 'string' && /[\\/]$/u.test(source.value)
+    const glob = typeof source.value === 'string' && /[*?[]/u.test(source.value)
+    emitTargets('delete', [source], { ...options, recursive: dirLike, ...(glob && { patterns: [true] }) }, env)
+  }
+}
+
+// --- raw storage erase / partition tools ----------------------------------------
+
+/** One raw storage mutation fact, same channel as `dd`/`mkfs`: the device
+ * operand stays an enumerable path ({kind:'exact'} plus the declared
+ * deviceMutation), so the evidence layer resolves it — cwd-relative forms
+ * included — and grants `catastrophic.device` only when the read-only probe
+ * proves real hardware. A selector that cannot name a host device path at all
+ * keeps the storage-selector shape AND carries the unverified-effect candidate:
+ * an irreversible device erase must never fall through as a silent allow. */
+function storageMutationFact(selector, options, env) {
+  if (typeof selector !== 'string' || selector === '') {
+    env.candidate('unverified-effect', 'Storage mutation selector could not be resolved to a host device', undefined, options.origin)
+    return
+  }
+  emitTargets('write-content', [{ value: selector, index: 0 }], {
+    ...options, details: { deviceMutation: true },
+  }, env)
+}
+
+function diskutilCommand(args, options, env) {
+  const sub = typeof args[0] === 'string' ? args[0].toLowerCase() : ''
+  if (/^(?:erase|partition)/u.test(sub)) {
+    if (args.some((value) => value === '-dryrun' || value === '--dryrun' || value === '-dry-run')) {
+      env.gap('unmodeled-command', options.origin)
+      return
+    }
+    // The device identifier is a macOS diskN token or a /dev path; its argument
+    // position varies by verb, so match the selector shape instead.
+    const selector = args.slice(1).findLast((value) => typeof value === 'string' &&
+      (value.startsWith('/dev/') || /^disk\d/u.test(value)))
+    if (typeof selector === 'string' && selector.startsWith('/dev/')) {
+      // A /dev path is enumerable for the device-identity probes.
+      emitTargets('write-content', [{ value: selector, index: 0 }], {
+        ...options, details: { deviceMutation: true },
+      }, env)
+      return
+    }
+    if (typeof selector === 'string' && selector !== '') {
+      // A bare diskN identifier is not a host device path: the shape is stated,
+      // but the selector is unresolvable and must deny, not allow silently.
+      env.operation('write-content', { kind: 'unknown', reason: 'storage-selector' },
+        { ...options, details: { deviceMutation: { path: selector } } })
+    }
+    env.candidate('unverified-effect', 'Storage mutation selector could not be resolved to a host device', undefined, options.origin)
+    return
+  }
+  env.gap('unmodeled-command', options.origin)
+}
+
+const PARTED_WRITE_SUBCOMMANDS = new Set(['mklabel', 'mkpart', 'rm'])
+
+function partedCommand(args, options, env) {
+  let i = 0
+  while (i < args.length) {
+    const value = args[i]
+    if (typeof value !== 'string') { env.gap('unmodeled-command', options.origin); return }
+    if (value === '--') { i += 1; break }
+    if (value.startsWith('-') && value !== '-') {
+      // -l/-m/--list/--machine print and exit; -v/--version likewise.
+      if (['-l', '--list', '-m', '--machine', '-v', '--version'].includes(value)) {
+        env.gap('unmodeled-command', options.origin)
+        return
+      }
+      if (value === '-a') { i += 2; continue } // --align takes a value
+      if (/^--[^=\s]+=/u.test(value) || value.startsWith('--')) { i += 1; continue }
+      if (['-s', '--script'].includes(value)) { i += 1; continue }
+      env.gap('unmodeled-command', options.origin)
+      return
+    }
+    break
+  }
+  // `parted [options] [device] [command…]`: the write subcommand marks the
+  // destructive form; the device is the literal operand before it, when present.
+  const rest = args.slice(i)
+  const writeIndex = rest.findIndex((value) => typeof value === 'string' && PARTED_WRITE_SUBCOMMANDS.has(value))
+  if (writeIndex < 0) { env.gap('unmodeled-command', options.origin); return }
+  const device = rest.slice(0, writeIndex).find((value) => typeof value === 'string' && !value.startsWith('-'))
+  storageMutationFact(device, options, env)
+}
+
+function sgdiskCommand(args, options, env) {
+  let write = false
+  let unmodeled = false
+  const operands = []
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]
+    if (typeof value !== 'string') { unmodeled = true; continue }
+    if (value.startsWith('-') && value !== '-') {
+      if (['-Z', '--zap-all', '-o', '--clear'].includes(value)) { write = true; continue }
+      if (value === '-c' || value === '--change-name') {
+        write = true
+        if (i + 1 < args.length && typeof args[i + 1] === 'string') i += 1
+        else unmodeled = true
+        continue
+      }
+      if (/^-(?:c|o|Z)\S/u.test(value) || /^--(?:change-name|clear|zap-all)=/u.test(value)) { write = true; continue }
+      if (['-p', '--print'].includes(value)) continue
+      unmodeled = true
+      continue
+    }
+    operands.push(value)
+  }
+  if (write) {
+    storageMutationFact(operands.length > 0 ? operands[operands.length - 1] : undefined, options, env)
+    return
+  }
+  env.gap('unmodeled-command', options.origin) // `-p` print and unmodeled forms stay read-only gaps
+}
+
+function fdiskCommand(args, options, env) {
+  let listing = false
+  let unmodeled = false
+  const operands = []
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]
+    if (typeof value !== 'string') { unmodeled = true; continue }
+    if (value.startsWith('-') && value !== '-') {
+      if (['-l', '--list', '-s', '--size'].includes(value)) { listing = true; continue }
+      if (['-b', '-C', '-H', '-S'].includes(value)) {
+        if (i + 1 < args.length && typeof args[i + 1] === 'string') i += 1
+        else unmodeled = true
+        continue
+      }
+      unmodeled = true
+      continue
+    }
+    operands.push(value)
+  }
+  if (listing || unmodeled || operands.length === 0) { env.gap('unmodeled-command', options.origin); return }
+  storageMutationFact(operands[0], options, env)
+}
+
+function blkdiscardCommand(args, options, env) {
+  let device
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]
+    if (typeof value !== 'string') { device = undefined; break }
+    if (value.startsWith('-') && value !== '-') {
+      if (['-o', '--offset', '-l', '--length', '-p', '--step'].includes(value)) i += 1
+      continue
+    }
+    device = value
+    break
+  }
+  storageMutationFact(device, options, env)
+}
+
+
 function gitCommand(args, options, env) {
   const context = { ...options.context }
   const api = context.platform === 'win32' ? path.win32 : path.posix
@@ -862,7 +1307,7 @@ function wrapper(language, args, options, env) {
 export function resolveCommand(executable, args, unit, env) {
   const origin = unit.origin
   const options = { context: unit.context, origin, condition: unit.condition, powershell: unit.powershell,
-    patterns: unit.patterns, literalOperands: unit.literalOperands }
+    patterns: unit.patterns, literalOperands: unit.literalOperands, heredocs: unit.heredocs }
   if (typeof executable !== 'string') {
     env.candidate('dynamic-execution', 'Program identity could not be determined', undefined, origin)
     return
@@ -918,6 +1363,16 @@ export function resolveCommand(executable, args, unit, env) {
   if (name === 'parallel' && !unit.powershell) return streamFedCommand('parallel', args, options, env)
   if (name === 'shred' && !unit.powershell) return shredCommand(args, options, env)
   if (name === 'rsync' && !unit.powershell) return rsyncCommand(args, options, env)
+  if (name === 'ssh' && !unit.powershell && !unit.cmdDialect) return sshCommand(args, options, env)
+  if (name === 'awk' && !unit.powershell && !unit.cmdDialect) return awkCommand(args, options, env)
+  if (name === 'tar' && !unit.powershell && !unit.cmdDialect) return tarCommand(args, options, env)
+  if (!unit.powershell && !unit.cmdDialect) {
+    if (name === 'diskutil') return diskutilCommand(args, options, env)
+    if (name === 'parted') return partedCommand(args, options, env)
+    if (name === 'sgdisk') return sgdiskCommand(args, options, env)
+    if (name === 'fdisk') return fdiskCommand(args, options, env)
+    if (name === 'blkdiscard') return blkdiscardCommand(args, options, env)
+  }
   if (name === 'cmd') return cmdCommand(args, options, env)
   if (name === 'dd') {
     const outputs = args.flatMap((value, index) => typeof value === 'string' && value.startsWith('of=')
@@ -1025,6 +1480,11 @@ export function resolveCommand(executable, args, unit, env) {
     env.child({ source: { kind: 'package-script', path: 'package.json', script: args[1] }, context: unit.context, origin })
     return
   }
+  // Heredoc-fed stdin scripts: a heredoc attached to a POSIX shell interpreter
+  // is that interpreter's script text, quoted delimiter or not. Non-shell
+  // receivers (cat, tee, python, sqlite3, …) keep the data-position behavior.
+  if (!unit.powershell && !unit.cmdDialect && HEREDOC_SHELL_RECEIVERS.has(name) &&
+    emitHeredocShellChild(name, args, options, env)) return
   const language = interpreters.get(name) ?? (/^python3\.\d+$/u.test(name) ? 'python' : undefined)
   if (language) return wrapper(language, args, options, env)
   if (resolveRemoteCommand(name, args, options, env)) return

@@ -86,13 +86,48 @@ function wordInfo(parts, quoted = false) {
 }
 
 /**
+ * Raw text of one heredoc body — exactly what the receiver reads from stdin.
+ * The typed AST keeps the clean literal text in Lit values; the last part's
+ * position span extends through the delimiter line, so non-literal parts are
+ * sliced raw from the source and bounded by the next part or the delimiter.
+ * Quoted and unquoted delimiters both produce the executable body text;
+ * expansions inside stay in the text and are re-analyzed as shell data.
+ * Unavailable positions leave the body unextractable (undefined), which keeps
+ * the existing coverage-gap behavior instead of guessing.
+ */
+function heredocBodyText(redir, sourceBytes) {
+  const hdoc = redir.Hdoc
+  if (!hdoc || !Array.isArray(hdoc.Parts) || !hdoc.Pos || !hdoc.End) return undefined
+  const start = hdoc.Pos.Offset
+  const end = hdoc.End.Offset
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > sourceBytes.length) return undefined
+  const delimiter = redir.Word ? wordInfo(redir.Word.Parts) : { dynamic: true };
+  const delimiterStart = !delimiter.dynamic && delimiter.text.length > 0 && end - delimiter.text.length >= start
+    ? end - delimiter.text.length
+    : end;
+  let text = ''
+  for (let k = 0; k < hdoc.Parts.length; k++) {
+    const part = hdoc.Parts[k];
+    if (part?.Type === 'Lit' && typeof part.Value === 'string') { text += part.Value; continue }
+    const partStart = part?.Pos?.Offset
+    const nextStart = k + 1 < hdoc.Parts.length ? hdoc.Parts[k + 1]?.Pos?.Offset : undefined
+    const partEnd = Number.isInteger(nextStart) ? nextStart
+      : Number.isInteger(part?.End?.Offset) ? Math.min(part.End.Offset, delimiterStart)
+      : undefined;
+    if (!Number.isInteger(partStart) || !Number.isInteger(partEnd) || partStart < start || partEnd > end || partEnd < partStart) return undefined
+    text += sourceBytes.subarray(partStart, partEnd).toString('utf8')
+  }
+  return text
+}
+
+/**
  * Convert the official typed JSON AST to command facts without evaluating shell
  * expansion. Each command carries `condition` ('certain' outside any loop or
  * conditional, 'possible' inside one) and the full word facts of its arguments.
  * @throws {TypeError} If AST structure or operators are unsupported.
  * @throws {RangeError} If the AST exceeds the traversal budget.
  */
-export function posixCommands(ast) {
+export function posixCommands(ast, sourceBytes) {
   if (ast?.Type !== 'File' || (ast.Stmts !== undefined && !Array.isArray(ast.Stmts))) throw new TypeError('Not a shfmt File');
   const commands = [];
   const unknown = new Set();
@@ -122,7 +157,15 @@ export function posixCommands(ast) {
       const operator = REDIRECT_OPERATORS[redir.Op - 54];
       if (!operator) throw new TypeError('Unknown shfmt redirection');
       const target = redir.Word ? wordInfo(redir.Word.Parts) : { dynamic: true };
-      return { operator, target: target.dynamic ? null : target.text, heredoc: Boolean(redir.Hdoc) };
+      const body = (operator === '<<' || operator === '<<-') && sourceBytes instanceof Uint8Array
+        ? heredocBodyText(redir, sourceBytes)
+        : undefined;
+      return {
+        operator,
+        target: target.dynamic ? null : target.text,
+        heredoc: Boolean(redir.Hdoc),
+        ...(body !== undefined && { heredocBody: body }),
+      };
     }) : nextScope !== scope ? [] : redirects;
     if (node.Type === 'CallExpr' && node.Args?.length) {
       const words = node.Args.map((word) => wordInfo(word.Parts));
@@ -196,7 +239,7 @@ export async function parsePosix(source, dialect, limits, signal) {
   });
   let ast;
   try { ast = JSON.parse(text); } catch (error) { throw new PosixParseError('PROTOCOL', 'Invalid shfmt AST', { cause: error }); }
-  try { return posixCommands(ast); } catch (error) {
+  try { return posixCommands(ast, Buffer.from(source, 'utf8')); } catch (error) {
     if (error instanceof PosixParseError) throw error;
     throw new PosixParseError('PROTOCOL', 'Invalid shfmt AST', { cause: error });
   }

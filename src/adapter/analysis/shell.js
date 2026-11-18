@@ -78,7 +78,7 @@ import fs from 'node:fs/promises';
 import { createShellParsers } from '../parsers/index.mjs';
 import { parsePosix } from './shell/posix-parser.js';
 import { wrapperName, looksLikeOpaqueInterpreter, interpreterShapedName, interpreterInlineScript, SHELL_WRAPPER_DIALECT, OTHER_POSIX_SHELLS, POWERSHELL_NAMES, CMD_NAMES } from './shell/wrappers.js';
-import { computeDataArgs, computePatterns, computeLiteralOperands, classifyParserUnknown, mapInterpreterUnknowns, isStateMutator, CD_FAMILY, trackableCdArgument } from './shell/facts.js';
+import { computeDataArgs, computePatterns, computeLiteralOperands, collectHeredocs, classifyParserUnknown, mapInterpreterUnknowns, isStateMutator, CD_FAMILY, trackableCdArgument } from './shell/facts.js';
 
 const DEFAULT_LIMITS = Object.freeze({ maxCommands: 4096, maxChildren: 64 });
 const DEFAULT_PARSER_LIMITS = Object.freeze({ timeoutMs: 5000, maxInputBytes: 262144, maxOutputBytes: 8388608, maxConcurrent: 2, maxQueue: 16 });
@@ -268,6 +268,12 @@ export function createShellAnalyzer(options = {}) {
         const literalOperands = computeLiteralOperands(cmd.words);
         if (literalOperands) payload.literalOperands = literalOperands;
       }
+      // Raw heredoc bodies travel with the command fact: the shared catalog
+      // decides which receiver consumes them (shell interpreters, ssh) and
+      // which ones stay data (cat, tee, python, …). No file operation exists
+      // for a heredoc, so this stays separate from the redirect operations.
+      const heredocs = collectHeredocs(cmd.redirects);
+      if (heredocs) payload.heredocs = heredocs;
       emitCommandFn(name, args, payload);
       stepFn(1);
       st.commands += 1;

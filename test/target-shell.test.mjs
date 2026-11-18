@@ -589,3 +589,43 @@ test('transparent `command` executes without a state-mutation gap', async (t) =>
   assert.deepEqual(result.operations[0].target, { kind: 'subtree', root: '/srv/x' });
   assert.deepEqual(result.candidates, []);
 });
+
+// --- heredoc bodies travel with the receiver's command fact ----------------------
+
+test('a quoted heredoc body reaches the receiver fact as raw script text', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit("bash <<'EOF'\nrm -rf /srv/x\necho hi\nEOF"), env);
+  const fact = commandNamed(calls, 'bash');
+  assert.ok(fact, `expected bash fact, got ${JSON.stringify(calls.command)}`);
+  assert.deepEqual(fact.args, []);
+  assert.deepEqual(fact.opts.heredocs, [{ operator: '<<', body: 'rm -rf /srv/x\necho hi\n' }]);
+  assert.deepEqual(gapKinds(calls), ['interactive-shell'], 'stdin-script mode without heredoc support stays a gap in the analyzer');
+});
+
+test('an unquoted heredoc body keeps its raw expansions for the catalog', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('bash <<EOF\nrm -rf /srv/x $VAR\nEOF'), env);
+  const fact = commandNamed(calls, 'bash');
+  assert.ok(fact);
+  assert.deepEqual(fact.opts.heredocs, [{ operator: '<<', body: 'rm -rf /srv/x $VAR\n' }]);
+});
+
+test('heredocs attach to the receiving command only and never become file targets', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit("cat <<'EOF'\nrm -rf /srv/x\nEOF\nssh host bash <<'EOF'\nrm -rf /x\nEOF"), env);
+  const cat = commandNamed(calls, 'cat');
+  assert.ok(cat);
+  assert.deepEqual(cat.opts.heredocs, [{ operator: '<<', body: 'rm -rf /srv/x\n' }]);
+  const ssh = commandNamed(calls, 'ssh');
+  assert.ok(ssh);
+  assert.deepEqual(ssh.opts.heredocs, [{ operator: '<<', body: 'rm -rf /x\n' }]);
+  assert.ok(!calls.operation.some((entry) => entry.target?.paths?.[0] === 'EOF' || entry.target?.paths?.[0] === 'x'));
+});
+
+test('here-strings and heredoc redirects of non-heredoc operators stay untouched', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('cat <<<"$(rm -rf /srv/x)"\ncat < /srv/in.txt'), env);
+  const herestring = commandNamed(calls, 'cat');
+  assert.ok(herestring);
+  assert.equal(herestring.opts.heredocs, undefined, 'a here-string is not a stdin script body');
+});

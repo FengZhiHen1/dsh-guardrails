@@ -99,11 +99,39 @@ const ORDINARY = [
   ['rsync --help', 'bash'],
   ['aws s3 rm s3://b --recursive --dryrun', 'bash'],
   ['rsync -n --delete src/ dst/', 'bash'],
+  ['ssh host ls', 'bash'],
+  ['ssh host git status', 'bash'],
+  ['ssh-keygen -l', 'bash'],
+  ['ssh -V', 'bash'],
+  ['ssh host', 'bash'],
+  ['tar -czf out.tgz src/', 'bash'],
+  ['tar -tzf out.tgz', 'bash'],
+  ['diskutil list', 'bash'],
+  ['parted -l', 'bash'],
+  ['fdisk -l', 'bash'],
+  ['sgdisk -p /dev/sda', 'bash'],
+  ["awk '{print $1}'", 'bash'],
+  ["awk -F: '{print $1}' /etc/passwd", 'bash'],
 ]
 
 test('ordinary usage stays allowed (no candidates, no effective operations)', async () => {
   for (const [command, language] of ORDINARY) {
     assertAllowed(command, await evaluate(command, { language }))
+  }
+})
+
+// Heredoc bodies stay data whenever the receiver is not a shell interpreter; the
+// file redirect in front of the heredoc is asserted separately from assertAllowed.
+test('heredoc text to data receivers never executes as commands', async () => {
+  for (const [text, language] of [
+    ["bash <<'EOF'\necho hi\nEOF", 'bash'],
+    ["cat > notes.txt <<'EOF'\nrm -rf /\nEOF", 'bash'],
+  ]) {
+    const { analysis, decision } = await evaluate(text, { language })
+    assert.equal(decision.kind, 'allow', `${text}: expected allow, got ${decision.kind} ${decision.ruleId ?? ''}`)
+    assert.deepEqual(analysis.candidates, [], `${text}: expected no candidates`)
+    assert.ok(!analysis.operations.some((operation) =>
+      operation.action === 'delete' || operation.action === 'move-source'), `${text}: no deletion may be derived`)
   }
 })
 
@@ -147,6 +175,10 @@ const NEW_COVERAGE = [
   ['terraform destroy -auto-approve', 'bash', 'data.delete.dynamic'],
   ['wsl -e rm -rf /tmp/x', 'bash', 'data.delete.dynamic'],
   ['cmd /c rmdir /s /q build', 'bash', 'data.delete.bulk', { ...EMPTY_INVENTORY, count: 25, directories: ['build'] }],
+  ['ssh host rm -rf /srv/x', 'bash', 'data.delete.dynamic'],
+  ["ssh -p 22 user@host 'rm -rf /srv/x'", 'bash', 'data.delete.dynamic'],
+  ["ssh host bash <<'EOF'\nrm -rf /srv/x\nEOF", 'bash', 'data.delete.dynamic'],
+  ['tar --remove-files -czf out.tgz src/', 'bash', 'data.delete.bulk', { ...EMPTY_INVENTORY, count: 25, directories: ['src/'] }],
 ]
 
 test('git restore-family forms are decided by git evidence, never denied outright', async () => {
@@ -173,6 +205,35 @@ test('new destructive forms confirm with an enumerated scope (never deny on cove
     assertConfirmed(command, result, ruleId)
     assert.ok(result.decision.scope, `${command}: confirm must carry a scope`)
   }
+})
+
+test('ssh heredoc payload and awk system() reach their deletion facts', async () => {
+  const ssh = await evaluate("ssh host bash <<'EOF'\nrm -rf /srv/x\nEOF", { language: 'bash', inventory: EMPTY_INVENTORY })
+  const sshOp = ssh.analysis.operations.find((operation) => operation.action === 'delete')
+  assert.ok(sshOp, 'the ssh heredoc body must produce a delete operation')
+  assert.equal(sshOp.context.domain, 'ssh')
+  assertConfirmed('ssh heredoc payload', ssh, 'data.delete.dynamic')
+  const awk = await evaluate("awk 'BEGIN{system(\"rm -rf /tmp/x\")}'", { language: 'bash', inventory: EMPTY_INVENTORY })
+  const awkOp = awk.analysis.operations.find((operation) => operation.action === 'delete')
+  assert.ok(awkOp, 'the awk system() literal must produce a delete operation')
+  assert.deepEqual(awk.analysis.candidates, [])
+  assert.notEqual(awk.decision.kind, 'deny')
+})
+
+test('tar --remove-files and the storage erase tools produce their declared facts', async () => {
+  const tar = await evaluate('tar --remove-files -czf out.tgz a.txt b.txt', { language: 'bash', inventory: EMPTY_INVENTORY })
+  const tarOps = tar.analysis.operations.filter((operation) => operation.action === 'delete')
+  assert.deepEqual(tarOps.map((operation) => operation.target), [
+    { kind: 'exact', paths: ['a.txt'] },
+    { kind: 'exact', paths: ['b.txt'] },
+  ], 'tar --remove-files must delete the named source members')
+  assert.notEqual(tar.decision.kind, 'deny')
+  const erase = await evaluate('sgdisk --zap-all /dev/sda', { language: 'bash', inventory: EMPTY_INVENTORY })
+  const eraseOp = erase.analysis.operations.find((operation) => operation.action === 'write-content')
+  assert.ok(eraseOp, 'sgdisk --zap-all must produce a storage mutation fact')
+  assert.deepEqual(eraseOp.target, { kind: 'exact', paths: ['/dev/sda'] }, 'the device path stays enumerable for the identity probes')
+  assert.deepEqual(eraseOp.details, { deviceMutation: true })
+  assert.deepEqual(erase.analysis.candidates, [])
 })
 
 test('the incident rsync line names the command shape and the unresolved destination in its scope', async () => {

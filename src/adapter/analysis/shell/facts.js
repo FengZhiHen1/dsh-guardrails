@@ -108,6 +108,22 @@ export function mapInterpreterUnknowns(reason) {
   return [...kinds];
 }
 
+/**
+ * Raw heredoc bodies attached to one command's redirects (facts module: derived
+ * from the typed parser output only, no risk judgment). The body text is what
+ * the receiver reads from stdin; whether the delimiter was quoted changes only
+ * variable evaluation, not that the text executes in a stdin-fed interpreter.
+ * Returns undefined when the command carries no extractable heredoc body.
+ */
+export function collectHeredocs(redirects) {
+  if (!Array.isArray(redirects)) return undefined;
+  const bodies = redirects
+    .filter((redirect) => (redirect?.operator === '<<' || redirect?.operator === '<<-') &&
+      typeof redirect.heredocBody === 'string')
+    .map((redirect) => ({ operator: redirect.operator, body: redirect.heredocBody }));
+  return bodies.length > 0 ? bodies : undefined;
+}
+
 // Commands that mutate shell/session state so a fixed target set is not
 // trustworthy. cwd-changing commands whose LITERAL target can be tracked are
 // handled by the cd tracker and are skipped (pushd/popd change a stack and stay

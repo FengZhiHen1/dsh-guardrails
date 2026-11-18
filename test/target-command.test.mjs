@@ -468,3 +468,263 @@ test('rsync --delete with an unresolvable destination confirms on the command sh
   const preview = command('rsync', ['-n', '--delete', '/mnt/e/src/', null])
   assert.equal(preview.operations[0].preview, true)
 })
+
+// --- heredoc-fed stdin scripts --------------------------------------------------
+
+test('a heredoc-fed POSIX shell interpreter analyzes the body as its script', () => {
+  const body = 'rm -rf /tmp/x\n'
+  const bash = command('bash', [], { heredocs: [{ operator: '<<', body }] })
+  assert.equal(bash.children[0].source.kind, 'inline')
+  assert.equal(bash.children[0].source.text, body)
+  assert.equal(bash.children[0].language, 'bash')
+  assert.equal(bash.children[0].context.domain, 'host')
+  assert.deepEqual(bash.operations, [])
+  const sh = command('sh', [], { heredocs: [{ operator: '<<-', body }] })
+  assert.equal(sh.children[0].language, 'posix')
+  for (const name of ['dash', 'zsh', 'ksh']) {
+    const result = command(name, [], { heredocs: [{ operator: '<<', body }] })
+    assert.equal(result.children[0].language, 'posix', name)
+    assert.equal(result.children[0].source.text, body, name)
+  }
+  const stdio = command('bash', ['-s'], { heredocs: [{ operator: '<<', body }] })
+  assert.equal(stdio.children[0].source.text, body)
+  assert.deepEqual(stdio.gaps, [], '-s is the explicit stdin-script mode')
+})
+
+test('heredoc receiver options keep their unproven semantics as gaps', () => {
+  const login = command('bash', ['--login'], { heredocs: [{ operator: '<<', body: 'echo hi\n' }] })
+  assert.equal(login.children[0].source.text, 'echo hi\n')
+  assert.deepEqual(login.gaps, ['shell-startup'])
+  const unknown = command('bash', ['-v'], { heredocs: [{ operator: '<<', body: 'echo hi\n' }] })
+  assert.deepEqual(unknown.gaps, ['interpreter-options'])
+})
+
+test('heredoc bodies stay data for non-shell receivers and inline scripts', () => {
+  const cat = command('cat', [], { heredocs: [{ operator: '<<', body: 'rm -rf /tmp/x\n' }] })
+  assert.deepEqual(cat.children, [])
+  assert.deepEqual(cat.operations, [])
+  const python = command('python', [], { heredocs: [{ operator: '<<', body: 'import os\n' }] })
+  assert.deepEqual(python.children, [])
+  assert.ok(python.gaps.includes('stdin-source'))
+  // `-c` and a script file displace the stdin script: the heredoc stays data.
+  const inline = command('bash', ['-c', 'echo hi'], { heredocs: [{ operator: '<<', body: 'rm -rf /tmp/x\n' }] })
+  assert.equal(inline.children.length, 1)
+  assert.equal(inline.children[0].source.text, 'echo hi')
+  const file = command('bash', ['script.sh'], { heredocs: [{ operator: '<<', body: 'rm -rf /tmp/x\n' }] })
+  assert.equal(file.children.length, 1)
+  assert.equal(file.children[0].source.kind, 'file')
+  // No extractable body keeps the old behavior.
+  const none = command('bash', [])
+  assert.deepEqual(none.children, [])
+  assert.ok(none.gaps.includes('stdin-source'))
+  const empty = command('bash', [], { heredocs: [{ operator: '<<', body: '' }] })
+  assert.deepEqual(empty.children, [])
+  assert.ok(empty.gaps.includes('stdin-source'))
+})
+
+test('multiple heredoc bodies feed one stdin script in order', () => {
+  const result = command('bash', [], {
+    heredocs: [{ operator: '<<', body: 'echo a\n' }, { operator: '<<-', body: 'echo b\n' }],
+  })
+  assert.equal(result.children[0].source.text, 'echo a\n\necho b\n')
+})
+
+// --- ssh remote payloads ---------------------------------------------------------
+
+test('ssh remote payload is analyzed as one POSIX shell text in the ssh domain', () => {
+  const direct = command('ssh', ['host', 'rm', '-rf', '/srv/x'])
+  assert.equal(direct.children[0].source.kind, 'inline')
+  assert.equal(direct.children[0].source.text, 'rm -rf /srv/x')
+  assert.equal(direct.children[0].language, 'posix')
+  assert.deepEqual(direct.children[0].context, { domain: 'ssh', platform: 'linux' })
+  const quoted = command('ssh', ['host', 'rm -rf /srv/x'])
+  assert.equal(quoted.children[0].source.text, 'rm -rf /srv/x')
+  const git = command('ssh', ['-p', '22', 'user@host', 'git reset --hard'])
+  assert.equal(git.children[0].source.text, 'git reset --hard')
+  const options = command('ssh', ['-i', 'id_ed25519', '-o', 'BatchMode=yes', 'host', 'ls'])
+  assert.equal(options.children[0].source.text, 'ls')
+})
+
+test('ssh heredoc to a POSIX shell receiver analyzes the body in the ssh domain', () => {
+  const result = command('ssh', ['host', 'bash'], { heredocs: [{ operator: '<<', body: 'rm -rf /x\n' }] })
+  assert.equal(result.children[0].source.text, 'rm -rf /x\n')
+  assert.equal(result.children[0].language, 'bash')
+  assert.deepEqual(result.children[0].context, { domain: 'ssh', platform: 'linux' })
+  const sh = command('ssh', ['host', 'sh'], { heredocs: [{ operator: '<<', body: 'rm -rf /x\n' }] })
+  assert.equal(sh.children[0].language, 'posix')
+})
+
+test('ssh without a remote command and unmodeled options stay gaps', () => {
+  for (const args of [['host'], ['-V'], ['-p'], ['-p', '22'], [null], ['host', 'rm', null, '/x']]) {
+    const result = command('ssh', args)
+    assert.deepEqual(result.operations, [], JSON.stringify(args))
+    assert.deepEqual(result.candidates, [], JSON.stringify(args))
+    assert.ok(result.gaps.includes('unmodeled-command'), JSON.stringify(args))
+  }
+})
+
+test('ssh-keygen and version probes never produce candidates', () => {
+  const keygen = command('ssh-keygen', ['-l'])
+  assert.deepEqual(keygen.operations, [])
+  assert.deepEqual(keygen.candidates, [])
+  assert.ok(keygen.gaps.includes('unmodeled-command'))
+  const version = command('ssh', ['-V'])
+  assert.deepEqual(version.candidates, [])
+})
+
+// --- tar --remove-files -----------------------------------------------------------
+
+test('tar --remove-files deletes the archived source members', () => {
+  const dir = command('tar', ['--remove-files', '-czf', 'out.tgz', 'src/'])
+  assert.equal(dir.operations[0].action, 'delete')
+  assert.deepEqual(dir.operations[0].target, { kind: 'subtree', root: 'src/' })
+  assert.equal(dir.operations[0].recursive, true)
+  const oldStyle = command('tar', ['cf', 'out.tgz', 'src/', '--remove-files'])
+  assert.deepEqual(oldStyle.operations[0].target, { kind: 'subtree', root: 'src/' })
+  const files = command('tar', ['--remove-files', '--file=out.tgz', 'a.txt', 'b.txt'])
+  assert.deepEqual(files.operations.map((entry) => entry.target), [
+    { kind: 'exact', paths: ['a.txt'] },
+    { kind: 'exact', paths: ['b.txt'] },
+  ])
+  const withDirectory = command('tar', ['--remove-files', '-C', '/tmp', '-cf', 'out.tgz', 'x'])
+  assert.deepEqual(withDirectory.operations[0].target, { kind: 'exact', paths: ['x'] })
+  const dynamic = command('tar', ['--remove-files', '-czf', 'out.tgz', null])
+  assert.equal(dynamic.operations[0].target.kind, 'unknown')
+})
+
+test('tar without --remove-files or with an external member list never deletes', () => {
+  const plain = command('tar', ['-czf', 'out.tgz', 'src/'])
+  assert.deepEqual(plain.operations, [])
+  assert.deepEqual(plain.candidates, [])
+  assert.ok(plain.gaps.includes('unmodeled-command'))
+  const list = command('tar', ['-tzf', 'out.tgz'])
+  assert.deepEqual(list.operations, [])
+  assert.ok(list.gaps.includes('unmodeled-command'))
+  const fromFile = command('tar', ['--remove-files', '-T', 'list.txt'])
+  assert.deepEqual(fromFile.operations, [])
+  assert.equal(fromFile.candidates[0].kind, 'unverified-effect')
+  const noMembers = command('tar', ['--remove-files', '-cf', 'out.tgz'])
+  assert.deepEqual(noMembers.operations, [])
+  assert.deepEqual(noMembers.candidates, [])
+  assert.ok(noMembers.gaps.includes('command-options'))
+})
+
+// --- awk system() ------------------------------------------------------------------
+
+test('awk system() string literals are analyzed as same-domain shell text', () => {
+  const literal = command('awk', ['BEGIN{system("rm -rf /tmp/x")}'])
+  assert.ok(literal.gaps.includes('unmodeled-command'))
+  assert.deepEqual(literal.candidates, [])
+  assert.equal(literal.children[0].source.text, 'rm -rf /tmp/x')
+  assert.equal(literal.children[0].language, 'posix')
+  assert.equal(literal.children[0].context.domain, 'host')
+  const escaped = command('awk', ['BEGIN{system("rm -rf \\"/tmp/x\\",\\"/tmp/y\\"")}'])
+  assert.equal(escaped.children[0].source.text, 'rm -rf "/tmp/x","/tmp/y"')
+  const withFile = command('awk', ['-F:', '{print $1; system("rm -rf /tmp/x")}', '/etc/passwd'])
+  assert.equal(withFile.children[0].source.text, 'rm -rf /tmp/x')
+})
+
+test('awk dynamic system() arguments become dynamic-execution candidates', () => {
+  for (const program of ['BEGIN{system($0)}', 'BEGIN{system("rm -rf " dir)}', 'BEGIN{system(cmd)}']) {
+    const result = command('awk', [program])
+    assert.equal(result.children.length, 0, program)
+    assert.equal(result.candidates[0].kind, 'dynamic-execution', program)
+  }
+})
+
+test('ordinary awk usage stays a gap without candidates or children', () => {
+  for (const args of [['{print $1}'], ['-F:', '{print $1}', '/etc/passwd'], ['-f', 'prog.awk'], ['BEGIN{print "system(x)"}']]) {
+    const result = command('awk', args)
+    assert.deepEqual(result.children, [], JSON.stringify(args))
+    assert.deepEqual(result.candidates, [], JSON.stringify(args))
+    assert.ok(result.gaps.includes('unmodeled-command'), JSON.stringify(args))
+  }
+})
+
+// --- raw storage erase / partition tools --------------------------------------------
+
+test('erase and partition tools report the device path for the identity probes', () => {
+  const parted = command('parted', ['-s', '/dev/sda', 'mklabel', 'gpt'])
+  assert.equal(parted.operations[0].action, 'write-content')
+  assert.deepEqual(parted.operations[0].target, { kind: 'exact', paths: ['/dev/sda'] })
+  assert.deepEqual(parted.operations[0].details, { deviceMutation: true })
+  assert.deepEqual(command('parted', ['/dev/sda', 'rm', '1']).operations[0].target, { kind: 'exact', paths: ['/dev/sda'] })
+  assert.deepEqual(command('sgdisk', ['-Z', '/dev/sda']).operations[0].target, { kind: 'exact', paths: ['/dev/sda'] })
+  assert.deepEqual(command('sgdisk', ['--zap-all', '/dev/sda']).operations[0].target, { kind: 'exact', paths: ['/dev/sda'] })
+  assert.deepEqual(command('sgdisk', ['-c', '1:Name', '/dev/sda']).operations[0].target, { kind: 'exact', paths: ['/dev/sda'] })
+  assert.deepEqual(command('fdisk', ['/dev/sda']).operations[0].target, { kind: 'exact', paths: ['/dev/sda'] })
+  assert.deepEqual(command('blkdiscard', ['-s', '-o', '4096', '/dev/nvme0n1']).operations[0].target, { kind: 'exact', paths: ['/dev/nvme0n1'] })
+  const devDisk = command('diskutil', ['eraseDisk', 'APFS', 'X', '/dev/disk4'])
+  assert.deepEqual(devDisk.operations[0].target, { kind: 'exact', paths: ['/dev/disk4'] })
+  assert.deepEqual(devDisk.operations[0].details, { deviceMutation: true })
+})
+
+test('a diskN identifier that cannot map to a host device path denies instead of allowing', () => {
+  const bare = command('diskutil', ['eraseDisk', 'APFS', 'X', 'disk4'])
+  assert.equal(bare.operations[0].action, 'write-content')
+  assert.equal(bare.operations[0].target.kind, 'unknown')
+  assert.equal(bare.operations[0].target.reason, 'storage-selector')
+  assert.equal(bare.candidates[0].kind, 'unverified-effect')
+  assert.equal(bare.candidates[0].knownScope, undefined)
+})
+
+test('an unprovable storage selector becomes an unverified-effect candidate', () => {
+  for (const [name, args] of [
+    ['diskutil', ['eraseDisk', 'JHFS+', 'Empty']],
+    ['parted', ['mklabel', 'gpt']],
+    ['sgdisk', ['-Z']],
+    ['blkdiscard', []],
+  ]) {
+    const result = command(name, args)
+    assert.deepEqual(result.operations, [], `${name} ${JSON.stringify(args)}`)
+    assert.equal(result.candidates[0].kind, 'unverified-effect', `${name} ${JSON.stringify(args)}`)
+  }
+  const preview = command('diskutil', ['eraseDisk', '--dryrun', 'JHFS+', 'Empty', 'disk2'])
+  assert.deepEqual(preview.operations, [])
+  assert.deepEqual(preview.candidates, [])
+})
+
+test('read-only storage tool usage stays a gap without candidates', () => {
+  for (const [name, args] of [
+    ['diskutil', ['list']],
+    ['diskutil', ['info', 'disk0s2']],
+    ['parted', ['-l']],
+    ['parted', ['/dev/sda', 'print']],
+    ['sgdisk', ['-p', '/dev/sda']],
+    ['sgdisk', ['-p']],
+    ['fdisk', ['-l']],
+    ['fdisk', ['-l', '/dev/sda']],
+  ]) {
+    const result = command(name, args)
+    assert.deepEqual(result.operations, [], `${name} ${JSON.stringify(args)}`)
+    assert.deepEqual(result.candidates, [], `${name} ${JSON.stringify(args)}`)
+    assert.ok(result.gaps.includes('unmodeled-command'), `${name} ${JSON.stringify(args)}`)
+  }
+})
+
+test('a proven device identity denies the erase (catastrophic.device)', async () => {
+  const deviceOp = command('sgdisk', ['-Z', '/dev/sda']).operations[0]
+  const decision = await decide(
+    {
+      analysisStatus: 'complete',
+      operations: deviceOp ? [deviceOp] : [],
+      candidates: [], gaps: [],
+      identities: [{ ruleId: 'catastrophic.device', path: '/dev/sda', action: 'write-content' }],
+      inventory: null, protectedHits: [], exemptions: [], issues: [],
+    },
+    {},
+  )
+  assert.equal(decision.kind, 'deny')
+  assert.equal(decision.ruleId, 'catastrophic.device')
+})
+
+test('an unresolvable storage selector denies through the candidate (never allows)', async () => {
+  const bare = command('diskutil', ['eraseDisk', 'APFS', 'X', 'disk4'])
+  const decision = await decideOperations(bare.operations, bare.candidates)
+  assert.equal(decision.kind, 'deny')
+  assert.equal(decision.ruleId, 'execution.unverified-effect')
+  const missing = command('sgdisk', ['-Z'])
+  const missingDecision = await decideOperations(missing.operations, missing.candidates)
+  assert.equal(missingDecision.kind, 'deny')
+  assert.equal(missingDecision.ruleId, 'execution.unverified-effect')
+})

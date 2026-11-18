@@ -220,3 +220,105 @@ test('rsync --delete with a dynamic destination confirms without wsl', async (t)
   assert.equal(decision.kind, 'confirm')
   assert.equal(decision.ruleId, 'data.delete.dynamic')
 })
+
+// --- heredoc payloads and ssh remote command lines (reference alignment) ----------
+
+test('a heredoc-fed bash reaches the body as a real script and deletes', async (t) => {
+  const analyzer = createFixture(t)
+  const result = await analyzer.analyze({
+    source: { kind: 'inline', text: "bash <<'EOF'\nrm -rf /tmp/x\nEOF" },
+    language: 'bash', context, origin: { entry: 'fixture' },
+  })
+  const op = result.operations.find((operation) => operation.action === 'delete')
+  assert.ok(op, `expected a delete operation, got ${JSON.stringify(result.operations)}`)
+  assert.deepEqual(op.target, { kind: 'subtree', root: '/tmp/x' })
+  assert.deepEqual(result.candidates, [])
+})
+
+test('an ssh heredoc payload confirms in the ssh domain', async (t) => {
+  const analyzer = createFixture(t)
+  const result = await analyzer.analyze({
+    source: { kind: 'inline', text: "ssh host bash <<'EOF'\nrm -rf /x\nEOF" },
+    language: 'bash', context, origin: { entry: 'fixture' },
+  })
+  const op = result.operations.find((operation) => operation.action === 'delete')
+  assert.ok(op, `expected a delete operation, got ${JSON.stringify(result.operations)}`)
+  assert.equal(op.context.domain, 'ssh')
+  assert.deepEqual(op.target, { kind: 'unknown', reason: 'non-host-domain', knownScope: ['ssh: /x (recursive)'] })
+  const evidence = await collectEvidence({
+    status: result.status, operations: result.operations, candidates: result.candidates, gaps: result.gaps,
+  }, { isProtectedPath: () => false })
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.delete.dynamic')
+})
+
+test('an ssh remote command line confirms through the ssh domain', async (t) => {
+  const analyzer = createFixture(t)
+  const result = await analyzer.analyze({
+    source: { kind: 'inline', text: "ssh -p 22 user@host 'rm -rf /srv/x'" },
+    language: 'bash', context, origin: { entry: 'fixture' },
+  })
+  const op = result.operations.find((operation) => operation.action === 'delete')
+  assert.ok(op, `expected a delete operation, got ${JSON.stringify(result.operations)}`)
+  assert.equal(op.context.domain, 'ssh')
+  const evidence = await collectEvidence({
+    status: result.status, operations: result.operations, candidates: result.candidates, gaps: result.gaps,
+  }, { isProtectedPath: () => false })
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.delete.dynamic')
+})
+
+test('awk system() literals execute in the same domain; dynamic ones become candidates', async (t) => {
+  const analyzer = createFixture(t)
+  const literal = await analyzer.analyze({
+    source: { kind: 'inline', text: "awk 'BEGIN{system(\"rm -rf /tmp/x\")}'" },
+    language: 'bash', context, origin: { entry: 'fixture' },
+  })
+  assert.equal(literal.operations[0]?.action, 'delete')
+  assert.deepEqual(literal.candidates, [])
+  const dynamic = await analyzer.analyze({
+    source: { kind: 'inline', text: "awk 'BEGIN{system($0)}'" },
+    language: 'bash', context, origin: { entry: 'fixture' },
+  })
+  assert.equal(dynamic.operations.length, 0)
+  assert.equal(dynamic.candidates[0]?.kind, 'dynamic-execution')
+})
+
+test('bash -s reads the heredoc body as its script; stdin from elsewhere stays data', async (t) => {
+  const analyzer = createFixture(t)
+  // `bash -s` and the plain form take the same path: the heredoc IS the stdin script.
+  for (const text of ["bash -s <<'EOF'\nrm -rf /tmp/x\nEOF", "bash <<'EOF'\nrm -rf /tmp/x\nEOF"]) {
+    const result = await analyzer.analyze({
+      source: { kind: 'inline', text }, language: 'bash', context, origin: { entry: 'fixture' },
+    })
+    const op = result.operations.find((operation) => operation.action === 'delete')
+    assert.ok(op, `${text}: the stdin script body must produce a delete operation`)
+    assert.deepEqual(op.target, { kind: 'subtree', root: '/tmp/x' })
+    assert.deepEqual(result.candidates, [], text)
+  }
+  // Without a heredoc the stdin source is not the script: no body analysis.
+  const redirected = await analyzer.analyze({
+    source: { kind: 'inline', text: 'bash -s < script.sh' }, language: 'bash', context, origin: { entry: 'fixture' },
+  })
+  assert.ok(!redirected.operations.some((operation) => operation.action === 'delete'))
+  assert.deepEqual(redirected.candidates, [])
+})
+
+test('heredoc stdin-script deletions tier by the deletion inventory', async (t) => {
+  const analyzer = createFixture(t)
+  for (const text of ["bash -s <<'EOF'\nrm -rf /tmp/x\nEOF", "bash <<'EOF'\nrm -rf /tmp/x\nEOF"]) {
+    const result = await analyzer.analyze({
+      source: { kind: 'inline', text }, language: 'bash', context, origin: { entry: 'fixture' },
+    })
+    const evidence = await collectEvidence({
+      status: result.status, operations: result.operations, candidates: result.candidates, gaps: result.gaps,
+    }, { isProtectedPath: () => false })
+    const small = decide({ ...evidence, inventory: { kind: 'exact', count: 0, files: [], links: [], directories: [], roots: [], unknown: [] } }, {})
+    assert.equal(small.kind, 'allow', `${text}: an empty inventory stays allowed (${small.ruleId ?? ''})`)
+    const big = decide({ ...evidence, inventory: { kind: 'exact', count: 25, files: [], links: [], directories: ['build'], roots: [], unknown: [] } }, {})
+    assert.equal(big.kind, 'confirm', `${text}: a 25-entry inventory confirms (${big.ruleId ?? ''})`)
+    assert.equal(big.ruleId, 'data.delete.bulk', text)
+  }
+})
