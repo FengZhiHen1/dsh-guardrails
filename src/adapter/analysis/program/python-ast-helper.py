@@ -553,11 +553,13 @@ class Analyzer:
 
     def report_content_open(self, node, env, cond, line, function):
         args = node.args
-        if not args:
-            self.gap("content-target-unknown", "open() without a positional target", line=line, function=function)
+        kw = {k.arg: k.value for k in node.keywords if k.arg}
+        file_node = args[0] if args else kw.get("file")
+        if file_node is None:
+            self.gap("content-target-unknown", "open() without a file argument", line=line, function=function)
             return
         try:
-            target = self.eval_str(args[0], env)
+            target = self.eval_str(file_node, env)
         except Unk as exc:
             self.gap("content-target-unknown", "target is not statically evaluable (%s)" % exc.reason, line=line, function=function)
             return
@@ -607,10 +609,13 @@ class Analyzer:
                           "reason": "%s() executes dynamically constructed code" % name,
                           "condition": cond, "line": line, "function": function})
                 return
-            if name == "open":
+            binding = env.get(name)
+            # Builtin open only when the name is NOT shadowed by any local
+            # binding (assignment, import, def, …): a shadowed `open` is an
+            # opaque call, not the builtin.
+            if name == "open" and binding is None:
                 self.report_content_open(node, env, cond, line, function)
                 return
-            binding = env.get(name)
             if binding is not None and binding[0] == "func":
                 self.inline_function(binding[1], node, env, depth, function)
                 return

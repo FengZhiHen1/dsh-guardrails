@@ -36,6 +36,7 @@ function unit(language, text, extra = {}) {
 }
 
 const operations = facts => facts.filter(f => f.t === 'operation')
+const candidates = facts => facts.filter(f => f.t === 'candidate')
 const gaps = facts => facts.filter(f => f.t === 'gap')
 
 const analyzer = createProgramAnalyzer({ pythonExecutable: explicitPython })
@@ -160,6 +161,29 @@ pyTest('unverified Path receiver reports a bounded gap and no action claim', asy
   await analyzer.analyze(unit('python', "from pathlib import Path\nPath(user_supplied).read_text()\n"), env)
   assert.equal(operations(facts).length, 0)
   assert.ok(gaps(facts).some(g => g.kind === 'content-target-unknown'))
+})
+
+pyTest('keyword file= and mode= named arguments are supported', async () => {
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('python', "open(file='C:/synthetic/work/a.txt', mode='w')\n"), env)
+  const ops = operations(facts)
+  assert.equal(ops.length, 1)
+  assert.equal(ops[0].action, 'write-content')
+  assert.deepEqual(ops[0].target, { kind: 'exact', paths: ['C:/synthetic/work/a.txt'] })
+  assert.equal(ops[0].details, 'mode: w')
+})
+
+pyTest('a shadowed open binding is opaque, not the builtin', async () => {
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('python', "def open(path):\n    return path\nopen('C:/synthetic/work/a.txt')\n"), env)
+  assert.equal(operations(facts).length, 0)
+  assert.equal(candidates(facts).length, 0)
+})
+
+pyTest('a reassigned open name is opaque, not the builtin', async () => {
+  const { env, facts } = makeEnv()
+  await analyzer.analyze(unit('python', "import os\nopen = os.fdopen\nopen('C:/synthetic/work/a.txt')\n"), env)
+  assert.equal(operations(facts).length, 0)
 })
 
 pyTest('content facts do not disturb delete-sink analysis in the same unit', async () => {
