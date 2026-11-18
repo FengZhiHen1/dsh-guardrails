@@ -14,35 +14,47 @@
 //   AC-01b / GT-10  20/21 deletion boundary through the real pipeline
 //   AC-01f          protected-file read confirmation
 //   GT-02 / GF-07   prepended pre-execute short-circuit still refuses at the final guard
-//   GT-09 / DSR-027 outer run_code passes; SDK inner tools decided per dispatch, not
-//                   re-inventoried by the outer program
+//   GT-09 / DSR-027 outer run_code passes; SDK inner apply_patch dispatches are decided
+//                   per dispatch, not re-inventoried by the outer program
 //   GT-12           tools outside the deletion analysis keep the DSH permission flow
 //   GT-13           real ApprovalService never policy rejects a confirmation
-//   GT-14           whole-patch judgment for apply_patch (gate-level: the tool here is a
-//                   synthetic registration; live dsh-tool-fs registration evidence is a
-//                   composition/Inspect check and stays outside this harness — GT-01)
+//   GT-14 (real)    the official optional apply_patch definition (dsh-tool-fs over
+//                   dsh-fs-local, applyPatch: true) registered and dispatched in this
+//                   composition, with the gate judging the whole patch
+//   GT-14 (gate)    whole-patch judgment with a synthetic apply_patch registration —
+//                   this covers ONLY the gate's parsePatch-level judgment and counting
+//                   over the patch text; it is NOT live-registration evidence (GT-01)
 //
-// The gate cases are written against the target contract of docs/. Before the new
-// entry (index.js: apply/Config/name/inject) is integrated they skip with the import
-// error; a skip is never a pass (工程结构与测试体系.md 判决规则).
+// The gate cases are written against the target contract of docs/. They run the
+// package entry (index.js: apply/Config/name/inject); with a runtime anchor provided,
+// an entry import failure fails the affected tests instead of skipping them — an
+// integration defect must not look like an environment skip. A skip is never a pass
+// (工程结构与测试体系.md 判决规则).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { writeFile } from 'node:fs/promises'
 import * as harness from './fixtures/target-runtime/runtime-harness.mjs'
 
-let gate
-let gateSkipReason
-try {
-  gate = await import('../index.js')
-} catch (error) {
-  gate = undefined
-  gateSkipReason = `dsh-guardrails entry (index.js) cannot be imported yet (integration pending): ${error?.message ?? error}`
-}
-
 const runtimeSkip = !harness.runtime && harness.runtimeSkipReason
-const gateSkip = runtimeSkip || (!gate && gateSkipReason)
+let gate
+let gateImportError
+if (harness.runtime) {
+  try {
+    gate = await import('../index.js')
+  } catch (error) {
+    gateImportError = error
+  }
+}
+const gateSkip = runtimeSkip
+
+/** Fail the calling gate test loudly when the entry cannot load. */
+function gateOrThrow() {
+  if (gateImportError) throw gateImportError
+  if (!gate) throw new Error('dsh-guardrails entry (index.js) did not load')
+  return gate
+}
 
 test('harness: the real runtime composition dispatches an ordinary tool once', { skip: runtimeSkip }, async t => {
   const { ctx, root } = await harness.mount(t, { label: 'selfcheck' })
@@ -58,7 +70,7 @@ test('harness: the real runtime composition dispatches an ordinary tool once', {
 test('AC-01b: a 20-file pwsh delete is allowed and dispatches the body once', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'twenty')
   const dir = await harness.writeTree(root, 'delete-me', 20)
-  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate })
+  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate: gateOrThrow() })
   const counter = { calls: 0 }
   harness.registerCounting(ctx, 'pwsh', counter)
   const observed = harness.observePreExecute(ctx).log
@@ -73,7 +85,7 @@ test('AC-01b: a 20-file pwsh delete is allowed and dispatches the body once', { 
 test('AC-01b: a 21-file pwsh delete confirms once, refuses, and never dispatches', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'twentyone')
   const dir = await harness.writeTree(root, 'delete-me', 21)
-  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate, approval: 'rejected' })
+  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate: gateOrThrow(), approval: 'rejected' })
   const counter = { calls: 0 }
   harness.registerCounting(ctx, 'pwsh', counter)
   const result = await harness.runTool(ctx, harness.makeAgent(root, ctx).agent, 'pwsh',
@@ -94,7 +106,7 @@ test('AC-01f: a protected-file read asks once and refuses when the grant is reje
   await writeFile(marked, 'synthetic fixture only')
   await writeFile(ordinary, 'synthetic fixture only')
   const { ctx, approvalRequests } = await harness.mount(t, {
-    label: 'gate', workingDirectory: root, gate, config: { sensitiveFiles: [marked] }, approval: 'rejected',
+    label: 'gate', workingDirectory: root, gate: gateOrThrow(), config: { sensitiveFiles: [marked] }, approval: 'rejected',
   })
   const counter = { calls: 0 }
   harness.registerCounting(ctx, 'read', counter)
@@ -118,7 +130,7 @@ test('GT-13: the real ApprovalService never policy rejects the protected-read co
   await writeFile(marked, 'synthetic fixture only')
   await writeFile(ordinary, 'synthetic fixture only')
   const { ctx } = await harness.mount(t, {
-    label: 'gate', workingDirectory: root, gate, config: { sensitiveFiles: [marked] }, approval: 'real-never',
+    label: 'gate', workingDirectory: root, gate: gateOrThrow(), config: { sensitiveFiles: [marked] }, approval: 'real-never',
   })
   const counter = { calls: 0 }
   harness.registerCounting(ctx, 'read', counter)
@@ -138,7 +150,7 @@ test('GT-13: the real ApprovalService never policy rejects the protected-read co
 
 test('GT-12: a registered tool outside the deletion analysis keeps the DSH permission flow', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'unwired')
-  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate })
+  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate: gateOrThrow() })
   const counter = { calls: 0 }
   harness.registerCounting(ctx, 'cleanup_cache', counter)
   const result = await harness.runTool(ctx, harness.makeAgent(root, ctx).agent, 'cleanup_cache', { anything: true })
@@ -149,7 +161,7 @@ test('GT-12: a registered tool outside the deletion analysis keeps the DSH permi
 
 test('GT-02/GF-07: a prepended pre-execute short-circuit still refuses at the final guard with zero dispatch', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'shortcircuit')
-  const { ctx } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate })
+  const { ctx } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate: gateOrThrow() })
   const counter = { calls: 0 }
   harness.registerCounting(ctx, 'pwsh', counter)
   const agent = harness.makeAgent(root, ctx).agent
@@ -169,77 +181,85 @@ test('GT-02/GF-07: a prepended pre-execute short-circuit still refuses at the fi
   assert.equal(counter.calls, 1)
 })
 
-test('GT-09: the outer run_code passes and its SDK inner tool dispatches exactly once', { skip: gateSkip }, async t => {
+test('GT-09: the outer run_code passes and its SDK inner apply_patch dispatches exactly once', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'ptc-once')
-  const target = join(root, 'inner-target.txt')
+  const target = join(root, 'obsolete.txt')
   await writeFile(target, 'x')
   const counter = { calls: 0 }
   const ptcRuntime = harness.fixturePtcRuntime(async spec => {
     const { functions } = spec.bindings[0]
-    return { logs: [], value: await functions.delete({ file_path: target }) }
+    return { logs: [], value: await functions.apply_patch({ input: harness.patchText([{ kind: 'delete', path: target }]) }) }
   })
   const { ctx, approvalRequests } = await harness.mount(t, {
-    label: 'gate', workingDirectory: root, gate, executor: 'ptc', ptcRuntime, approval: 'rejected',
+    label: 'gate', workingDirectory: root, gate: gateOrThrow(), executor: 'ptc', ptcRuntime, approval: 'rejected',
   })
-  harness.registerCounting(ctx, 'delete', counter)
+  harness.registerCounting(ctx, 'apply_patch', counter)
   const observed = harness.observePreExecute(ctx).log
-  const program = `return await tools.delete({ file_path: ${JSON.stringify(target)} })`
+  const program = `return await tools.apply_patch({ input: ${JSON.stringify(harness.patchText([{ kind: 'delete', path: target }]))} })`
   const result = await harness.runTool(ctx, harness.makeAgent(root, ctx).agent, 'run_code',
     { code: program, description: 'SDK inner dispatch fixture' })
   assert.equal(result.isError, false, result.error?.message)
   assert.equal(result.value?.result, 'synthetic-noop', 'the inner tool value returned through the program')
-  assert.equal(counter.calls, 1, 'the SDK inner tool dispatched its body exactly once')
+  assert.equal(counter.calls, 1, 'the SDK inner apply_patch dispatched its body exactly once')
   assert.equal(approvalRequests.length, 0, 'no confirmation was needed for the ordinary inner target')
   const names = observed.map(entry => entry.name)
   assert.ok(names.includes('run_code'), 'the outer run_code execution passed through the gate')
-  assert.ok(names.includes('delete'), 'the SDK inner execution passed through the gate as its own call')
+  assert.ok(names.includes('apply_patch'), 'the SDK inner execution passed through the gate as its own call')
   const outer = observed.find(entry => entry.name === 'run_code')
-  const inner = observed.find(entry => entry.name === 'delete')
+  const inner = observed.find(entry => entry.name === 'apply_patch')
   assert.equal(inner.nested, true, 'the inner execution carries a parent token')
   assert.equal(outer.nested, false)
   assert.notEqual(outer.execution, inner.execution, 'outer and inner are distinct ToolExecution objects')
 })
 
-test('GT-09/DSR-027: SDK inner targets are decided per dispatch, not re-inventoried by the outer program', { skip: gateSkip }, async t => {
+test('GT-09/DSR-027: SDK inner apply_patch targets are decided per dispatch, not re-inventoried by the outer program', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'ptc-no-double')
-  const dir21 = await harness.writeTree(root, 'delete-me', 21)
+  const files = []
+  for (let i = 0; i < 21; i += 1) files.push(join(root, `v${i}.txt`))
+  for (const file of files) await writeFile(file, 'x')
+  const bulkPatch = harness.patchText(files.map(path => ({ kind: 'delete', path })))
   const counter = { calls: 0 }
   const ptcRuntime = harness.fixturePtcRuntime(async spec => {
     const { functions } = spec.bindings[0]
     let inner
     try {
-      inner = { ok: true, value: await functions.delete({ file_path: dir21 }) }
+      inner = { ok: true, value: await functions.apply_patch({ input: bulkPatch }) }
     } catch (error) {
       inner = { ok: false, message: String(error?.message ?? error) }
     }
     return { logs: [], value: inner }
   })
   const { ctx, approvalRequests } = await harness.mount(t, {
-    label: 'gate', workingDirectory: root, gate, executor: 'ptc', ptcRuntime, approval: 'rejected',
+    label: 'gate', workingDirectory: root, gate: gateOrThrow(), executor: 'ptc', ptcRuntime, approval: 'rejected',
   })
-  harness.registerCounting(ctx, 'delete', counter)
+  harness.registerCounting(ctx, 'apply_patch', counter)
   const observed = harness.observePreExecute(ctx).log
   const program = [
     'let inner',
-    `try { inner = { ok: true, value: await tools.delete({ file_path: ${JSON.stringify(dir21)} }) } }`,
+    `try { inner = { ok: true, value: await tools.apply_patch({ input: ${JSON.stringify(bulkPatch)} }) } }`,
     'catch (error) { inner = { ok: false, message: String(error?.message ?? error) } }',
     'return inner',
   ].join('\n')
   const result = await harness.runTool(ctx, harness.makeAgent(root, ctx).agent, 'run_code',
     { code: program, description: 'SDK inner bulk fixture' })
   assert.equal(result.isError, false, `the outer program itself completes: ${result.error?.message}`)
-  assert.equal(result.value?.result?.ok, false, 'the inner bulk delete was refused inside the program')
-  assert.equal(counter.calls, 0, 'the refused inner delete never dispatched its body')
+  assert.equal(result.value?.result?.ok, false, 'the inner bulk patch was refused inside the program')
+  assert.equal(counter.calls, 0, 'the refused inner apply_patch never dispatched its body')
   assert.equal(approvalRequests.length, 1,
-    'only the inner dispatch confirmed the bulk set — the outer program did not re-inventory it')
-  assert.ok(observed.some(entry => entry.name === 'delete' && entry.nested), 'the inner delete reached the gate as its own execution')
+    'only the inner dispatch confirmed the bulk patch — the outer program did not re-inventory it')
+  assert.ok(observed.some(entry => entry.name === 'apply_patch' && entry.nested), 'the inner apply_patch reached the gate as its own execution')
   assert.ok(observed.some(entry => entry.name === 'run_code'), 'the outer run_code reached the gate once')
   assert.match(result.value?.result?.message ?? '', /data\.delete\.bulk|DEL-01|at least 21|limit 20|bulk/i,
     'the inner refusal carries the bulk-deletion signal')
-  assert.equal(existsSync(dir21), true, 'the managed target is untouched')
+  assert.equal(files.every(file => existsSync(file)), true, 'the managed targets are untouched')
 })
 
-test('GT-14: a small mixed apply_patch is judged as one whole patch and dispatches once; pure updates ask nothing', { skip: gateSkip }, async t => {
+test('GT-14 (gate-level): a small mixed apply_patch is judged as one whole patch and dispatches once; pure updates ask nothing', { skip: gateSkip }, async t => {
+  // Coverage statement: this test uses a SYNTHETIC apply_patch registration to reach the
+  // gate directly. It covers the gate's whole-patch parsePatch judgment, counting, and
+  // dispatch decisions — nothing about how the official dsh-tool-fs tool registers or
+  // executes (the real-definition case is the GT-14 (real) test below; live bundle
+  // registration evidence stays an Inspect/composition check per GT-01).
   const root = await harness.fixtureRoot(t, 'patch-mixed')
   const removable = join(root, 'obsolete.txt')
   const editable = join(root, 'edited.txt')
@@ -247,7 +267,7 @@ test('GT-14: a small mixed apply_patch is judged as one whole patch and dispatch
   await writeFile(removable, 'x')
   await writeFile(editable, 'old line\n')
   await writeFile(updated, 'old line\n')
-  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate, approval: 'rejected' })
+  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate: gateOrThrow(), approval: 'rejected' })
   const counter = { calls: 0 }
   harness.registerCounting(ctx, 'apply_patch', counter)
   const agent = harness.makeAgent(root, ctx).agent
@@ -270,12 +290,12 @@ test('GT-14: a small mixed apply_patch is judged as one whole patch and dispatch
   assert.equal(approvalRequests.length, 0, 'pure updates produce no confirmation')
 })
 
-test('GT-14: a 21-delete apply_patch is one confirmation over the whole patch and refuses with zero dispatch', { skip: gateSkip }, async t => {
+test('GT-14 (gate-level): a 21-delete apply_patch is one confirmation over the whole patch and refuses with zero dispatch', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'patch-bulk')
   const files = []
   for (let i = 0; i < 21; i += 1) files.push(join(root, `v${i}.txt`))
   for (const file of files) await writeFile(file, 'x')
-  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate, approval: 'rejected' })
+  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate: gateOrThrow(), approval: 'rejected' })
   const counter = { calls: 0 }
   harness.registerCounting(ctx, 'apply_patch', counter)
   const result = await harness.runTool(ctx, harness.makeAgent(root, ctx).agent, 'apply_patch',
@@ -286,4 +306,40 @@ test('GT-14: a 21-delete apply_patch is one confirmation over the whole patch an
   assert.equal(files.every(file => existsSync(file)), true, 'the managed targets are untouched')
   assert.match(result.error?.message ?? '', /data\.delete\.bulk|DEL-01|at least 21|limit 20|bulk/i,
     `the bulk-deletion signal must identify the rule: ${result.error?.message}`)
+})
+
+test('GT-14 (real): the official optional apply_patch definition registers, passes the gate, and really applies', { skip: gateSkip }, async t => {
+  // The official composition seam is public: `@deepseek-ai/dsh-fs-local` provides `ctx.fs`
+  // and `@deepseek-ai/dsh-tool-fs` registers `apply_patch` only while its `applyPatch`
+  // config is true (README Configuration table). A mount failure here is an environment
+  // fact, not a gate verdict, so it skips with the mount error; the gate-level GT-14
+  // tests above still cover whole-patch judgment.
+  const root = await harness.fixtureRoot(t, 'patch-real')
+  const removable = 'obsolete.txt'
+  const editable = 'edited.txt'
+  await writeFile(join(root, removable), 'x')
+  await writeFile(join(root, editable), 'old line\n')
+  const { ctx, approvalRequests } = await harness.mount(t, { label: 'gate', workingDirectory: root, gate: gateOrThrow(), approval: 'rejected' })
+  const fsLocal = await harness.loadRuntimePackage('@deepseek-ai/dsh-fs-local')
+  await ctx.plugin(fsLocal.default, { cwd: root })
+  const toolFs = await harness.loadRuntimePackage('@deepseek-ai/dsh-tool-fs')
+  await ctx.plugin({ name: toolFs.name, inject: toolFs.inject, apply: toolFs.apply, Config: toolFs.Config }, {
+    read: false, readImage: false, write: false, edit: false, applyPatch: true,
+    readLimit: 2000, readMaxLineLength: 2000, readMaxBytes: 51200, readStreamMinSize: 10485760,
+  })
+  const agent = harness.makeAgent(root, ctx).agent
+  assert.equal(ctx.tools.executable('apply_patch', agent)?.name, 'apply_patch',
+    'the official apply_patch definition is registered by applyPatch: true')
+  const observed = harness.observePreExecute(ctx).log
+  // Session-relative patch paths (the official apply_patch contract): one delete plus one
+  // content update, judged as one whole patch, then REALLY applied to the managed targets.
+  const result = await harness.runTool(ctx, agent, 'apply_patch', { input: harness.patchText([
+    { kind: 'delete', path: removable },
+    { kind: 'update', path: editable, remove: ['old line'], add: ['new line'] },
+  ]) })
+  assert.equal(result.isError, false, result.error?.message)
+  assert.equal(approvalRequests.length, 0, 'an in-threshold non-protected patch needs no confirmation')
+  assert.equal(existsSync(join(root, removable)), false, 'the delete operation really removed the fixture file')
+  assert.equal(readFileSync(join(root, editable), 'utf8'), 'new line\n', 'the update operation really applied')
+  assert.ok(observed.some(entry => entry.name === 'apply_patch'), 'the official apply_patch execution passed through the gate')
 })

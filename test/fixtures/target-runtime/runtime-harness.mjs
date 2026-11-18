@@ -57,9 +57,10 @@ function anchorRequire(anchor) {
 }
 
 export let runtime
+let requireFromRuntime
 if (!runtimeSkipReason) {
   try {
-    const requireFromRuntime = anchorRequire(anchor)
+    requireFromRuntime = anchorRequire(anchor)
     const load = async name => import(pathToFileURL(requireFromRuntime.resolve(name)).href)
     const [cordis, tools, prompt, native, ptcExecutor, userApproval, projections, session] = await Promise.all([
       '@deepseek-ai/cordis',
@@ -76,6 +77,15 @@ if (!runtimeSkipReason) {
     runtime = undefined
     runtimeSkipReason = `Runtime packages under DSH_RUNTIME_PATH could not be loaded: ${error?.message ?? error}`
   }
+}
+
+/**
+ * Load an additional official runtime package on demand (e.g. the optional
+ * `@deepseek-ai/dsh-tool-fs` apply_patch composition). Requires a usable anchor.
+ */
+export async function loadRuntimePackage(name) {
+  if (!requireFromRuntime) throw new Error(runtimeSkipReason)
+  return import(pathToFileURL(requireFromRuntime.resolve(name)).href)
 }
 
 /**
