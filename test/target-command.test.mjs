@@ -15,7 +15,13 @@ function command(executable, args, unit = {}) {
   const base = { context: { domain: 'host', platform: 'linux', cwd: '/fixture' }, origin: { entry: 'fixture' }, ...unit }
   const env = {
     operation(action, target, options) { operations.push({ action, target, ...options }) },
-    child(input) { children.push(input) },
+    child(input) {
+      children.push(input)
+      // Mirrors the pipeline: argv children re-enter the catalog with their own context.
+      if (input.source?.kind === 'argv' && typeof input.source.executable === 'string') {
+        resolveCommand(input.source.executable, input.source.args, { ...base, ...input }, env)
+      }
+    },
     candidate(kind, reason) { candidates.push({ kind, reason }) },
     gap(kind) { gaps.push(kind) },
     // Mirrors the pipeline env.command: nested command facts re-enter the catalog.
@@ -391,4 +397,74 @@ test('non-host domain deletions avoid host targets and list the domain scope', (
   assert.deepEqual(bare.operations, [])
   assert.ok(bare.gaps.includes('command-options'))
   assert.deepEqual(command('rm', ['-rf', '/tmp/x']).operations[0].target, { kind: 'subtree', root: '/tmp/x' })
+})
+
+// --- coverage additions: wsl payload analysis (incident 2026-11-14) --------------
+
+const win32Unit = { context: { domain: 'host', platform: 'win32', cwd: 'C:\\fixture' } }
+
+test('wsl without --exec analyzes the distribution command line', () => {
+  const direct = command('wsl', ['-d', 'Ubuntu', 'rm', '-rf', '/tmp/x'], win32Unit)
+  assert.deepEqual(direct.children[0].context, { domain: 'wsl', platform: 'linux', distribution: 'Ubuntu' })
+  assert.deepEqual(direct.children[0].source, { kind: 'argv', executable: 'rm', args: ['-rf', '/tmp/x'] })
+  const shell = command('wsl', ['-d', 'Ubuntu', 'bash', '-lc', 'rsync -a --delete /mnt/e/src/ "$dst/"'], win32Unit)
+  // The argv child re-enters the catalog, where the interpreter wrapper extracts
+  // the inline script as a bash child unit inside the wsl domain.
+  assert.deepEqual(shell.children[0].source, { kind: 'argv', executable: 'bash', args: ['-lc', 'rsync -a --delete /mnt/e/src/ "$dst/"'] })
+  assert.equal(shell.children[1].source.kind, 'inline')
+  assert.equal(shell.children[1].language, 'bash')
+  assert.equal(shell.children[1].source.text, 'rsync -a --delete /mnt/e/src/ "$dst/"')
+  assert.equal(shell.children[1].context.domain, 'wsl')
+  const afterTerminator = command('wsl', ['--', 'rm', '-rf', '/tmp/x'], win32Unit)
+  assert.deepEqual(afterTerminator.children[0].source, { kind: 'argv', executable: 'rm', args: ['-rf', '/tmp/x'] })
+})
+
+test('wsl management and query switches stay a coverage gap without operations', () => {
+  for (const args of [['--list', '--verbose'], ['--shutdown'], ['--status'], ['--running'], ['--version'], ['-h'], ['-t', 'Ubuntu']]) {
+    const result = command('wsl', args, win32Unit)
+    assert.deepEqual(result.operations, [], JSON.stringify(args))
+    assert.deepEqual(result.children, [], JSON.stringify(args))
+    assert.deepEqual(result.candidates, [], JSON.stringify(args))
+    assert.ok(result.gaps.includes('wsl-shell'), JSON.stringify(args))
+  }
+  const bare = command('wsl', [], win32Unit)
+  assert.ok(bare.gaps.includes('wsl-shell'))
+  assert.deepEqual(bare.operations, [])
+})
+
+test('wsl --unregister confirms the distribution deletion', async () => {
+  const literal = command('wsl', ['--unregister', 'Ubuntu'], win32Unit)
+  assert.equal(literal.operations[0].action, 'delete')
+  assert.deepEqual(literal.operations[0].target, { kind: 'unknown', reason: 'wsl-distro-remove', knownScope: ['wsl --unregister Ubuntu'] })
+  const decision = await decideOperations(literal.operations)
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.delete.dynamic')
+  const attached = command('wsl', ['--unregister=Ubuntu'], win32Unit)
+  assert.deepEqual(attached.operations[0].target.knownScope, ['wsl --unregister Ubuntu'])
+  // A dynamic distro name still identifies the deletion; the shape stays the scope.
+  const dynamic = command('wsl', ['--unregister', null], win32Unit)
+  assert.deepEqual(dynamic.operations[0].target, { kind: 'unknown', reason: 'wsl-distro-remove', knownScope: ['wsl --unregister (unresolved distribution)'] })
+  // A bare call is a usage error: gap only, no fabricated confirmation.
+  const bare = command('wsl', ['--unregister'], win32Unit)
+  assert.deepEqual(bare.operations, [])
+  assert.deepEqual(bare.candidates, [])
+  assert.ok(bare.gaps.includes('wsl-shell'))
+})
+
+// --- coverage additions: rsync unresolvable destination (incident 2026-11-14) ----
+
+test('rsync --delete with an unresolvable destination confirms on the command shape', () => {
+  const dynamic = command('rsync', ['-a', '--delete', '/mnt/e/src/', null])
+  assert.equal(dynamic.operations[0].action, 'delete')
+  assert.deepEqual(dynamic.operations[0].target, {
+    kind: 'unknown',
+    reason: 'rsync-delete-target',
+    knownScope: ['rsync --delete /mnt/e/src/ -> (unresolved destination expression)'],
+  })
+  assert.deepEqual(dynamic.operations[0].details, { rsyncDelete: true })
+  // A dynamic source with a literal destination keeps the enumerable tier.
+  const literal = command('rsync', ['--delete', null, '/tmp/build/'])
+  assert.deepEqual(literal.operations[0].target, { kind: 'subtree', root: '/tmp/build/' })
+  const preview = command('rsync', ['-n', '--delete', '/mnt/e/src/', null])
+  assert.equal(preview.operations[0].preview, true)
 })

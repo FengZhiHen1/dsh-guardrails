@@ -470,17 +470,20 @@ const RSYNC_DELETE_FLAGS = new Set(['--delete', '--delete-before', '--delete-dur
   '--delete-after', '--delete-excluded', '--delete-missing-args'])
 
 /** `rsync --delete*` models the destination tree (F-05); forms without a delete
- * flag keep the existing coverage-gap allowance, and `-n`/`--dry-run` is a proven preview. */
+ * flag keep the existing coverage-gap allowance, and `-n`/`--dry-run` is a proven preview.
+ * An unresolvable destination (variable, expansion, substitution) is the incident
+ * shape (2026-11-14): the deletion is confirmed on the command shape instead of
+ * being dropped — never resolved to a literal path the source text disagrees with. */
 function rsyncCommand(args, options, env) {
   let deleteMode = false
   let preview = false
   let unmodeled = false
-  const operands = []
+  const positionals = []
   for (let i = 0; i < args.length; i++) {
     const value = args[i]
-    if (typeof value !== 'string') { unmodeled = true; continue }
+    if (typeof value !== 'string') { positionals.push({ value: null, index: i }); continue }
     if (value === '--') {
-      for (let j = i + 1; j < args.length; j++) operands.push({ value: args[j], index: j })
+      for (let j = i + 1; j < args.length; j++) positionals.push({ value: args[j], index: j })
       break
     }
     if (value === '--help' || value === '--version') return
@@ -509,12 +512,27 @@ function rsyncCommand(args, options, env) {
       unmodeled = true
       continue
     }
-    operands.push({ value, index: i })
+    positionals.push({ value, index: i })
   }
   if (unmodeled) { env.gap('command-options', options.origin); return }
   if (!deleteMode) { env.gap('unmodeled-command', options.origin); return }
-  if (operands.length < 2) { env.gap('command-options', options.origin); return }
-  emitTargets('delete', [operands[operands.length - 1]], { ...options, recursive: true, preview, details: { rsyncDelete: true } }, env)
+  if (positionals.length < 2) { env.gap('command-options', options.origin); return }
+  // The delete scope is the LAST positional (the destination copy); dynamic
+  // sources do not affect it.
+  const destination = positionals[positionals.length - 1]
+  const sources = positionals.slice(0, -1)
+  if (destination.value === null) {
+    const sourceText = sources.some((source) => source.value === null)
+      ? '(unresolved source)'
+      : sources.map((source) => source.value).join(' ')
+    env.operation('delete', {
+      kind: 'unknown',
+      reason: 'rsync-delete-target',
+      knownScope: [`rsync --delete ${sourceText} -> (unresolved destination expression)`],
+    }, { ...options, recursive: true, preview, details: { rsyncDelete: true } })
+    return
+  }
+  emitTargets('delete', [destination], { ...options, recursive: true, preview, details: { rsyncDelete: true } }, env)
 }
 
 const WRAPPER_SPECS = {
@@ -931,14 +949,55 @@ export function resolveCommand(executable, args, unit, env) {
   if (contentReaders.has(name)) return contentCommand(name, args, options, env)
   if (name === 'wsl' && windows) {
     const context = { domain: 'wsl', platform: 'linux' }
+    // Management/query switches: wsl.exe performs the operation itself; no
+    // distribution command line follows, so they stay a coverage gap (放行).
+    const manageFlags = new Set(['-l', '--list', '-t', '--terminate', '--shutdown', '--running', '--import',
+      '--export', '--mount', '--unmount', '--install', '--update', '--status', '--version',
+      '-h', '--help', '-v', '--verbose'])
     for (let index = 0; index < args.length; index++) {
       const flag = args[index]
+      if (flag === '--') {
+        const rest = args.slice(index + 1)
+        if (typeof rest[0] !== 'string') { env.gap('wsl-shell', origin); return }
+        env.child({ source: { kind: 'argv', executable: rest[0], args: rest.slice(1) },
+          language: 'unknown', context, condition: unit.condition, origin })
+        return
+      }
       if (flag === '-e' || flag === '--exec') {
         if (typeof args[index + 1] !== 'string') { env.gap('wsl-shell', origin); return }
         env.child({ source: { kind: 'argv', executable: args[index + 1], args: args.slice(index + 2) },
           language: 'unknown', context, condition: unit.condition, origin })
         return
       }
+      if (typeof flag !== 'string') { env.gap('wsl-shell', origin); return }
+      // `wsl --unregister <distro>` permanently deletes the distribution's data and
+      // settings: a real irreversible deletion, confirmed on the command shape (D3).
+      if (flag === '--unregister' || flag.startsWith('--unregister=')) {
+        const distro = flag.startsWith('--unregister=') ? flag.slice('--unregister='.length)
+          : args[index + 1]
+        if (distro === undefined || distro === '') {
+          // Bare call is a usage error: no operation, no fabricated confirmation.
+          env.gap('wsl-shell', origin)
+          return
+        }
+        if (typeof distro !== 'string') {
+          // A dynamic distro name still identifies a real deletion; the command
+          // shape stays the decision scope (same treatment as rsync's destination).
+          env.operation('delete', {
+            kind: 'unknown',
+            reason: 'wsl-distro-remove',
+            knownScope: ['wsl --unregister (unresolved distribution)'],
+          }, options)
+          return
+        }
+        env.operation('delete', {
+          kind: 'unknown',
+          reason: 'wsl-distro-remove',
+          knownScope: [`wsl --unregister ${distro}`],
+        }, options)
+        return
+      }
+      if (manageFlags.has(flag)) { env.gap('wsl-shell', origin); return }
       if (['-d', '--distribution', '-u', '--user', '--cd'].includes(flag)) {
         const value = args[++index]
         if (typeof value !== 'string') { env.gap('wsl-context', origin); continue }
@@ -948,8 +1007,11 @@ export function resolveCommand(executable, args, unit, env) {
         else env.gap('wsl-context', origin)
         continue
       }
-      // Without --exec the distribution shell interprets the remaining command line.
-      break
+      if (flag.startsWith('-')) { env.gap('wsl-shell', origin); return } // unmodeled switch
+      // Without --exec the distribution shell still runs the command line: analyze it.
+      env.child({ source: { kind: 'argv', executable: flag, args: args.slice(index + 1) },
+        language: 'unknown', context, condition: unit.condition, origin })
+      return
     }
     env.gap('wsl-shell', origin)
     return

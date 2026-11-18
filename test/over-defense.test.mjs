@@ -84,6 +84,8 @@ const ORDINARY = [
   ['wsl ls', 'bash'],
   ['wsl git status', 'bash'],
   ['wsl -e ls /tmp', 'bash'],
+  ['wsl --terminate Ubuntu', 'bash'],
+  ['wsl --unregister', 'bash'],
   ['npm run build', 'bash'],
   ['node --check x.js', 'bash'],
   ['sudo ls', 'bash'],
@@ -125,6 +127,11 @@ test('Remove-Item -WhatIf and preview flags remain inert', async () => {
 })
 
 const NEW_COVERAGE = [
+  ['wsl -d Ubuntu bash -lc \'set -e; dst=$HOME/repos/x; rsync -a --delete /mnt/e/src/ "$dst/"\'', 'bash', 'data.delete.dynamic'],
+  ['wsl -d Ubuntu bash -lc \'rsync -a --delete /mnt/e/src/ "$dst/"\'', 'bash', 'data.delete.dynamic'],
+  ['rsync -a --delete /mnt/e/src/ "$dst/"', 'bash', 'data.delete.dynamic'],
+  ['wsl -d Ubuntu rm -rf /tmp/x', 'bash', 'data.delete.dynamic'],
+  ['wsl --unregister Ubuntu', 'bash', 'data.delete.dynamic'],
   ['find . -name "*.log" -delete', 'bash', 'data.delete.dynamic'],
   ['printf "%s\\n" a | xargs rm -rf', 'bash', 'data.delete.dynamic'],
   ['parallel rm -rf ::: a b', 'bash', 'data.delete.dynamic'],
@@ -166,4 +173,22 @@ test('new destructive forms confirm with an enumerated scope (never deny on cove
     assertConfirmed(command, result, ruleId)
     assert.ok(result.decision.scope, `${command}: confirm must carry a scope`)
   }
+})
+
+test('the incident rsync line names the command shape and the unresolved destination in its scope', async () => {
+  const { decision } = await evaluate('rsync -a --delete /mnt/e/src/ "$dst/"', { language: 'bash', inventory: EMPTY_INVENTORY })
+  assert.equal(decision.kind, 'confirm')
+  const rendered = JSON.stringify(decision.scope)
+  assert.ok(rendered.includes('rsync --delete'), `scope must name the command shape: ${rendered}`)
+  assert.ok(rendered.includes('unresolved destination'), `scope must mark the destination unresolved: ${rendered}`)
+})
+
+test('wsl management switches and literal rsync tiers keep their behavior', async () => {
+  for (const command of ['wsl --list --verbose', 'wsl --status', 'wsl --version']) {
+    assertAllowed(command, await evaluate(command, { language: 'bash' }))
+  }
+  const literal = await evaluate('rsync -a --delete src/ /tmp/build/', { language: 'bash', inventory: EMPTY_INVENTORY })
+  assert.equal(literal.decision.kind, 'allow')
+  assert.deepEqual(literal.analysis.candidates, [])
+  assert.equal(literal.analysis.operations[0].target.kind, 'subtree')
 })

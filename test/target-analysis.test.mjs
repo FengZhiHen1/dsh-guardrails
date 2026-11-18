@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createExecutionAnalyzer } from '../src/adapter/analysis/index.js'
+import { collectEvidence } from '../src/adapter/evidence/index.js'
+import { decide } from '../src/core/decision.js'
 
 const context = { domain: 'host', cwd: process.cwd(), platform: process.platform }
 const invoke = (executable, args, cwd = context.cwd) => ({
@@ -170,9 +172,51 @@ test('wsl -e deletions avoid the host inventory and list the domain scope', asyn
   assert.ok(!result.gaps.some((gap) => gap.kind === 'no-provider'))
 })
 
-test('wsl shells without --exec keep their coverage gap (regression guard)', async (t) => {
+test('wsl command lines are analyzed through the wsl domain (incident 2026-11-14)', async (t) => {
   const analyzer = createFixture(t)
-  const result = await analyzer.analyze(invoke('wsl.exe', ['ls', '/tmp']))
-  assert.ok(result.gaps.some((gap) => gap.kind === 'wsl-shell'))
-  assert.equal(result.operations.length, 0)
+  const result = await analyzer.analyze(invoke('wsl.exe', ['-d', 'Ubuntu', 'bash', '-lc',
+    `set -e; dst=$HOME/repos/x; rsync -a --delete /mnt/e/src/ "$dst/"`]))
+  // The payload's rsync --delete is reached with the wsl domain context.
+  const op = result.operations.find((operation) => operation.action === 'delete')
+  assert.ok(op, `expected a delete operation, got ${JSON.stringify(result.operations)}`)
+  assert.equal(op.context.domain, 'wsl')
+  assert.equal(op.target.kind, 'unknown')
+  assert.ok(op.target.knownScope.some((scope) => scope.startsWith('rsync --delete')), JSON.stringify(op.target))
+  const evidence = await collectEvidence({
+    status: result.status, operations: result.operations, candidates: result.candidates, gaps: result.gaps,
+  }, { isProtectedPath: () => false })
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.delete.dynamic')
+})
+
+test('wsl without --exec analyzes the payload; management switches stay a gap', async (t) => {
+  const analyzer = createFixture(t)
+  const payload = await analyzer.analyze(invoke('wsl.exe', ['ls', '/tmp']))
+  assert.ok(!payload.gaps.some((gap) => gap.kind === 'wsl-shell'), 'the payload is analyzed now')
+  assert.deepEqual(payload.operations, [])
+  assert.deepEqual(payload.candidates, [])
+  const manage = await analyzer.analyze(invoke('wsl.exe', ['--list', '--verbose']))
+  assert.ok(manage.gaps.some((gap) => gap.kind === 'wsl-shell'))
+  assert.deepEqual(manage.operations, [])
+})
+
+test('rsync --delete with a dynamic destination confirms without wsl', async (t) => {
+  const analyzer = createFixture(t)
+  // The analyzer sees the variable operand as dynamic (null), like the real shell face.
+  const direct = await analyzer.analyze({
+    source: { kind: 'argv', executable: 'rsync', args: ['-a', '--delete', '/mnt/e/src/', null] },
+    language: 'unknown', context: { domain: 'host', platform: process.platform, cwd: 'E:\\' },
+    origin: { entry: 'fixture' },
+  })
+  const op = direct.operations[0]
+  assert.equal(op?.action, 'delete')
+  assert.equal(op?.target.kind, 'unknown')
+  assert.equal(op?.target.reason, 'rsync-delete-target')
+  const evidence = await collectEvidence({
+    status: direct.status, operations: direct.operations, candidates: direct.candidates, gaps: direct.gaps,
+  }, { isProtectedPath: () => false })
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.delete.dynamic')
 })
