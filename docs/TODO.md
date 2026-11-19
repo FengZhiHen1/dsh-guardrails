@@ -25,3 +25,4 @@
 - [ ] **凭据名单候选（需精确文件布局核实）**：`.azure/msal_token_cache.json`（新版 Azure CLI 令牌缓存）、gcloud `legacy_credentials/<account>/adc.json`（目录级不支持，只能按精确文件或 Profile `sensitiveFiles`）。核实前不加入内置名单。
 - [ ] **预览选项语义矩阵**。逐工具按官方语义核对 `--dry-run`、`-WhatIf` 类预览选项；未核对的选项不标预览。见 [Shell 语法接入](technical-details/命令文本分析.md)「覆盖边界与验证要求」。
 - [ ] **临时 Git 仓库清理的误伤**：删除含 `.git` 的临时目录会被 `catastrophic.git-metadata` 拒绝，或被 `git-metadata-inside-tree` 的 inventory 失败升级为 `execution.check-failed` 拒绝（实测：清理本轮取证用的临时仓库时两次被拒）。需评估「整目录删除」与「直接删除 `.git` 内容」的区分，避免正常清理被误伤。
+- [ ] **`git restore --staged` 被 `git-evidence` 检查失败拒绝**：实测 `git restore --staged <paths>` 被 `execution.check-failed`（`git-evidence: inventory unreliable`）拒绝，但仅还原索引区不会丢失工作树数据。`git restore` 的动作分档需区分 `--staged`（只动索引）与工作树还原，避免正常暂存操作被拒。
