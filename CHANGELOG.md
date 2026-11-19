@@ -2,6 +2,10 @@
 
 本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
+## 0.5.1
+
+- **完整 Git 仓库的删除改为审批（ask）**：删除 `.git` 主体、其子目录（`objects`/`refs`）、bare 仓库目录，或包含 `.git` 目录的目录树时，产出**确认**（`data.delete.bulk`/`data.delete.dynamic`，范围说明「complete Git repository metadata (.git) … would be destroyed」），不再 `catastrophic.git-metadata` 绝对拒绝。Git worktree / Linked Worktree（`.git` 是文件指针）不触发该审批，按普通文件计数删除。销毁历史的 Git 子命令（`filter-branch`/`git reset --hard` 等）仍绝对拒绝。见 [DSR-033](docs/decisions/DSR-033-完整Git仓库删除改为审批.md)。
+
 ## 0.5.0
 
 - **过度防御修正（用户反馈驱动）**：`git restore --staged <paths>` 只还原索引，恢复为放行；删除含 `.git` 的目录（如清理临时仓库）从 `execution.check-failed` 拒绝改为**确认**，范围注明「`.git` 元数据将一并销毁」；以 `.git` 或其内容本身为目标的删除仍按 `catastrophic.git-metadata` 绝对拒绝。`scp`/`sftp -i` 身份文件不再触发凭据读确认（正常认证用途）。
