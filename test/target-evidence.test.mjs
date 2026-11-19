@@ -4,7 +4,9 @@
 // OS temp dir (and removed afterwards): no real user path, no real repository and no
 // dangerous input is ever dispatched. Git probes are injected (`gitRun`) so no child git
 // process runs in the git-cases; the rebuildable-exemption case uses the real read-only
-// evidence adapter because its verdict IS the behavior under test.
+// evidence adapter because its verdict IS the behavior under test. The git abort-state
+// cases additionally create a fresh read-only fixture repository with `git init` (only
+// `rev-parse --absolute-git-dir` is ever executed against it).
 //
 // The pure identity matcher is exercised directly so the system-tree logic is testable
 // on any host; the Windows system-tree identity case is skipped on other hosts instead
@@ -15,6 +17,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { collectEvidence } from '../src/adapter/evidence/index.js'
 import { decide, isProtectedPath } from '../src/core/decision.js'
 import { matchSystemTree, RULES } from '../src/adapter/evidence/identity.js'
@@ -678,4 +681,116 @@ test('non-host domain deletions confirm dynamically without an inventory failure
   assert.equal(decision.kind, 'confirm')
   assert.equal(decision.ruleId, 'data.delete.dynamic')
   assert.ok(root) // fixture exists to prove no host path was touched
+})
+
+// --- git abort state (DSR-031 决定 8: confirm only on proven in-progress state; D1/D2/D4) ---
+
+/** The fixed facts shape: `git-restore` + unknown/git-evidence + `details.command` is the
+ * `<subcommand>-abort` token, with NO known scope supplied by the analysis. */
+const abortOp = (context, command, args = ['--abort']) => ({
+  action: 'git-restore', target: { kind: 'unknown', reason: 'git-evidence' },
+  context, condition: 'certain', recursive: false, preview: false,
+  details: { command, args, global: [] },
+})
+
+/** Fresh fixture repository: `git init` writes only inside the fixture, and the only git
+ * command the evidence layer runs is the read-only `rev-parse --absolute-git-dir`. */
+async function makeGitRepository(t) {
+  const root = await makeFixture(t, {})
+  execFileSync('git', ['init', '-q', root], { stdio: 'ignore' })
+  return root
+}
+
+test('a proven in-progress rebase/merge confirms under data.git.restore', async (t) => {
+  const root = await makeGitRepository(t)
+  // Real markers byte-identical in shape to Git's own state files: `rebase-merge` is a
+  // directory, `MERGE_HEAD` a file. Nothing is executed against this repository.
+  await fs.mkdir(path.join(root, '.git', 'rebase-merge'), { recursive: true })
+  await fs.writeFile(path.join(root, '.git', 'MERGE_HEAD'), `${'0'.repeat(40)}\n`)
+  const evidence = await collectEvidence(analysisWith([
+    abortOp(hostContext(root), 'rebase-abort'),
+  ]), { isProtectedPath: () => false })
+  assert.equal(evidence.inventory.kind, 'exact')
+  assert.ok(evidence.inventory.unknown.includes('git-abort-in-progress'))
+  assert.deepEqual(evidence.issues, [])
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.git.restore')
+  assert.notEqual(decision.ruleId, 'execution.check-failed')
+  // The displayable range rides on the existing known-scope channel; the reason token
+  // stays on the inventory's unknown channel.
+  assert.ok(decision.scope.knownScope.some((value) => value.includes('rebase-merge')))
+  assert.ok(decision.scope.unknown.includes('git-abort-in-progress'))
+})
+
+test('a sequencer marker alone proves in-progress state (documented probe argv)', async (t) => {
+  const root = await makeFixture(t, { dirs: ['.git'], files: ['.git/CHERRY_PICK_HEAD'] })
+  const gitDir = path.join(root, '.git')
+  const gitRun = async (argv) => {
+    assert.deepEqual(argv, ['-C', root, 'rev-parse', '--absolute-git-dir'])
+    return { stdout: `${gitDir}\n` }
+  }
+  const evidence = await collectEvidence(analysisWith([
+    abortOp(hostContext(root), 'cherry-pick-abort'),
+  ]), { isProtectedPath: () => false, gitRun })
+  assert.ok(evidence.inventory.unknown.includes('git-abort-in-progress'))
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.git.restore')
+  assert.ok(decision.scope.knownScope.some((value) => value.includes('CHERRY_PICK_HEAD')))
+})
+
+test('an abort with no in-progress state is allowed and records nothing', async (t) => {
+  const root = await makeGitRepository(t)
+  const evidence = await collectEvidence(analysisWith([
+    abortOp(hostContext(root), 'merge-abort'),
+  ]), { isProtectedPath: () => false })
+  assert.equal(evidence.inventory.kind, 'exact')
+  assert.deepEqual(evidence.inventory.unknown, [])
+  assert.deepEqual(evidence.issues, [])
+  // No in-progress state proven == nothing to discard: the git-evidence exception allows.
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'allow')
+  assert.equal(decision.ruleId, 'data.git.restore')
+})
+
+test('a failed abort probe stays a deliberate unknown, never check-failed', async (t) => {
+  const root = await makeFixture(t, {})
+  const gitRun = async () => { throw Object.assign(new Error('git unavailable'), { code: 127 }) }
+  const evidence = await collectEvidence(analysisWith([
+    abortOp(hostContext(root), 'revert-abort'),
+  ]), { isProtectedPath: () => false, gitRun })
+  // D1: the probe failure is a deliberate unknown, so no stage issue and no unreliable
+  // inventory — it must never surface as execution.check-failed.
+  assert.equal(evidence.inventory.kind, 'exact')
+  assert.ok(evidence.inventory.unknown.includes('git-abort-unprobed'))
+  assert.deepEqual(evidence.issues, [])
+  const decision = decide(evidence, {})
+  assert.notEqual(decision.ruleId, 'execution.check-failed')
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.git.restore')
+})
+
+test('an abort with an unresolved cwd is unprobed, not a check failure', async () => {
+  const evidence = await collectEvidence(analysisWith([
+    abortOp({ domain: 'host', platform: process.platform }, 'am-abort'),
+  ]), { isProtectedPath: () => false })
+  assert.equal(evidence.inventory.kind, 'exact')
+  assert.ok(evidence.inventory.unknown.includes('git-abort-unprobed'))
+  assert.deepEqual(evidence.issues, [])
+  const decision = decide(evidence, {})
+  assert.notEqual(decision.ruleId, 'execution.check-failed')
+  assert.equal(decision.kind, 'confirm')
+})
+
+test('a non-host abort stays domain-unprobed and never spawns git', async () => {
+  const gitRun = async () => { throw new Error('no probe expected outside the host domain') }
+  const evidence = await collectEvidence(analysisWith([
+    abortOp({ domain: 'wsl', platform: 'linux' }, 'rebase-abort'),
+  ]), { isProtectedPath: () => false, gitRun })
+  // D2: the host-only probe is skipped; the inventory records the domain boundary.
+  assert.ok(evidence.inventory.unknown.includes('domain-unprobed'))
+  assert.deepEqual(evidence.issues, [])
+  const decision = decide(evidence, {})
+  assert.notEqual(decision.ruleId, 'execution.check-failed')
 })

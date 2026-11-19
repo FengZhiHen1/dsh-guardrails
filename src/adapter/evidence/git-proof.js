@@ -2,8 +2,10 @@
 //
 // Boundary: every probe is a dry run (`clean -n -d`, `status --porcelain`, and the
 // reusable worktree decision module, which itself probes `worktree list`,
-// `rev-parse --show-toplevel`, `symbolic-ref -q HEAD` and `status`). No probe writes to
-// a repository, runs hooks or filters, or prints repository content.
+// `rev-parse --show-toplevel`, `symbolic-ref -q HEAD` and `status`) or a metadata-only
+// existence check (`rev-parse --absolute-git-dir` plus lstat of in-progress marker
+// entries for `--abort`). No probe writes to a repository, runs hooks or filters, or
+// prints repository content.
 //
 // Honesty rules: output is bounded; ONE unparseable line makes the WHOLE probe unknown
 // (never a partial count); a probe that failed, timed out or was cancelled is unknown and
@@ -11,6 +13,8 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import fs from 'node:fs/promises'
+import path from 'node:path'
 import { gitWorktreeRemoveDecision } from '../git-evidence.js'
 
 const runFile = promisify(execFile)
@@ -133,4 +137,62 @@ export async function proveWorktreeRemove({ cwd, path: targetPath, deadlineAt, r
   // The decision module bounds every probe with deadlineAt and its own sanitized
   // environment; a past deadline yields `unknown` without spawning git.
   return gitWorktreeRemoveDecision({ cwd, path: targetPath, deadlineAt, run })
+}
+
+/**
+ * In-progress state markers for `git <subcommand> --abort` (DSR-031 决定 8): the Git
+ * directory entries that PROVE an operation is in progress and whose abort discards
+ * uncommitted working-tree changes. `rebase-merge`/`rebase-apply` are directories; the
+ * three `*_HEAD` files are sequencer state files.
+ */
+const ABORT_STATE_MARKERS = Object.freeze([
+  Object.freeze({ name: 'rebase-merge', kind: 'directory' }),
+  Object.freeze({ name: 'rebase-apply', kind: 'directory' }),
+  Object.freeze({ name: 'MERGE_HEAD', kind: 'file' }),
+  Object.freeze({ name: 'CHERRY_PICK_HEAD', kind: 'file' }),
+  Object.freeze({ name: 'REVERT_HEAD', kind: 'file' }),
+])
+
+/**
+ * Prove whether an abortable Git operation is in progress in `cwd`.
+ *
+ * Read-only: one `git -C <cwd> rev-parse --absolute-git-dir` and lstat-only existence
+ * checks of the marker entries under that directory. Nothing is written, no repository
+ * content is printed, and the probe never runs the analyzed command.
+ *
+ * Result shapes (the caller must map `state: 'unknown'` to a deliberate unknown, never
+ * to a check failure — D1):
+ * - `{ state: 'known', inProgress: true, markers, gitDir }`  proven in-progress state;
+ * - `{ state: 'known', inProgress: false, gitDir }`          proven absent;
+ * - `{ state: 'unknown', reason }`                           probe could not conclude.
+ *
+ * `consume` (shared evidence budget) is optional; each marker lstat consumes one unit.
+ * The shared deadline bounds the git call AND the marker checks; cancellation rethrows.
+ */
+export async function proveAbortState({ cwd, deadlineAt, signal, run, consume } = {}) {
+  if (typeof cwd !== 'string' || cwd === '') return { state: 'unknown', reason: 'git-cwd-unresolved' }
+  if (signal?.aborted) throw signal.reason ?? new Error('guardrails: evidence cancelled')
+  const directory = await probe(['-C', cwd, 'rev-parse', '--absolute-git-dir'], { deadlineAt, signal, run })
+  if (!directory.ok) return { state: 'unknown', reason: directory.deadline ? 'deadline' : 'git-dir-unresolved' }
+  const gitDir = String(directory.stdout).split(/\r?\n/).map((line) => line.trim()).find((line) => line !== '')
+  // A NUL or replacement character cannot address a real directory reliably: stay unknown
+  // instead of probing a mangled path.
+  if (!gitDir || gitDir.includes('\u0000') || gitDir.includes('\uFFFD')) {
+    return { state: 'unknown', reason: 'git-dir-unresolved' }
+  }
+  const markers = []
+  for (const marker of ABORT_STATE_MARKERS) {
+    if (signal?.aborted) throw signal.reason ?? new Error('guardrails: evidence cancelled')
+    if (Number.isFinite(deadlineAt) && Date.now() > deadlineAt) return { state: 'unknown', reason: 'deadline' }
+    if (typeof consume === 'function' && !consume()) return { state: 'unknown', reason: 'budget' }
+    let info
+    try {
+      info = await fs.lstat(path.join(gitDir, marker.name))
+    } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') continue // proven absent
+      return { state: 'unknown', reason: 'abort-state-unreadable' }
+    }
+    if (marker.kind === 'directory' ? info.isDirectory() : info.isFile()) markers.push(marker.name)
+  }
+  return { state: 'known', inProgress: markers.length > 0, markers, gitDir }
 }

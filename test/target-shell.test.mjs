@@ -230,6 +230,83 @@ test('PowerShell invoked scriptblock scope is condition "possible"', async (t) =
   assert.equal(fact.opts.condition, 'possible');
 });
 
+// --- PowerShell pipeline provenance (DSR-031 decision 9) -------------------------
+
+test('PowerShell pipeline position and adjacent upstream text ride on each command fact', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('Get-ChildItem . | Remove-Item -Force', { language: 'powershell' }), env);
+  const source = commandNamed(calls, 'Get-ChildItem');
+  const remove = commandNamed(calls, 'Remove-Item');
+  assert.ok(source && remove, `expected both facts, got ${JSON.stringify(calls.command)}`);
+  assert.deepEqual(source.opts.pipeline, { index: 0, source: null });
+  assert.equal(remove.opts.pipeline.index, 1);
+  assert.match(remove.opts.pipeline.source, /Get-ChildItem/);
+  assert.deepEqual(gapKinds(calls), []);
+});
+
+test('PowerShell pipeline source is the ADJACENT upstream element, not the whole pipeline', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('Get-ChildItem | Where-Object { $_.Length -gt 0 } | Remove-Item', { language: 'powershell' }), env);
+  const remove = commandNamed(calls, 'Remove-Item');
+  assert.ok(remove);
+  assert.equal(remove.opts.pipeline.index, 2);
+  // The scriptblock argument is not literal, so it is omitted rather than guessed;
+  // the source still names the adjacent element (Where-Object), never Get-ChildItem.
+  assert.equal(remove.opts.pipeline.source, 'Where-Object');
+  assert.ok(!remove.opts.pipeline.source.includes('Get-ChildItem'), 'must not describe the whole pipeline');
+});
+
+test('PowerShell single command keeps pipeline index 0 and no upstream source', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('Remove-Item x', { language: 'powershell' }), env);
+  const fact = commandNamed(calls, 'Remove-Item');
+  assert.ok(fact);
+  assert.deepEqual(fact.opts.pipeline, { index: 0, source: null });
+});
+
+test('non-PowerShell command facts carry no pipeline field', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('rm -rf /srv/x | cat'), env);
+  const fact = commandNamed(calls, 'rm');
+  assert.ok(fact);
+  assert.equal(fact.opts.pipeline, undefined, 'pipeline provenance is PowerShell-only');
+});
+
+test('pipeline metadata leaves gated-scope conditions unchanged', async (t) => {
+  // Mirrors the `if` assertion above with a pipeline in the gated body.
+  const gated = harness(t);
+  await gated.analyzer.analyze(shellUnit('if ($true) { Get-ChildItem . | Remove-Item C:/x }', { language: 'powershell' }), gated.env);
+  const conditional = commandNamed(gated.calls, 'Remove-Item');
+  assert.equal(conditional.opts.condition, 'unknown');
+  assert.equal(conditional.opts.pipeline.index, 1);
+  assert.equal(conditional.opts.pipeline.source, 'Get-ChildItem .');
+  assert.ok(gapKinds(gated.calls).includes('control-flow'));
+
+  // Mirrors the invoked-scriptblock assertion above with a pipeline in the block.
+  const invoked = harness(t);
+  await invoked.analyzer.analyze(shellUnit('& { Get-ChildItem . | Remove-Item C:/x }', { language: 'powershell' }), invoked.env);
+  const block = commandNamed(invoked.calls, 'Remove-Item');
+  assert.equal(block.opts.condition, 'possible');
+  assert.equal(block.opts.pipeline.index, 1);
+  assert.equal(block.opts.pipeline.source, 'Get-ChildItem .');
+
+  // A pipeline inside a string subexpression stays "possible" too.
+  const sub = harness(t);
+  await sub.analyzer.analyze(shellUnit('Write-Output "$(Get-ChildItem . | Remove-Item C:/x)"', { language: 'powershell' }), sub.env);
+  const nested = commandNamed(sub.calls, 'Remove-Item');
+  assert.equal(nested.opts.condition, 'possible');
+  assert.equal(nested.opts.pipeline.index, 1);
+  assert.equal(nested.opts.pipeline.source, 'Get-ChildItem .');
+});
+
+test('literal middle segment proves adjacency, not the first element', async (t) => {
+  const { analyzer, calls, env } = harness(t);
+  await analyzer.analyze(shellUnit('Get-ChildItem . | Select-Object Name | Remove-Item', { language: 'powershell' }), env);
+  const remove = commandNamed(calls, 'Remove-Item');
+  assert.equal(remove.opts.pipeline.index, 2);
+  assert.equal(remove.opts.pipeline.source, 'Select-Object Name');
+});
+
 test('literal cd into a verified directory refines context.cwd for later commands', async (t) => {
   const { analyzer, calls, env } = harness(t);
   const dir = await tmpDir(t);

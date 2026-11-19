@@ -136,6 +136,9 @@ export function createExecutionAnalyzer({ limits: overrides = {}, shell, program
   const programAnalyzer = program ?? createProgramAnalyzer({ limits })
   const providers = new Map([
     ['bash', shellAnalyzer], ['posix', shellAnalyzer], ['powershell', shellAnalyzer],
+    // DSR-031 决定 2: a `cmd`-dialect child unit (e.g. `ssh host cmd /c …`) reuses the
+    // bounded cmd lexer. It depends only on `unit.source.text` and `unit.context`.
+    ['cmd', { analyze: (unit, env) => analyzeCmdInline(unit, env) }],
     ['python', programAnalyzer], ['javascript', programAnalyzer], ['typescript', programAnalyzer],
   ])
 

@@ -39,6 +39,33 @@ for (const dialect of ['powershell', 'bash']) {
   });
 }
 
+test('PowerShell command IR carries pipeline position and adjacent literal upstream text', async t => {
+  const parser = createShellParsers();
+  t.after(() => parser.dispose());
+  const result = await parser.parse('powershell', 'Get-ChildItem . | Where-Object { $_.Length -gt 0 } | Remove-Item');
+  const [source, filter, remove] = result.commands;
+  assert.equal(source.pipelineIndex, 0);
+  assert.equal(source.pipelineSource, undefined, 'a first pipeline element carries no source key');
+  assert.equal(filter.pipelineIndex, 1);
+  assert.equal(filter.pipelineSource, 'Get-ChildItem .');
+  assert.equal(remove.pipelineIndex, 2);
+  assert.equal(remove.pipelineSource, 'Where-Object');
+
+  const single = await parser.parse('powershell', 'Remove-Item x');
+  assert.deepEqual(single.commands.map((command) => [command.pipelineIndex, command.pipelineSource]), [[0, undefined]]);
+
+  // Non-literal words are omitted from the upstream text, never fabricated.
+  const dynamic = await parser.parse('powershell', 'Get-ChildItem -Path $p | Remove-Item');
+  assert.equal(dynamic.commands[1].pipelineIndex, 1);
+  assert.equal(dynamic.commands[1].pipelineSource, 'Get-ChildItem -Path');
+
+  // An expression element has no provable command text.
+  const expression = await parser.parse('powershell', '(Get-ChildItem .).Count | Remove-Item');
+  const exprRemove = expression.commands.find((command) => command.name === 'Remove-Item');
+  assert.equal(exprRemove.pipelineIndex, 1);
+  assert.equal(exprRemove.pipelineSource, null);
+});
+
 test('PowerShell persistent helper handles concurrent callers without executing stdin', async t => {
   const parser = createShellParsers();
   t.after(() => parser.dispose());

@@ -76,6 +76,41 @@ function Add-LiteralArguments($Node, $Arguments) {
     } else { $Arguments.Add((Get-Literal $Node)) }
 }
 
+# Bounded display text for ONE upstream PipelineElements entry (DSR-031 decision 9).
+# Only provable pieces are rendered: the literal command name plus literal arguments
+# (parameter names are literal by the AST; a parameter value is rendered only when it
+# resolves to a literal, and a `$true`/`$false` value keeps the `-Name:value` token
+# shape used for arguments). A non-command element, a dynamic command name, or an
+# argument that cannot be proven are omitted rather than guessed. The result is a
+# human scope label, never a path or a predicate; it is bounded like Format-Extent.
+function Format-PipelineSource($Element) {
+    if ($null -eq $Element -or -not ($Element -is [System.Management.Automation.Language.CommandAst])) { return $null }
+    $elements = @($Element.CommandElements)
+    if ($elements.Count -eq 0) { return $null }
+    $name = Get-Literal $elements[0]
+    if ($null -eq $name) { return $null }
+    $parts = [Collections.Generic.List[string]]::new()
+    $parts.Add([string]$name)
+    for ($i = 1; $i -lt $elements.Count; $i++) {
+        $element = $elements[$i]
+        if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
+            $token = '-' + $element.ParameterName
+            $literal = if ($null -ne $element.Argument) { Get-Literal $element.Argument } else { $null }
+            if ($null -eq $literal) { $parts.Add($token) }
+            elseif ($literal -in @('$true', '$false')) { $parts.Add($token + ':' + $literal) }
+            else { $parts.Add($token); $parts.Add([string]$literal) }
+        } else {
+            $literal = Get-Literal $element
+            if ($null -ne $literal) { $parts.Add([string]$literal) }
+        }
+    }
+    $text = ($parts.ToArray() -join ' ')
+    $text = ($text -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrEmpty($text)) { return $null }
+    if ($text.Length -gt 120) { $text = $text.Substring(0, 120) + '...' }
+    return $text
+}
+
 while ($null -ne ($line = [Console]::ReadLine())) {
     try {
         $request = ConvertFrom-Json -InputObject $line
@@ -119,6 +154,9 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         $definitions = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
         $functionNames = @($definitions | ForEach-Object { $_.Name })
         $nodes = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -or ($n -is [System.Management.Automation.Language.CommandExpressionAst] -and $n.Redirections.Count -gt 0) }, $true)
+        # pipeline -> (element -> index) map, built once per PipelineAst. This keeps
+        # pipelineIndex lookup linear overall instead of rescanning each pipeline.
+        $pipelinePositions = @{}
         foreach ($node in $nodes) {
             $parent = $node.Parent
             $defined = $false
@@ -166,7 +204,30 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                     $redirects.Add(@{ operator = $(if ($redirect.Append) { '>>' } else { '>' }); target = (Get-Literal $redirect.Location) })
                 } else { $redirects.Add(@{ operator = 'merge'; target = [string]$redirect.ToStream }) }
             }
-            $commands.Add(@{ name = $name; args = @($arguments.ToArray()); redirects = @($redirects.ToArray()); scope = $scope })
+            # Pipeline position (DSR-031 decision 9): the 0-based slot of this node in
+            # its nearest PipelineAst plus the bounded text of the immediately
+            # preceding element. `pipelineIndex` is always present (a single-element
+            # pipeline is 0); `pipelineSource` exists only for index > 0 and is $null
+            # when that upstream element is an expression or otherwise not provable.
+            $pipelineIndex = 0
+            $pipelineSource = $null
+            $pipeline = $node.Parent
+            while ($null -ne $pipeline -and -not ($pipeline -is [System.Management.Automation.Language.PipelineAst])) { $pipeline = $pipeline.Parent }
+            if ($null -ne $pipeline) {
+                $positions = $pipelinePositions[$pipeline]
+                if ($null -eq $positions) {
+                    $positions = @{}
+                    for ($position = 0; $position -lt $pipeline.PipelineElements.Count; $position++) {
+                        $positions[$pipeline.PipelineElements[$position]] = $position
+                    }
+                    $pipelinePositions[$pipeline] = $positions
+                }
+                if ($positions.ContainsKey($node)) { $pipelineIndex = [int]$positions[$node] }
+                if ($pipelineIndex -gt 0) { $pipelineSource = Format-PipelineSource $pipeline.PipelineElements[$pipelineIndex - 1] }
+            }
+            $command = @{ name = $name; args = @($arguments.ToArray()); redirects = @($redirects.ToArray()); scope = $scope; pipelineIndex = $pipelineIndex }
+            if ($pipelineIndex -gt 0) { $command['pipelineSource'] = $pipelineSource }
+            $commands.Add($command)
         }
         # Non-command expression evaluation can invoke methods and constructors. Grade by
         # capability: property/index access is not in this scan at all; pure string/format

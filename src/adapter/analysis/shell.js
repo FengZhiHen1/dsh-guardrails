@@ -33,6 +33,15 @@
 //       patterns: boolean[],             // parallel: value is a glob-pattern word
 //       literalOperands?: boolean[],     // POSIX only: quoted literal value starting with '-'
 //       dataArgs: boolean[],             // parallel: argument is a data position (R-19)
+//       pipeline?: { index: number, source: string|null },
+//                                        // PowerShell only (DSR-031 decision 9). index is the
+//                                        // 0-based slot of this command in its PipelineAst;
+//                                        // source is the bounded, literal-only text of the
+//                                        // IMMEDIATELY PRECEDING pipeline element, or null
+//                                        // when that element is not a provable command. It is
+//                                        // an adjacent-element scope label, not the whole
+//                                        // pipeline and not a deletion verdict; absent when
+//                                        // the parser returned no pipeline information.
 //     }
 //   operation(action, target, options) — file redirection effect.
 //     action: 'truncate-content' | 'write-content' | 'read-content'
@@ -84,6 +93,18 @@ const DEFAULT_LIMITS = Object.freeze({ maxCommands: 4096, maxChildren: 64 });
 const DEFAULT_PARSER_LIMITS = Object.freeze({ timeoutMs: 5000, maxInputBytes: 262144, maxOutputBytes: 8388608, maxConcurrent: 2, maxQueue: 16 });
 const PARSER_LIMIT_KEYS = ['timeoutMs', 'maxInputBytes', 'maxOutputBytes', 'maxConcurrent', 'maxQueue', 'pwshPath', 'spawnProcess'];
 const SUPPORTED_LANGUAGES = new Set(['bash', 'posix', 'powershell']);
+
+/** PowerShell pipeline provenance for one parsed command (DSR-031 decision 9).
+ * `index` is the command's 0-based slot in its PipelineAst; `source` is the text
+ * of the IMMEDIATELY PRECEDING element only, as produced by the parser (literal
+ * words only, bounded, no guessed dynamic content). Returns undefined when the
+ * parser supplied no pipeline information (non-PowerShell dialect, injected
+ * pool, or an older helper), so payload semantics stay unchanged there. */
+function pipelineOf(cmd) {
+  if (!Number.isSafeInteger(cmd?.pipelineIndex) || cmd.pipelineIndex < 0) return undefined;
+  const source = typeof cmd.pipelineSource === 'string' && cmd.pipelineSource.length > 0 ? cmd.pipelineSource : null;
+  return { index: cmd.pipelineIndex, source };
+}
 
 /**
  * Create a shell analyzer bound to one official-parser pool.
@@ -267,6 +288,11 @@ export function createShellAnalyzer(options = {}) {
       if (!powershell) {
         const literalOperands = computeLiteralOperands(cmd.words);
         if (literalOperands) payload.literalOperands = literalOperands;
+      } else {
+        // Adjacent upstream provenance stays a fact, not a decision: this module
+        // never calls env.candidate and never removes a command based on it.
+        const pipeline = pipelineOf(cmd);
+        if (pipeline) payload.pipeline = pipeline;
       }
       // Raw heredoc bodies travel with the command fact: the shared catalog
       // decides which receiver consumes them (shell interpreters, ssh) and

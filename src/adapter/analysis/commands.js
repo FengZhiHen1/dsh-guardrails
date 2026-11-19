@@ -67,7 +67,15 @@ function emitTargets(action, operands, options, env) {
   const known = normalized.filter(({ value, index }) => typeof value === 'string' && !patterns[index])
   const usable = known.filter(({ value }) => api.isAbsolute(value) || api.isAbsolute(context.cwd ?? ''))
   if (recursive === true && ['delete', 'move-source'].includes(action)) {
-    for (const { value } of usable) env.operation(action, { kind: 'subtree', root: value }, options)
+    if (options.exactRecursive === true) {
+      // Archive tools remove exactly the members they archived and recurse into
+      // directory members by default. Keep the member path as an EXACT target and
+      // let the evidence layer split by the real entry type (a file counts one
+      // entry, a directory is walked because recursive === true).
+      for (const { value } of usable) env.operation(action, { kind: 'exact', paths: [value] }, options)
+    } else {
+      for (const { value } of usable) env.operation(action, { kind: 'subtree', root: value }, options)
+    }
   } else if (usable.length) {
     env.operation(action, { kind: 'exact', paths: usable.map(({ value }) => value) }, options)
   }
@@ -214,6 +222,23 @@ function psFileCommand(name, args, options, env) {
   if (unmodeled) {
     env.gap('command-options', options.origin)
     if (['delete', 'move-source'].includes(action)) env.candidate('unverified-effect', 'File operation options could not be interpreted', undefined, options.origin)
+  }
+  // DSR-031 决定 9: a PowerShell deletion with no explicit path consumes the
+  // pipeline input (`Get-ChildItem … | Remove-Item`). Only the deletion intent and
+  // the ADJACENT upstream element are proven, so the target stays unknown with a
+  // non-empty known scope — never a fabricated path. An empty knownScope would
+  // deny an unscoped unknown target; a preview (`-WhatIf`) removes nothing (D3).
+  if (action === 'delete' && paths.length === 0 && options.pipeline?.index > 0) {
+    if (!preview) {
+      const source = typeof options.pipeline.source === 'string' && options.pipeline.source.length > 0
+        ? options.pipeline.source : null
+      env.operation('delete', {
+        kind: 'unknown',
+        reason: 'pipeline-input',
+        knownScope: [source ? `pipeline input of \`${source}\`` : 'pipeline input (adjacent upstream element is not provable)'],
+      }, { ...options, recursive })
+    }
+    return
   }
   emitTargets(action, paths, { ...options, patterns, recursive, preview }, env)
   if (destination) {
@@ -469,6 +494,21 @@ const RSYNC_BOOL_FLAGS = new Set(['--archive', '--recursive', '--relative', '--v
 const RSYNC_DELETE_FLAGS = new Set(['--delete', '--delete-before', '--delete-during', '--delete-delay',
   '--delete-after', '--delete-excluded', '--delete-missing-args'])
 
+// DSR-031 第二轮 A: `host:path` / `user@host:path` / `[ipv6]:path` is a remote
+// target; a Windows drive path (`C:\...`, `C:/...`) stays local.
+function rsyncRemoteTarget(value) {
+  if (typeof value !== 'string') return false
+  if (/^[A-Za-z]:[\\/]/u.test(value)) return false
+  if (value.startsWith('[')) {
+    const close = value.indexOf(']')
+    return close > 1 && value[close + 1] === ':'
+  }
+  const colon = value.indexOf(':')
+  if (colon <= 0) return false
+  const host = value.slice(0, colon)
+  return !host.includes('/') && !host.includes('\\')
+}
+
 /** `rsync --delete*` models the destination tree (F-05); forms without a delete
  * flag keep the existing coverage-gap allowance, and `-n`/`--dry-run` is a proven preview.
  * An unresolvable destination (variable, expansion, substitution) is the incident
@@ -515,12 +555,39 @@ function rsyncCommand(args, options, env) {
     positionals.push({ value, index: i })
   }
   if (unmodeled) { env.gap('command-options', options.origin); return }
+  // Upload direction: a remote destination means the literal local sources are
+  // read (DSR-031 決定 6 / 第二轮 A). Independent of --delete, so the read fact
+  // can coexist with the deletion branch below; that branch is unchanged.
+  if (positionals.length >= 2) {
+    const target = positionals[positionals.length - 1]
+    if (typeof target.value === 'string' && rsyncRemoteTarget(target.value)) {
+      for (const source of positionals.slice(0, -1)) {
+        if (typeof source.value !== 'string' || source.value === '-') continue
+        if (rsyncRemoteTarget(source.value)) continue
+        env.operation('read-content', { kind: 'exact', paths: [source.value] }, options)
+      }
+    }
+  }
   if (!deleteMode) { env.gap('unmodeled-command', options.origin); return }
   if (positionals.length < 2) { env.gap('command-options', options.origin); return }
   // The delete scope is the LAST positional (the destination copy); dynamic
   // sources do not affect it.
   const destination = positionals[positionals.length - 1]
   const sources = positionals.slice(0, -1)
+  // DSR-031 第二轮 F / D2: a remote destination (`host:path`) is not a host path.
+  // The deletion is still proven on the command shape, but the target stays
+  // unknown with a non-empty known scope instead of a fabricated local subtree.
+  if (typeof destination.value === 'string' && rsyncRemoteTarget(destination.value)) {
+    const sourceText = sources.some((source) => source.value === null)
+      ? '(unresolved source)'
+      : sources.map((source) => source.value).join(' ')
+    env.operation('delete', {
+      kind: 'unknown',
+      reason: 'rsync-remote-delete-target',
+      knownScope: [`rsync --delete ${sourceText} -> ${destination.value}`],
+    }, { ...options, recursive: true, preview, details: { rsyncDelete: true } })
+    return
+  }
   if (destination.value === null) {
     const sourceText = sources.some((source) => source.value === null)
       ? '(unresolved source)'
@@ -598,23 +665,29 @@ function wrapperUnwrap(name, args, options, env) {
 
 const CMD_SWITCH = /^[-/](?:c|k|d|a|u|q|v|x|t|e|r|s)(?::\S*)?$/iu
 
-/** `cmd /c <text>` (F-09..F-11 entry from the shell layer): the payload is joined
- * back into one cmd command line and routed through the bounded cmd lexer. */
-function cmdCommand(args, options, env) {
+/** Extract the payload words of a `cmd /c <text>` invocation, or null when the
+ * switches cannot be proven (`/k`, an unknown switch, a non-literal token, or no
+ * payload). Shared by the local `cmd` entry and the `ssh host cmd /c …` channel. */
+function cmdPayload(args) {
   let index = 0
   while (index < args.length) {
     const value = args[index]
-    if (typeof value !== 'string') { env.gap('cmd-inline', options.origin); return }
+    if (typeof value !== 'string') return null
     if (!/[-/]/u.test(value.charAt(0))) break
-    if (!CMD_SWITCH.test(value)) { env.gap('cmd-inline', options.origin); return }
-    if (value.toLowerCase() === '/k' || value.toLowerCase() === '-k') { env.gap('cmd-inline', options.origin); return }
+    if (!CMD_SWITCH.test(value)) return null
+    if (value.toLowerCase() === '/k' || value.toLowerCase() === '-k') return null
     index += 1
   }
   const payload = args.slice(index)
-  if (payload.length === 0 || payload.some((value) => typeof value !== 'string')) {
-    env.gap('cmd-inline', options.origin)
-    return
-  }
+  if (payload.length === 0 || payload.some((value) => typeof value !== 'string')) return null
+  return payload
+}
+
+/** `cmd /c <text>` (F-09..F-11 entry from the shell layer): the payload is joined
+ * back into one cmd command line and routed through the bounded cmd lexer. */
+function cmdCommand(args, options, env) {
+  const payload = cmdPayload(args)
+  if (payload === null) { env.gap('cmd-inline', options.origin); return }
   resolveCmdText(payload.join(' '), { origin: options.origin, condition: options.condition }, env)
 }
 
@@ -719,10 +792,18 @@ const SSH_VALUE_FLAGS = new Set(['-b', '-c', '-D', '-E', '-e', '-F', '-I', '-i',
 const SSH_BOOLEAN_FLAGS = new Set(['-4', '-6', '-A', '-a', '-B', '-C', '-f', '-G', '-g', '-K', '-k', '-M', '-N', '-n', '-q', '-s', '-T', '-t', '-v', '-x', '-X', '-Y', '-y'])
 const SSH_VALUE_LETTERS = new Set([...'bDEeFIiJLlmOopQRSwWc'])
 
+/** Remote receivers whose payload is another interpreter dialect (DSR-031 决定 2).
+ * Both spellings are literal receiver identities on the remote side, never an
+ * inference from the local platform. */
+const SSH_POWERSHELL_RECEIVERS = new Set(['powershell', 'pwsh', 'powershell.exe', 'pwsh.exe'])
+const SSH_CMD_RECEIVERS = new Set(['cmd', 'cmd.exe'])
+
 /** `ssh [options] <host> [command…]`: everything after the destination is one
  * POSIX shell command line executed in the `ssh` domain; a heredoc fed to a
- * POSIX shell receiver is that shell's stdin script. A host without a command
- * and every unmodeled option stay coverage gaps (放行). */
+ * POSIX shell receiver is that shell's stdin script, and a heredoc fed to a bare
+ * `ssh host` is that remote shell's stdin script. A PowerShell/cmd receiver is
+ * analyzed as its own dialect. A host without a command and every unmodeled
+ * option stay coverage gaps (放行). */
 function sshCommand(args, options, env) {
   let index = 0
   while (index < args.length) {
@@ -757,8 +838,32 @@ function sshCommand(args, options, env) {
   if (typeof destination !== 'string') { env.gap('unmodeled-command', options.origin); return }
   const rest = args.slice(index + 1)
   const receiver = rest[0]
+  const loweredReceiver = typeof receiver === 'string' ? receiver.toLowerCase() : receiver
   if (typeof receiver === 'string' && HEREDOC_SHELL_RECEIVERS.has(receiver) &&
     emitHeredocShellChild(receiver, rest.slice(1), options, env, { domain: 'ssh', platform: 'linux' })) return
+  // DSR-031 决定 2: a remote PowerShell receiver analyzes the payload as PowerShell.
+  // The sub-unit carries ONLY the ssh domain: `platform: 'win32'` would make `rm`
+  // take the Windows alias and path semantics on a remote that may run pwsh on Linux,
+  // so a deletion stays `unknown` + knownScope under `data.delete.dynamic`.
+  if (SSH_POWERSHELL_RECEIVERS.has(loweredReceiver)) {
+    wrapper('powershell', rest.slice(1), { ...options, context: { domain: 'ssh' } }, env)
+    return
+  }
+  if (SSH_CMD_RECEIVERS.has(loweredReceiver)) {
+    const payload = cmdPayload(rest.slice(1))
+    if (payload === null) { env.gap('cmd-inline', options.origin); return }
+    env.child({
+      source: { kind: 'inline', text: payload.join(' ') },
+      language: 'cmd',
+      context: { domain: 'ssh' },
+      condition: options.condition, origin: options.origin,
+    })
+    return
+  }
+  // DSR-031 决定 1: `ssh host <<EOF` — a bare destination plus a heredoc is that
+  // remote shell's stdin script (no remote command is given, so posix is the
+  // receiver language). Without either, the host stays a coverage gap (放行).
+  if (rest.length === 0 && emitHeredocShellChild('posix', [], options, env, { domain: 'ssh', platform: 'linux' })) return
   if (rest.length === 0) { env.gap('unmodeled-command', options.origin); return }
   const literals = rest.filter((value) => typeof value === 'string')
   if (literals.length === 0) { env.gap('unmodeled-command', options.origin); return }
@@ -863,27 +968,52 @@ const TAR_BOOLEAN_LONGS = new Set(['--create', '--gzip', '--verbose', '--list', 
 /** `tar … --remove-files`: archiving deletes the named source members afterwards.
  * Directory members (trailing separator) delete recursively; a member list that
  * cannot be fully interpreted (unknown option, dynamic operand) keeps the
- * visible members as the known scope. Without `--remove-files` the call stays
- * the existing unmodeled-command gap. */
+ * visible members as the known scope. `-C/--directory` relocates the member
+ * resolution base cumulatively (DSR-031 决定 4): a member is resolved against the
+ * directory in force when it appears; an unprovable `-C` value (dynamic or a
+ * relative value with no provable cwd) leaves that member's target unknown with
+ * a non-empty known scope. Without `--remove-files` the call stays the existing
+ * unmodeled-command gap. */
 function tarCommand(args, options, env) {
+  const api = options.context?.platform === 'win32' ? path.win32 : path.posix
   let removeFiles = false
   let archiveNamed = false
   let filesFrom = false
   let unmodeled = false
+  let sawDirectory = false
+  let base
   const positionals = []
+  const member = (value, index) => {
+    const entry = { value, index }
+    if (sawDirectory) entry.base = base
+    positionals.push(entry)
+  }
+  const applyDirectory = (value) => {
+    if (!sawDirectory) {
+      sawDirectory = true
+      base = typeof options.context?.cwd === 'string' && api.isAbsolute(options.context.cwd)
+        ? api.normalize(options.context.cwd) : null
+    }
+    if (typeof value !== 'string' || value === '') { base = null; return }
+    if (api.isAbsolute(value)) { base = api.normalize(value); return }
+    base = base === null ? null : api.normalize(api.resolve(base, value))
+  }
   let i = 0
   while (i < args.length) {
     const value = args[i]
-    if (typeof value !== 'string') { positionals.push({ value: null, index: i }); i += 1; continue }
+    if (typeof value !== 'string') { member(null, i); i += 1; continue }
     if (value === '--') {
-      for (let j = i + 1; j < args.length; j++) positionals.push({ value: args[j], index: j })
+      for (let j = i + 1; j < args.length; j++) member(args[j], j)
       break
     }
     if (value.startsWith('--')) {
       const eq = value.indexOf('=')
       const name = eq < 0 ? value : value.slice(0, eq)
       if (name === '--remove-files') removeFiles = true
-      else if (name === '--file') {
+      else if (name === '--directory') {
+        applyDirectory(eq < 0 ? args[i + 1] : value.slice(eq + 1))
+        if (eq < 0) i += 1
+      } else if (name === '--file') {
         archiveNamed = true
         if (eq < 0) i += 1 // the archive path is the next argument
       } else if (name === '--files-from' || name === '--exclude-from') {
@@ -896,11 +1026,18 @@ function tarCommand(args, options, env) {
     // GNU old-style: `tar cf out.tgz src/` — a leading all-letters word is a cluster.
     const isCluster = (value.startsWith('-') && value !== '-' && !value.startsWith('--')) ||
       (i === 0 && /^[a-zA-Z]+$/u.test(value))
-    if (!isCluster) { positionals.push({ value, index: i }); i += 1; continue }
+    if (!isCluster) { member(value, i); i += 1; continue }
     const letters = value.startsWith('-') ? value.slice(1) : value
     let advance = i + 1
     for (let k = 0; k < letters.length; k++) {
       const letter = letters[k]
+      if (letter === 'C') {
+        const attached = letters.slice(k + 1)
+        if (attached !== '') applyDirectory(attached)
+        else if (advance < args.length) { applyDirectory(args[advance]); advance += 1 }
+        else applyDirectory(undefined)
+        break // the cluster ends at its value letter
+      }
       if (letter === 'f') {
         archiveNamed = true
         if (letters.slice(k + 1) === '' && advance < args.length && typeof args[advance] === 'string') advance += 1
@@ -949,8 +1086,327 @@ function tarCommand(args, options, env) {
   for (const source of sources) {
     const dirLike = typeof source.value === 'string' && /[\\/]$/u.test(source.value)
     const glob = typeof source.value === 'string' && /[*?[]/u.test(source.value)
-    emitTargets('delete', [source], { ...options, recursive: dirLike, ...(glob && { patterns: [true] }) }, env)
+    // GNU tar removes an archived directory recursively even without a trailing
+    // separator (`--no-recursion` aside), so every member fact is recursive. A
+    // trailing separator keeps the precise subtree shape; an ambiguous member
+    // stays exact and the evidence layer splits a file (one entry) from a
+    // directory (walked because recursive === true).
+    const memberOptions = { ...options, recursive: true, ...(dirLike ? {} : { exactRecursive: true }) }
+    if (source.base === undefined) {
+      emitTargets('delete', [source], { ...memberOptions, ...(glob && { patterns: [true] }) }, env)
+      continue
+    }
+    if (typeof source.value !== 'string') {
+      env.operation('delete', {
+        kind: 'unknown',
+        reason: 'tar-remove-files-directory',
+        knownScope: ['tar --remove-files (member path not provable)'],
+      }, { ...options, recursive: true })
+      continue
+    }
+    if (source.base === null) {
+      env.operation('delete', {
+        kind: 'unknown',
+        reason: 'tar-remove-files-directory',
+        knownScope: [`${source.value} (relative to an unprovable -C directory)`, 'tar --remove-files'],
+      }, { ...options, recursive: true })
+      continue
+    }
+    const resolved = api.isAbsolute(source.value) ? api.normalize(source.value) : api.resolve(source.base, source.value)
+    emitTargets('delete', [{ value: resolved, index: source.index }], {
+      ...memberOptions, ...(glob && { patterns: [true] }),
+    }, env)
   }
+}
+
+// --- archive-then-delete: 7z -sdel and zip -m (DSR-031 决定 4) ----------------
+
+const ZIP_VALUE_SHORT = new Set(['x', 'i', 'P', 'b', 'n', 't', 'O', 'Z'])
+const ZIP_BOOL_SHORT = new Set([...'qvjkJlLDFSTUXyzosugh2345890A'])
+const ZIP_VALUE_LONG = new Set(['--password', '--temp-path', '--suffixes', '--include', '--exclude',
+  '--output-file', '--unzip-command', '--level', '--compression-method'])
+const ZIP_BOOL_LONG = new Set(['--recurse-paths', '--recurse-paths-symlinks', '--junk-paths',
+  '--junk-symlinks', '--symlinks', '--quiet', '--verbose', '--display-counts', '--latest-time',
+  '--grow', '--filesync', '--test', '--show-files'])
+
+/** One archive tool's source-member deletions (shared by 7z -sdel / zip -m, same
+ * grade as `tar --remove-files`). Literal members are deleted; a member that is
+ * dynamic or a wildcard keeps the deletion proven but the target unknown with a
+ * non-empty known scope (an unscoped unknown would deny instead of confirm).
+ * `archiveDefaultsRecursive` marks tools that recurse into directory members by
+ * default (7-Zip): those facts are recursive with the member kept as an EXACT
+ * target, and the evidence layer counts a file as one entry and walks a directory.
+ * zip keeps the explicit `-r`/trailing-separator behavior. */
+function emitArchivedSourceDeletes(sources, { recurse, tool, options, env, archiveDefaultsRecursive = false }) {
+  const alwaysRecursive = archiveDefaultsRecursive === true
+  for (const source of sources) {
+    const dirLike = typeof source.value === 'string' && /[\\/]$/u.test(source.value)
+    const recursive = alwaysRecursive || recurse || dirLike
+    const memberOptions = { ...options, recursive, ...(alwaysRecursive ? { exactRecursive: true } : {}) }
+    if (typeof source.value !== 'string') {
+      env.operation('delete', {
+        kind: 'unknown',
+        reason: 'archive-source-members',
+        knownScope: [`${tool} (member path not provable)`],
+      }, memberOptions)
+      continue
+    }
+    if (/[*?[]/u.test(source.value)) {
+      env.operation('delete', {
+        kind: 'unknown',
+        reason: 'archive-source-members',
+        knownScope: [`${tool} ${source.value}`, 'member set cannot be enumerated'],
+      }, memberOptions)
+      continue
+    }
+    emitTargets('delete', [source], memberOptions, env)
+  }
+}
+
+/** `7z a -sdel …`: compression deletes the source members afterwards. Every
+ * 7-Zip switch carries its value attached (`-mx=9`, `-oDIR`, `-x!…`), so switches
+ * never consume the next token; the first positional is the archive name and the
+ * rest are members. Without `-sdel` the call stays a coverage gap. */
+function sevenZipCommand(args, options, env) {
+  const sub = typeof args[0] === 'string' ? args[0].toLowerCase() : ''
+  if (sub !== 'a') { env.gap('unmodeled-command', options.origin); return }
+  let deleteAfter = false
+  const positionals = []
+  for (let i = 1; i < args.length; i++) {
+    const value = args[i]
+    if (typeof value !== 'string') { positionals.push({ value: null, index: i }); continue }
+    if (value === '--') {
+      for (let j = i + 1; j < args.length; j++) positionals.push({ value: args[j], index: j })
+      break
+    }
+    if (value.startsWith('-') && value !== '-') {
+      if (value.toLowerCase() === '-sdel') deleteAfter = true
+      // Every other 7-Zip switch carries its value attached (`-mx=9`, `-oDIR`,
+      // `-x!…`, `-r`), so switches never consume the next token.
+      continue
+    }
+    positionals.push({ value, index: i })
+  }
+  if (!deleteAfter) { env.gap('unmodeled-command', options.origin); return }
+  const sources = positionals.slice(1)
+  if (sources.length === 0) { env.gap('command-options', options.origin); return }
+  // 7-Zip deletes an archived directory recursively even without `-r`.
+  emitArchivedSourceDeletes(sources, { recurse: true, tool: '7z a -sdel', options, env, archiveDefaultsRecursive: true })
+}
+
+/** `zip -m/--move`: archive creation moves (deletes) the source members after a
+ * successful write. Without `-m/--move` ordinary zip calls stay a gap; the first
+ * positional is the archive name, the rest are members. */
+function zipCommand(args, options, env) {
+  let move = false
+  let recurse = false
+  let fromFile = false
+  const positionals = []
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]
+    if (typeof value !== 'string') { positionals.push({ value: null, index: i }); continue }
+    if (value === '--') {
+      for (let j = i + 1; j < args.length; j++) positionals.push({ value: args[j], index: j })
+      break
+    }
+    if (value.startsWith('--')) {
+      const eq = value.indexOf('=')
+      const name = eq < 0 ? value : value.slice(0, eq)
+      if (name === '--move') { move = true; continue }
+      if (ZIP_VALUE_LONG.has(name)) { if (eq < 0) i += 1; continue }
+      if (ZIP_BOOL_LONG.has(name)) continue
+      env.gap('unmodeled-command', options.origin)
+      return
+    }
+    if (value.startsWith('-') && value !== '-') {
+      for (let k = 1; k < value.length; k++) {
+        const letter = value[k]
+        if (letter === 'm') { move = true; continue }
+        if (letter === 'r' || letter === 'R') { recurse = true; continue }
+        if (letter === '@') { fromFile = true; break }
+        if (ZIP_VALUE_SHORT.has(letter)) {
+          if (k === value.length - 1) i += 1
+          break
+        }
+        if (ZIP_BOOL_SHORT.has(letter)) continue
+        env.gap('unmodeled-command', options.origin)
+        return
+      }
+      continue
+    }
+    positionals.push({ value, index: i })
+  }
+  if (!move) { env.gap('unmodeled-command', options.origin); return }
+  if (fromFile) {
+    env.gap('command-options', options.origin)
+    env.candidate('unverified-effect', 'zip --move source list could not be enumerated: it is read from a file', undefined, options.origin)
+    return
+  }
+  const sources = positionals.slice(1)
+  if (sources.length === 0) { env.gap('command-options', options.origin); return }
+  emitArchivedSourceDeletes(sources, { recurse, tool: 'zip --move', options, env })
+}
+
+// --- docker run/exec payload (DSR-031 决定 10) -------------------------------
+
+const DOCKER_RUN_VALUE_SHORT = new Set(['v', 'p', 'e', 'w', 'u', 'm', 'l', 'h', 'a', 'c'])
+const DOCKER_RUN_BOOL_SHORT = new Set(['d', 'i', 't', 'P'])
+const DOCKER_RUN_VALUE_LONG = new Set(['--volume', '--mount', '--publish', '--env', '--env-file', '--workdir',
+  '--name', '--network', '--net', '--user', '--entrypoint', '--device', '--cap-add', '--cap-drop',
+  '--security-opt', '--label', '--label-file', '--memory', '--memory-swap', '--memory-reservation',
+  '--cpus', '--restart', '--platform', '--ulimit', '--add-host', '--dns', '--dns-search', '--dns-option',
+  '--log-driver', '--log-opt', '--tmpfs', '--ipc', '--pid', '--uts', '--cgroupns', '--hostname',
+  '--gpus', '--group-add', '--shm-size', '--sysctl', '--stop-signal', '--stop-timeout', '--cidfile',
+  '--attach', '--blkio-weight', '--cpu-shares', '--cpu-quota', '--cpuset-cpus', '--cpuset-mems',
+  '--pids-limit', '--ip', '--mac-address', '--expose', '--link', '--volumes-from',
+  '--device-cgroup-rule', '--runtime', '--isolation', '--userns', '--annotation'])
+const DOCKER_RUN_BOOL_LONG = new Set(['--detach', '--interactive', '--tty', '--rm', '--privileged',
+  '--init', '--read-only', '--oom-kill-disable', '--no-healthcheck', '--tls', '--tlsverify',
+  '--disable-content-trust', '--sig-proxy', '--publish-all'])
+const DOCKER_EXEC_VALUE_SHORT = new Set(['e', 'u', 'w'])
+const DOCKER_EXEC_BOOL_SHORT = new Set(['d', 'i', 't'])
+const DOCKER_EXEC_VALUE_LONG = new Set(['--env', '--env-file', '--user', '--workdir', '--detach-keys'])
+const DOCKER_EXEC_BOOL_LONG = new Set(['--detach', '--interactive', '--tty', '--privileged'])
+
+/** A `-v/--volume` value names a HOST bind only when its source is a host path
+ * (`/x`, `./x`, `../x`, `~/x`, a Windows drive path). A named or anonymous volume
+ * (`vol:/data`, `/data`) never exposes the host filesystem. A dynamic value is
+ * treated as a possible bind (its payload is analyzed rather than silently allowed). */
+function dockerVolumeBinds(value) {
+  if (typeof value !== 'string') return true
+  const colon = value.indexOf(':')
+  if (colon < 0) return false // anonymous volume (`/data`) or empty source
+  let source = value.slice(0, colon)
+  if (/^[A-Za-z]$/u.test(source) && /^[A-Za-z]:[\\/]/u.test(value)) {
+    const second = value.indexOf(':', 2)
+    source = second < 0 ? value : value.slice(0, second)
+    return path.win32.isAbsolute(source)
+  }
+  return source.startsWith('/') || source.startsWith('.') || source === '~' || source.startsWith('~/')
+}
+
+/** `--mount` exposes host state for `type=bind`, or for any source-bearing spec
+ * whose type is not `volume`/`tmpfs`. A dynamic spec stays a possible bind. */
+function dockerMountBinds(value) {
+  if (typeof value !== 'string') return true
+  const fields = new Map()
+  for (const part of value.split(',')) {
+    const eq = part.indexOf('=')
+    if (eq < 0) fields.set(part.trim().toLowerCase(), '')
+    else fields.set(part.slice(0, eq).trim().toLowerCase(), part.slice(eq + 1))
+  }
+  const type = (fields.get('type') ?? '').toLowerCase()
+  if (type === 'bind') return true
+  if (type === 'volume' || type === 'tmpfs') return false
+  const source = fields.get('source') ?? fields.get('src')
+  return typeof source === 'string' && source !== ''
+}
+
+/** DSR-031 决定 10 + device correction: only a `docker run|exec` that can touch
+ * host state (host bind mount, `--device`, `--privileged`) has its payload
+ * analyzed, in the `container` domain. Without such a trigger the payload cannot
+ * reach host paths, so no fact is emitted and ordinary runs stay allows. An
+ * unknown `--opt=value` cannot consume another token, so scanning continues; an
+ * unknown bare long option marks the payload boundary unproven — if host exposure
+ * was already detected the call carries an unverified-effect candidate
+ * (confirm, never a silent allow) plus the coverage gap. */
+function dockerPayloadCommand(args, options, env) {
+  const sub = typeof args[0] === 'string' ? args[0] : ''
+  if (sub !== 'run' && sub !== 'exec') return false
+  const run = sub === 'run'
+  const valueLong = run ? DOCKER_RUN_VALUE_LONG : DOCKER_EXEC_VALUE_LONG
+  const boolLong = run ? DOCKER_RUN_BOOL_LONG : DOCKER_EXEC_BOOL_LONG
+  const valueShort = run ? DOCKER_RUN_VALUE_SHORT : DOCKER_EXEC_VALUE_SHORT
+  const boolShort = run ? DOCKER_RUN_BOOL_SHORT : DOCKER_EXEC_BOOL_SHORT
+  let privileged = false
+  let hostAccess = false
+  let unmodeled = false
+  let i = 1
+  while (i < args.length) {
+    const value = args[i]
+    if (typeof value !== 'string') { unmodeled = true; i += 1; continue }
+    if (value === '--') { i += 1; break }
+    if (!value.startsWith('-') || value === '-') break
+    if (value.startsWith('--')) {
+      const eq = value.indexOf('=')
+      const name = (eq < 0 ? value : value.slice(0, eq)).toLowerCase()
+      const attached = eq < 0 ? undefined : value.slice(eq + 1)
+      if (name === '--privileged') { privileged = true; i += 1; continue }
+      if (run && name === '--volume') {
+        if (dockerVolumeBinds(attached === undefined ? args[i + 1] : attached)) hostAccess = true
+        if (attached === undefined) i += 1
+        i += 1
+        continue
+      }
+      if (run && name === '--mount') {
+        if (dockerMountBinds(attached === undefined ? args[i + 1] : attached)) hostAccess = true
+        if (attached === undefined) i += 1
+        i += 1
+        continue
+      }
+      if (name === '--device') {
+        hostAccess = true
+        if (attached === undefined) i += 1
+        i += 1
+        continue
+      }
+      if (valueLong.has(name)) {
+        if (attached === undefined) i += 1
+        i += 1
+        continue
+      }
+      if (boolLong.has(name)) { i += 1; continue }
+      // Unknown option: `--opt=value` is unambiguous and skipped; a bare unknown
+      // option may consume the next token, so the payload boundary is unproven.
+      if (attached === undefined) unmodeled = true
+      i += 1
+      continue
+    }
+    let advance = 1
+    for (let k = 1; k < value.length; k++) {
+      const letter = value[k]
+      const rawAttached = value.slice(k + 1)
+      const hadEquals = rawAttached.startsWith('=')
+      const attached = hadEquals ? rawAttached.slice(1) : rawAttached
+      if (run && letter === 'v') {
+        const volume = attached !== '' || hadEquals ? attached : args[i + 1]
+        if (!hadEquals && attached === '' && typeof args[i + 1] === 'string') advance = 2
+        if (dockerVolumeBinds(volume)) hostAccess = true
+        break
+      }
+      if (valueShort.has(letter)) {
+        if (!hadEquals && attached === '' && typeof args[i + 1] === 'string') advance = 2
+        break
+      }
+      if (boolShort.has(letter)) continue
+      unmodeled = true
+      break
+    }
+    i += advance
+  }
+  if (unmodeled) {
+    env.gap('unmodeled-command', options.origin)
+    if (hostAccess || privileged) {
+      env.candidate('unverified-effect', 'docker run options could not be fully interpreted; a host bind mount may be present',
+        ['docker run (payload boundary not provable)'], options.origin)
+    }
+    return true
+  }
+  if (i >= args.length || typeof args[i] !== 'string') { env.gap('unmodeled-command', options.origin); return true }
+  // `run`: image name; `exec`: container name. The payload starts after it.
+  const payload = args.slice(i + 1)
+  const triggered = run ? (hostAccess || privileged) : privileged
+  if (!triggered) return true
+  if (payload.length === 0) { env.gap('unmodeled-command', options.origin); return true }
+  if (typeof payload[0] !== 'string') { env.gap('unmodeled-command', options.origin); return true }
+  env.child({
+    source: { kind: 'argv', executable: payload[0], args: payload.slice(1) },
+    language: 'unknown',
+    context: { domain: 'container' },
+    condition: options.condition,
+    origin: options.origin,
+  })
+  return true
 }
 
 // --- raw storage erase / partition tools ----------------------------------------
@@ -1002,7 +1458,7 @@ function diskutilCommand(args, options, env) {
   env.gap('unmodeled-command', options.origin)
 }
 
-const PARTED_WRITE_SUBCOMMANDS = new Set(['mklabel', 'mkpart', 'rm'])
+const PARTED_WRITE_SUBCOMMANDS = new Set(['mklabel', 'mkpart', 'rm', 'resizepart'])
 
 function partedCommand(args, options, env) {
   let i = 0
@@ -1033,33 +1489,54 @@ function partedCommand(args, options, env) {
   storageMutationFact(device, options, env)
 }
 
+const SGDISK_WRITE_VALUE_SHORT = new Set(['d', 'n', 't', 'A', 'c'])
+const SGDISK_WRITE_VALUE_LONG = new Set(['--delete', '--new', '--typecode', '--attributes', '--change-name'])
+const SGDISK_WRITE_BOOL_SHORT = new Set(['Z', 'o'])
+const SGDISK_WRITE_BOOL_LONG = new Set(['--zap-all', '--clear'])
+const SGDISK_READ_FLAGS = new Set(['-p', '--print', '-v', '--verify', '-V', '--version', '-h', '--help', '-?'])
+
+/** `sgdisk` partition-table writes (DSR-031 决定 3). Every write option's value is
+ * consumed (attached `-t1:8300` and separate `-t 1:8300` forms), so it can never
+ * be mistaken for the device operand or shift the selection. `-P/--pretend` is a
+ * real dry-run: when it appears no operation is produced (D3/preview). Read-only
+ * forms (`-p/--print`, `-v/--verify`, version/help) stay coverage gaps. */
 function sgdiskCommand(args, options, env) {
   let write = false
-  let unmodeled = false
+  let pretend = false
   const operands = []
   for (let i = 0; i < args.length; i++) {
     const value = args[i]
-    if (typeof value !== 'string') { unmodeled = true; continue }
-    if (value.startsWith('-') && value !== '-') {
-      if (['-Z', '--zap-all', '-o', '--clear'].includes(value)) { write = true; continue }
-      if (value === '-c' || value === '--change-name') {
+    if (typeof value !== 'string') continue
+    if (!value.startsWith('-') || value === '-') { operands.push(value); continue }
+    if (value.startsWith('--')) {
+      const eq = value.indexOf('=')
+      const name = (eq < 0 ? value : value.slice(0, eq)).toLowerCase()
+      if (name === '--pretend') { pretend = true; continue }
+      if (SGDISK_READ_FLAGS.has(name)) continue
+      if (SGDISK_WRITE_BOOL_LONG.has(name)) { write = true; continue }
+      if (SGDISK_WRITE_VALUE_LONG.has(name)) {
         write = true
-        if (i + 1 < args.length && typeof args[i + 1] === 'string') i += 1
-        else unmodeled = true
+        if (eq < 0 && typeof args[i + 1] === 'string') i += 1
         continue
       }
-      if (/^-(?:c|o|Z)\S/u.test(value) || /^--(?:change-name|clear|zap-all)=/u.test(value)) { write = true; continue }
-      if (['-p', '--print'].includes(value)) continue
-      unmodeled = true
       continue
     }
-    operands.push(value)
+    const letter = value[1]
+    if (letter === 'P') { pretend = true; continue }
+    if (SGDISK_READ_FLAGS.has('-' + letter)) continue
+    if (SGDISK_WRITE_BOOL_SHORT.has(letter)) { write = true; continue }
+    if (SGDISK_WRITE_VALUE_SHORT.has(letter)) {
+      write = true
+      if (value.length === 2 && typeof args[i + 1] === 'string') i += 1
+    }
   }
   if (write) {
+    // `-P/--pretend` only reports what would be written: no operation and no candidate.
+    if (pretend) { env.gap('unmodeled-command', options.origin); return }
     storageMutationFact(operands.length > 0 ? operands[operands.length - 1] : undefined, options, env)
     return
   }
-  env.gap('unmodeled-command', options.origin) // `-p` print and unmodeled forms stay read-only gaps
+  env.gap('unmodeled-command', options.origin) // print/verify and unmodeled forms stay gaps
 }
 
 function fdiskCommand(args, options, env) {
@@ -1100,6 +1577,200 @@ function blkdiscardCommand(args, options, env) {
   storageMutationFact(device, options, env)
 }
 
+// --- unshare: transparent namespace wrapper (DSR-031 决定 7) --------------------
+
+/** util-linux `unshare` option classes (verified against `unshare(1)`, util-linux
+ * 2.43). Namespace creation itself is NOT a decision fact: only the unwrapped
+ * inner program is analyzed (D5 transparency). The `[=file]` namespace options
+ * (`-m/--mount`, `-p/--pid`, …) only take an attached value and never consume the
+ * next word, so a bare `--mount` is a boolean. `--monotonic`/`--boottime`,
+ * `-R/--root`, `-w/--wd`, `--setgroups` and `--propagation` take a separate value. */
+const UNSHARE_VALUE_SHORT = new Set(['-w', '-R', '-S', '-G', '-l'])
+const UNSHARE_VALUE_LONG = new Set(['--wd', '--root', '--setgroups', '--propagation', '--map-user',
+  '--map-users', '--map-group', '--map-groups', '--owner', '--setuid', '--setgid', '--load-interp',
+  '--monotonic', '--boottime', '--whitelist-env'])
+const UNSHARE_BOOL_SHORT = new Set(['-f', '-r', '-m', '-p', '-u', '-i', '-n', '-U', '-P', '-T', '-C',
+  '-o', '-k', '-c', '-h', '-V'])
+const UNSHARE_BOOL_LONG = new Set(['--fork', '--map-root-user', '--map-current-user', '--mount',
+  '--pid', '--user', '--uts', '--ipc', '--net', '--cgroup', '--time', '--kill-child', '--mount-proc',
+  '--mount-binfmt', '--map-auto', '--map-subids', '--keep-caps', '--forward-signals', '--clear-env',
+  '--help', '--version'])
+
+/** Index of the inner program token of `unshare [options] [program [args…]]`,
+ * or args.length when no program operand is present, or -1 when an option cannot
+ * be modeled (a gap — D5: the wrapper itself never adds a candidate or a deny). */
+function unshareProgramIndex(args, options, env) {
+  let i = 0
+  while (i < args.length) {
+    const value = args[i]
+    if (typeof value !== 'string') { env.gap('unmodeled-command', options.origin); return -1 }
+    if (value === '--') { i += 1; break }
+    if (!value.startsWith('-') || value === '-') break
+    // Help/version are lookups: the command printed by unshare never runs (D3).
+    if (['-h', '--help', '-V', '--version'].includes(value)) { env.gap('unmodeled-command', options.origin); return -1 }
+    if (value.startsWith('--')) {
+      const eq = value.indexOf('=')
+      const name = eq < 0 ? value : value.slice(0, eq)
+      if (UNSHARE_VALUE_LONG.has(name)) {
+        if (eq >= 0) { i += 1; continue }
+        if (typeof args[i + 1] !== 'string') { env.gap('unmodeled-command', options.origin); return -1 }
+        i += 2
+        continue
+      }
+      if (UNSHARE_BOOL_LONG.has(name)) { i += 1; continue }
+      env.gap('unmodeled-command', options.origin)
+      return -1
+    }
+    // Short cluster: a value letter consumes the rest of the word or the next word.
+    let advance = 1
+    for (let k = 1; k < value.length; k++) {
+      const letter = `-${value[k]}`
+      if (UNSHARE_VALUE_SHORT.has(letter)) {
+        if (value.slice(k + 1) === '') {
+          if (typeof args[i + 1] !== 'string') { env.gap('unmodeled-command', options.origin); return -1 }
+          advance = 2
+        }
+        break
+      }
+      if (!UNSHARE_BOOL_SHORT.has(letter)) { env.gap('unmodeled-command', options.origin); return -1 }
+    }
+    i += advance
+  }
+  return i
+}
+
+// --- outbound transfer surface (DSR-031 决定 6) --------------------------------
+
+/** Cloud instance-metadata endpoints: access is a concrete exfiltration clue that
+ * analysis cannot resolve into countable operations (`unverified-effect`). The list
+ * covers the mainstream IMDS addresses (EC2/GCE/Azure/OCI, AWS IPv6, Alibaba), the
+ * ECS task-role endpoint, EKS Pod Identity (IPv4 + IPv6) and the `metadata.goog`
+ * short name (its own hostname, not a substring of `metadata.google.internal`).
+ * Hosts compare exactly; the URL port is already dropped by `URL.hostname`. */
+const METADATA_HOSTS = new Set([
+  '169.254.169.254', 'fd00:ec2::254', 'metadata.google.internal', '100.100.100.200',
+  '169.254.170.2', '169.254.170.23', 'fd00:ec2::23', 'metadata.goog',
+])
+
+/** Lower-cased URL host of a token, or null when no host is provable. A scheme-less
+ * token is treated as http (curl/wget semantics) only when it has a dotted host shape;
+ * a bare path/filename can never name a host. */
+function urlHost(value) {
+  if (typeof value !== 'string' || value === '' || /\s/u.test(value)) return null
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//iu.test(value)
+    ? value
+    : /^[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+(?::\d+)?(?:[/?#]|$)/u.test(value) ? `http://${value}` : null
+  if (candidate === null) return null
+  try {
+    const host = new URL(candidate).hostname
+    return host ? host.replace(/^\[/u, '').replace(/\]$/u, '').toLowerCase() : null
+  } catch {
+    return null
+  }
+}
+
+/** Local files a curl call reads and sends: `-T/--upload-file <file>` and the `@file`
+ * payloads of `-d/--data*` and `-F/--form name=@file[;type=…]` (DSR-031 决定 6).
+ * `@-` (stdin) and `@http(s)://…` never name a local read. */
+const CURL_UPLOAD_FLAGS = new Set(['-T', '--upload-file'])
+const CURL_DATA_FLAGS = new Set(['-d', '--data', '--data-binary', '--data-raw', '--data-urlencode'])
+const CURL_FORM_FLAGS = new Set(['-F', '--form'])
+
+function collectCurlUploads(args) {
+  const files = []
+  const addFile = (raw, index) => {
+    if (typeof raw !== 'string' || raw === '' || raw === '-') return
+    if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(raw)) return // a remote URL, not a local read
+    files.push({ value: raw, index })
+  }
+  const addAtFile = (raw, index) => {
+    if (typeof raw !== 'string' || !raw.startsWith('@')) return // inline data, not a file
+    let value = raw.slice(1)
+    const semi = value.indexOf(';')
+    if (semi >= 0) value = value.slice(0, semi) // drop `;type=…` / `;filename=…`
+    addFile(value, index)
+  }
+  const addFormField = (raw, index) => {
+    if (typeof raw !== 'string') return
+    const eq = raw.indexOf('=')
+    if (eq < 0) return
+    addAtFile(raw.slice(eq + 1), index)
+  }
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]
+    if (typeof value !== 'string' || value === '-') continue
+    if (value === '--') break // after the terminator every word is a URL, never an option
+    if (value.startsWith('--')) {
+      const eq = value.indexOf('=')
+      const flag = eq < 0 ? value : value.slice(0, eq)
+      if (CURL_UPLOAD_FLAGS.has(flag)) { addFile(eq < 0 ? args[++i] : value.slice(eq + 1), i); continue }
+      if (CURL_DATA_FLAGS.has(flag)) { addAtFile(eq < 0 ? args[++i] : value.slice(eq + 1), i); continue }
+      if (CURL_FORM_FLAGS.has(flag)) { addFormField(eq < 0 ? args[++i] : value.slice(eq + 1), i); continue }
+      continue
+    }
+    // Attached short forms: `-Tfile`, `-d@file`, `-Fname=@file`.
+    if (value.length > 2 && value.startsWith('-T')) { addFile(value.slice(2), i); continue }
+    if (value.length > 2 && value.startsWith('-d')) { addAtFile(value.slice(2), i); continue }
+    if (value.length > 2 && value.startsWith('-F')) { addFormField(value.slice(2), i); continue }
+    if (CURL_UPLOAD_FLAGS.has(value)) { addFile(args[++i], i); continue }
+    if (CURL_DATA_FLAGS.has(value)) { addAtFile(args[++i], i); continue }
+    if (CURL_FORM_FLAGS.has(value)) { addFormField(args[++i], i); continue }
+  }
+  return files
+}
+
+/** `wget --post-file=<file>` / `--body-file=<file>` read a local body source. */
+function collectWgetUploads(args) {
+  const files = []
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]
+    if (typeof value !== 'string') continue
+    const eq = value.indexOf('=')
+    const flag = (eq >= 0 ? value.slice(0, eq) : value).toLowerCase()
+    if (flag !== '--post-file' && flag !== '--body-file') continue
+    const assigned = eq >= 0 ? value.slice(eq + 1) : args[++i]
+    if (typeof assigned !== 'string' || assigned === '' || assigned === '-') continue
+    if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(assigned)) continue
+    files.push({ value: assigned, index: i })
+  }
+  return files
+}
+
+/** Emit the metadata-endpoint candidate (once) and then the local upload reads. */
+function outboundTransferCommand(args, options, env, uploads) {
+  for (const value of args) {
+    const host = urlHost(value)
+    if (host === null || !METADATA_HOSTS.has(host)) continue
+    env.candidate('unverified-effect', `Cloud metadata endpoint access: ${host}`,
+      [`${host} (cloud instance metadata)`], options.origin)
+    break
+  }
+  if (uploads.length > 0) emitTargets('read-content', uploads, { ...options, patterns: [] }, env)
+  // The rest of the curl/wget surface is not modeled; keep the existing coverage gap
+  // (a gap never escalates — D1), and an ordinary download produces no candidate.
+  env.gap('unmodeled-command', options.origin)
+}
+
+function curlCommand(args, options, env) {
+  outboundTransferCommand(args, options, env, collectCurlUploads(args))
+}
+
+function wgetCommand(args, options, env) {
+  outboundTransferCommand(args, options, env, collectWgetUploads(args))
+}
+
+
+/** Subcommands whose `--abort` discards an in-progress operation's state (DSR-031
+ * 决定 8). The scope text is per subcommand: `rebase`/`am` abort provably discards
+ * uncommitted changes, while `merge`/`cherry-pick`/`revert` abort resets the
+ * operation state without guaranteeing that unrelated uncommitted changes are lost. */
+const GIT_ABORT_SUBCOMMANDS = new Map([
+  ['rebase', 'git rebase --abort discards uncommitted changes in the working tree'],
+  ['am', 'git am --abort discards uncommitted changes in the working tree'],
+  ['merge', 'git merge --abort restores the merge state; uncommitted changes may be lost'],
+  ['cherry-pick', 'git cherry-pick --abort restores the sequencer state; uncommitted changes may be lost'],
+  ['revert', 'git revert --abort restores the sequencer state; uncommitted changes may be lost'],
+])
 
 function gitCommand(args, options, env) {
   const context = { ...options.context }
@@ -1134,6 +1805,21 @@ function gitCommand(args, options, env) {
   const action = dangerous ? 'git-history-destroy' : cmd === 'clean' ? 'git-clean' : cmd === 'restore' ? 'git-restore'
     : cmd === 'worktree' && rest[0] === 'remove' ? 'git-worktree-remove' : undefined
   if (!action) {
+    // DSR-031 决定 8 (facts side): `<subcommand> --abort` is modeled as a Git state
+    // restoration whose decision is delegated to the evidence layer
+    // (`git-evidence` + `gitDir` markers). The facts layer never probes the
+    // filesystem itself; every other sequencer form (`--continue`/`--skip`/`--quit`)
+    // stays untouched. `knownScope` is mandatory: without it an `unknown` target
+    // would be treated as unscoped and deny instead of confirming
+    // (`data.git.restore`).
+    if (GIT_ABORT_SUBCOMMANDS.has(cmd) && has('--abort')) {
+      env.operation('git-restore', {
+        kind: 'unknown',
+        reason: 'git-evidence',
+        knownScope: [GIT_ABORT_SUBCOMMANDS.get(cmd)],
+      }, { ...options, context, details: { command: `${cmd}-abort`, args: rest, global } })
+      return
+    }
     // Git subcommand surface extension (F-12..F-18, D6): only truly irreversible
     // forms enter a tier; reversible and read-only usage stays untouched.
     if (cmd === 'rm') return gitRmCommand(index, rest, options, env)
@@ -1307,7 +1993,7 @@ function wrapper(language, args, options, env) {
 export function resolveCommand(executable, args, unit, env) {
   const origin = unit.origin
   const options = { context: unit.context, origin, condition: unit.condition, powershell: unit.powershell,
-    patterns: unit.patterns, literalOperands: unit.literalOperands, heredocs: unit.heredocs }
+    patterns: unit.patterns, literalOperands: unit.literalOperands, heredocs: unit.heredocs, pipeline: unit.pipeline }
   if (typeof executable !== 'string') {
     env.candidate('dynamic-execution', 'Program identity could not be determined', undefined, origin)
     return
@@ -1355,18 +2041,41 @@ export function resolveCommand(executable, args, unit, env) {
       return
     }
   }
+  // PowerShell is a dialect of the CMDLET/alias grammar only. After the PowerShell
+  // branch above, these names are EXTERNAL programs and keep their own grammar; a
+  // `!unit.powershell` gate here silently disabled that analysis and allowed real
+  // deletions. `curl`/`wget` are no longer Invoke-WebRequest aliases in PowerShell 7;
+  // the Windows PowerShell 5.1 alias difference is an existing dialect boundary.
   if (unit.cmdDialect === true && ['rmdir', 'rd', 'del', 'erase'].includes(name)) return cmdInline(name, args, options, env)
   if (deleting.has(name) || name === 'cp') return posixFileCommand(name, args, options, env)
   if (name === 'git') return gitCommand(args, options, env)
-  if (name === 'find' && !unit.powershell && !unit.cmdDialect) return findCommand(args, options, env)
-  if (name === 'xargs' && !unit.powershell) return streamFedCommand('xargs', args, options, env)
-  if (name === 'parallel' && !unit.powershell) return streamFedCommand('parallel', args, options, env)
-  if (name === 'shred' && !unit.powershell) return shredCommand(args, options, env)
-  if (name === 'rsync' && !unit.powershell) return rsyncCommand(args, options, env)
-  if (name === 'ssh' && !unit.powershell && !unit.cmdDialect) return sshCommand(args, options, env)
-  if (name === 'awk' && !unit.powershell && !unit.cmdDialect) return awkCommand(args, options, env)
-  if (name === 'tar' && !unit.powershell && !unit.cmdDialect) return tarCommand(args, options, env)
-  if (!unit.powershell && !unit.cmdDialect) {
+  if (name === 'find' && !unit.cmdDialect) return findCommand(args, options, env)
+  if (name === 'xargs') return streamFedCommand('xargs', args, options, env)
+  if (name === 'parallel') return streamFedCommand('parallel', args, options, env)
+  if (name === 'shred') return shredCommand(args, options, env)
+  if (name === 'rsync') return rsyncCommand(args, options, env)
+  if (name === 'ssh' && !unit.cmdDialect) return sshCommand(args, options, env)
+  // DSR-031 决定 7: `unshare` is a transparent wrapper. The inner program is
+  // analyzed with the wrapper's arguments trimmed; the wrapper itself adds no
+  // candidate and no denial, and a missing program operand is a plain gap.
+  if (name === 'unshare' && !unit.cmdDialect) {
+    const inner = unshareProgramIndex(args, options, env)
+    if (inner < 0) return
+    const program = args[inner]
+    if (typeof program !== 'string') { env.gap('unmodeled-command', origin); return }
+    return resolveCommand(program, args.slice(inner + 1), {
+      ...unit,
+      ...(Array.isArray(unit.patterns) && { patterns: unit.patterns.slice(inner + 1) }),
+      ...(Array.isArray(unit.literalOperands) && { literalOperands: unit.literalOperands.slice(inner + 1) }),
+    }, env)
+  }
+  if (name === 'curl' && !unit.cmdDialect) return curlCommand(args, options, env)
+  if (name === 'wget' && !unit.cmdDialect) return wgetCommand(args, options, env)
+  if (name === 'awk' && !unit.cmdDialect) return awkCommand(args, options, env)
+  if (name === 'tar' && !unit.cmdDialect) return tarCommand(args, options, env)
+  if (name === '7z' && !unit.cmdDialect) return sevenZipCommand(args, options, env)
+  if (name === 'zip' && !unit.cmdDialect) return zipCommand(args, options, env)
+  if (!unit.cmdDialect) {
     if (name === 'diskutil') return diskutilCommand(args, options, env)
     if (name === 'parted') return partedCommand(args, options, env)
     if (name === 'sgdisk') return sgdiskCommand(args, options, env)
@@ -1395,15 +2104,33 @@ export function resolveCommand(executable, args, unit, env) {
   }
   if (deviceUtilities.has(name)) {
     const targetIndex = args.findLastIndex((value) => typeof value === 'string' && !value.startsWith('-'))
-    if (targetIndex >= 0) emitTargets('write-content', [{ value: args[targetIndex], index: targetIndex }], {
-      ...options, details: { deviceMutation: true },
-    }, env)
-    else env.candidate('unverified-effect', 'Device utility target is unknown', undefined, origin)
+    if (targetIndex >= 0) {
+      emitTargets('write-content', [{ value: args[targetIndex], index: targetIndex }], {
+        ...options, details: { deviceMutation: true },
+      }, env)
+      // DSR-031 决定 10: a device write requested from a container is proven as an
+      // operation, but the host-device identity cannot be probed from that domain.
+      // Record the unproven identity so it cannot fall through as a silent allow.
+      if (options.context?.domain === 'container') {
+        env.candidate('unverified-effect', 'Device mutation inside a container cannot be verified against the host device', undefined, origin)
+      }
+    } else env.candidate('unverified-effect', 'Device utility target is unknown', undefined, origin)
     return
   }
   if (contentReaders.has(name)) return contentCommand(name, args, options, env)
   if (name === 'wsl' && windows) {
     const context = { domain: 'wsl', platform: 'linux' }
+    // DSR-031 决定 1: when the post-wsl command is a POSIX shell receiver and this
+    // call carries a heredoc that receiver reads as its stdin script, the body is
+    // the script — analyzed in the wsl domain. `-c` and script-file forms keep the
+    // argv path (the heredoc stays data there). A non-literal receiver keeps the
+    // existing argv child / coverage gap.
+    const emitWslProgram = (executable, argv) => {
+      if (HEREDOC_SHELL_RECEIVERS.has(executable) &&
+        emitHeredocShellChild(executable, argv, options, env, context)) return
+      env.child({ source: { kind: 'argv', executable, args: argv },
+        language: 'unknown', context, condition: unit.condition, origin })
+    }
     // Management/query switches: wsl.exe performs the operation itself; no
     // distribution command line follows, so they stay a coverage gap (放行).
     const manageFlags = new Set(['-l', '--list', '-t', '--terminate', '--shutdown', '--running', '--import',
@@ -1414,14 +2141,12 @@ export function resolveCommand(executable, args, unit, env) {
       if (flag === '--') {
         const rest = args.slice(index + 1)
         if (typeof rest[0] !== 'string') { env.gap('wsl-shell', origin); return }
-        env.child({ source: { kind: 'argv', executable: rest[0], args: rest.slice(1) },
-          language: 'unknown', context, condition: unit.condition, origin })
+        emitWslProgram(rest[0], rest.slice(1))
         return
       }
       if (flag === '-e' || flag === '--exec') {
         if (typeof args[index + 1] !== 'string') { env.gap('wsl-shell', origin); return }
-        env.child({ source: { kind: 'argv', executable: args[index + 1], args: args.slice(index + 2) },
-          language: 'unknown', context, condition: unit.condition, origin })
+        emitWslProgram(args[index + 1], args.slice(index + 2))
         return
       }
       if (typeof flag !== 'string') { env.gap('wsl-shell', origin); return }
@@ -1464,8 +2189,7 @@ export function resolveCommand(executable, args, unit, env) {
       }
       if (flag.startsWith('-')) { env.gap('wsl-shell', origin); return } // unmodeled switch
       // Without --exec the distribution shell still runs the command line: analyze it.
-      env.child({ source: { kind: 'argv', executable: flag, args: args.slice(index + 1) },
-        language: 'unknown', context, condition: unit.condition, origin })
+      emitWslProgram(flag, args.slice(index + 1))
       return
     }
     env.gap('wsl-shell', origin)
@@ -1487,6 +2211,11 @@ export function resolveCommand(executable, args, unit, env) {
     emitHeredocShellChild(name, args, options, env)) return
   const language = interpreters.get(name) ?? (/^python3\.\d+$/u.test(name) ? 'python' : undefined)
   if (language) return wrapper(language, args, options, env)
+  // DSR-031 决定 10: docker run/exec payloads are intercepted before the remote
+  // dispatcher so the image/container boundary is parsed here; other docker
+  // subcommands (prune/rm/rmi/volume) stay with commands-remote.js. `docker` is an
+  // external program in every dialect, PowerShell included.
+  if (name === 'docker' && !unit.cmdDialect && dockerPayloadCommand(args, options, env)) return
   if (resolveRemoteCommand(name, args, options, env)) return
   env.gap(unit.cmdDialect === true ? 'cmd-inline' : 'unmodeled-command', origin)
 }

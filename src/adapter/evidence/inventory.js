@@ -29,7 +29,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { classifyDisposable, PROJECT_MARKERS } from '../../core/disposable.js'
 import { absoluteCwd, hasDotDot, isWellFormedName, resolveLocal, withinExact } from './internal.js'
-import { proveClean, proveRestore, proveWorktreeRemove } from './git-proof.js'
+import { proveAbortState, proveClean, proveRestore, proveWorktreeRemove } from './git-proof.js'
 
 /** R-07: >20 non-exempt entries confirms. Precise counting stops at 21 ("at least 21"). */
 export const COUNT_THRESHOLD = 21
@@ -675,15 +675,43 @@ function worktreeTargetFromDetails(operation) {
   return operands.find((value) => typeof value === 'string' && value !== '') ?? null
 }
 
+/** `git rebase|merge|cherry-pick|revert|am --abort` reaches the evidence layer as
+ * `details.command: '<subcommand>-abort'` (DSR-031 决定 8). Nothing else is probed. */
+function abortCommandOf(operation) {
+  if (operation.action !== 'git-restore') return null
+  const command = operation.details?.command
+  return typeof command === 'string' && command.endsWith('-abort') ? command : null
+}
+
+/** Append a displayable range to the EXISTING `knownScope` channel of the operation
+ * target. The facts contract already supplies a per-subcommand `knownScope` (an
+ * unknown target without one would be judged unscoped and denied); this only adds the
+ * probe's own finding (the in-progress marker set / an unverified reason) so the
+ * confirmation block names what the read-only probe actually saw. */
+function noteAbortScope(operation, text) {
+  const target = operation.target
+  if (!target || typeof target !== 'object' || target.kind !== 'unknown') return
+  const list = Array.isArray(target.knownScope) ? target.knownScope : (target.knownScope = [])
+  if (!list.includes(text)) list.push(text)
+}
+
 async function observeGitOperation(state, operation, ctx) {
   if ((operation.context?.domain ?? 'unknown') !== 'host') { noteUnknown(state, 'domain-unprobed'); return }
+  const action = operation.action
+  const abortCommand = abortCommandOf(operation)
   const cwd = absoluteCwd(operation.context?.cwd)
   if (!cwd) {
+    if (abortCommand) {
+      // D1: an abort whose cwd is unresolved must stay a deliberate unknown (the policy
+      // confirms with the stated range) — never a stage issue or a check failure.
+      noteUnknown(state, 'git-abort-unprobed')
+      noteAbortScope(operation, `${abortCommand} --abort: working tree of the analyzed call (working directory unresolved; abort state unverified)`)
+      return
+    }
     ctx.noteIssue({ kind: 'git-evidence', reason: 'git-cwd-unresolved' })
     noteFailure(state, 'git-cwd-unresolved')
     return
   }
-  const action = operation.action
   if (action === 'git-clean') {
     const ignored = detailArgs(operation).includes('-x')
     const proof = await proveClean({ cwd, ignored, deadlineAt: ctx.deadlineAt, signal: ctx.signal, run: ctx.gitRun })
@@ -701,6 +729,7 @@ async function observeGitOperation(state, operation, ctx) {
     return
   }
   if (action === 'git-restore') {
+    if (abortCommand) return observeAbortProbe(state, operation, ctx, cwd, abortCommand)
     const command = operation.details?.command
     const paths = restorePathsFromDetails(operation)
     if (command !== 'restore' && command !== 'checkout') {
@@ -753,4 +782,29 @@ async function observeGitOperation(state, operation, ctx) {
     return
   }
   state.roots.push(absolute)
+}
+
+/**
+ * `git rebase|merge|cherry-pick|revert|am --abort` (DSR-031 决定 8). Confirm ONLY when a
+ * read-only probe proves an in-progress operation; a proven-absent state records nothing so
+ * the decision's `git-evidence` exception allows the call (D4). A probe that cannot
+ * conclude records a deliberate unknown with the unverified range — never a stage issue
+ * and never an inventory failure, so it can never become `execution.check-failed` (D1).
+ */
+async function observeAbortProbe(state, operation, ctx, cwd, abortCommand) {
+  const proof = await proveAbortState({
+    cwd,
+    deadlineAt: ctx.deadlineAt,
+    signal: ctx.signal,
+    run: ctx.gitRun,
+    consume: ctx.consume,
+  })
+  if (proof.state !== 'known') {
+    noteUnknown(state, 'git-abort-unprobed')
+    noteAbortScope(operation, `${abortCommand} --abort: working tree at ${cwd} (abort state unverified: ${proof.reason})`)
+    return
+  }
+  if (proof.inProgress !== true) return
+  noteUnknown(state, 'git-abort-in-progress')
+  noteAbortScope(operation, `${abortCommand} --abort: working tree at ${cwd} (in-progress state: ${proof.markers.join(', ')}; uncommitted changes would be discarded)`)
 }

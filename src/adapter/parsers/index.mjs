@@ -177,6 +177,10 @@ function validateResult(result) {
   for (const command of result.commands) {
     if (!command || !(command.name === null || typeof command.name === 'string') || !Array.isArray(command.args) || command.args.some(arg => arg !== null && typeof arg !== 'string')) throw failure('PROTOCOL', 'Malformed command');
     if (command.scope !== undefined && typeof command.scope !== 'string') throw failure('PROTOCOL', 'Malformed command scope');
+    // PowerShell pipeline provenance (DSR-031 decision 9). Optional new fields; a
+    // non-PowerShell dialect omits them, so their presence is validated only when set.
+    if (command.pipelineIndex !== undefined && (!Number.isSafeInteger(command.pipelineIndex) || command.pipelineIndex < 0)) throw failure('PROTOCOL', 'Malformed command pipeline index');
+    if (command.pipelineSource !== undefined && command.pipelineSource !== null && typeof command.pipelineSource !== 'string') throw failure('PROTOCOL', 'Malformed command pipeline source');
     if (command.redirects !== undefined && (!Array.isArray(command.redirects) || command.redirects.some(redirect => !redirect || typeof redirect.operator !== 'string' || !(redirect.target === null || typeof redirect.target === 'string') || (redirect.heredoc !== undefined && typeof redirect.heredoc !== 'boolean')))) throw failure('PROTOCOL', 'Malformed redirection');
   }
 }
