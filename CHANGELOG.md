@@ -2,6 +2,14 @@
 
 本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
+## 0.4.0
+
+- **剩余形态补齐（默认放行不变）**：`ssh host <<EOF` 与 `wsl … bash <<EOF` 的 heredoc 正文按远端 shell 脚本分析；`ssh host powershell|pwsh` 与 `ssh host cmd /c` 按对应方言分析载荷；`sgdisk` 的 `-d`/`-n`/`-t`/`-A`/`-c`/`-Z`/`-o`（`-P` 为预览）与 `parted resizepart` 进入设备变更判定；`tar -C` 按目录重定位 `--remove-files` 成员，`7z a -sdel`/`zip -m` 与 `tar --remove-files` 同档；`unshare` 作为透明包装解包；`git rebase|merge|cherry-pick|revert|am --abort` 仅在只读探测证明有进行中状态时确认（无进行中状态放行，探测失败不升级为检查故障）；PowerShell 管道中无显式路径的删除按相邻上游命令范围确认；`docker run|exec` 的载荷仅在宿主绑定挂载、`--device` 或 `--privileged` 时按容器域分析。见 [DSR-031](docs/decisions/DSR-031-剩余未做项补齐与外传管道边界.md)。
+- **删除面与传输面扩展**：云 / 数据库 / 容器 / IaC 的删除与不可逆资源变更按 provider 薄表补齐；新增备份与密钥源删除（`restic`/`borg`/`rclone`/`velero`/`gh`/`vault kv metadata`/`doppler`/`infisical`）；`scp`/`rsync` 上行方向对字面本地源产出读取事实。可恢复的软删除（`vault kv delete`、`restic forget` 不带 `--prune`）按缺口放行。
+- **外传面（只做可证边界）**：`curl`/`wget` 访问云元数据端点（8 个 IMDS/ECS/EKS/`metadata.goog` 地址）产出 `unverified-effect` 候选；本地文件上传产出 `read-content` 事实，由既有凭据规则判定。通用出网、通用上传与隧道（`nc`/`socat`/`ssh -R`）仍不拦截。
+- **修复（D2）**：`rsync --delete` 的远端目的地（`host:path`）不再当作宿主相对路径产出删除子树，改为 `unknown` + `knownScope` 的远端范围确认。
+- **反过度防御门禁**：新增覆盖的反向样本与扩展后的普通用法回归（`ssh host ls`、`wsl ls`、`unshare --map-root-user id`、`curl https://example.com`、`scp host:/a /b`、`docker run --rm alpine echo hi`、`kubectl get pvc`、`helm list`、`restic snapshots`、`7z a` 无 `-sdel`、`sgdisk -P`、`parted -l` 等）全部要求放行且零候选。
+
 ## 0.3.0
 
 - **判定模型重构（三档 + 契约规则号）**：动作收敛为拒绝 / 确认 / 放行；默认放行，只兜「不可逆且高后果」。规则号成为契约（`catastrophic.*`、`data.*`、`credential.*`、`execution.*`），支持按规则号放行、一次性放行与 `tightenOnly` 项目层收紧；灾难身份不可确认、不可配置覆盖。取代 0.2.x 的 L1/L2/L3 口径。见 [DSR-025](docs/decisions/DSR-025-定位重定位与判定模型重构.md)、[规则模型](docs/technical-details/规则模型.md)。
