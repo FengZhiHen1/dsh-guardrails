@@ -19,6 +19,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { collectEvidence } from '../src/adapter/evidence/index.js'
+import { createExecutionAnalyzer } from '../src/adapter/analysis/index.js'
 import { decide, isProtectedPath } from '../src/core/decision.js'
 import { matchSystemTree, RULES } from '../src/adapter/evidence/identity.js'
 
@@ -128,14 +129,109 @@ test('an unknown target keeps its analysis reason in the inventory', async (t) =
   assert.deepEqual(evidence.inventory.roots, [])
 })
 
-test('git metadata inside a walked tree makes the inventory unproven', async (t) => {
+test('git metadata inside a walked tree is a deliberate unknown and confirms (DSR-032 decision 2)', async (t) => {
   const root = await makeFixture(t, { files: ['keep.txt'], dirs: ['out/.git/objects'] })
   const evidence = await collectEvidence(analysisWith([
-    deleteOp({ kind: 'exact', paths: [path.join(root, 'out')] }, hostContext(root), { recursive: true }),
+    deleteOp({ kind: 'subtree', root: path.join(root, 'out') }, hostContext(root), { recursive: true }),
   ]), { isProtectedPath: () => false })
-  assert.equal(evidence.inventory.kind, 'unreliable')
+  // DSR-032 decision 2: the observed count stays valid; the .git body is a DELIBERATE
+  // unknown, not an I/O failure, so the inventory is not unreliable and no issue is raised.
+  assert.equal(evidence.inventory.kind, 'exact')
   assert.ok(evidence.inventory.unknown.includes('git-metadata-inside-tree'))
-  assert.ok(evidence.issues.some((issue) => issue.kind === 'git-metadata-inside-tree' && issue.path.endsWith(path.join('out', '.git'))))
+  assert.deepEqual(evidence.issues.filter((issue) => issue.kind === 'git-metadata-inside-tree'), [])
+  // Behavior contract update (DSR-032 decision 2): a whole-tree delete CONFIRMS instead of
+  // being denied as execution.check-failed, and its scope names the destroyed `.git`.
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.notEqual(decision.ruleId, 'execution.check-failed')
+  assert.ok(JSON.stringify(decision.scope).includes('.git'), `scope must name .git: ${JSON.stringify(decision.scope)}`)
+})
+
+// --- real analyzer acceptance: .git inside a deleted tree (DSR-032 decision 2) ---------
+
+const pipelineAnalyzer = createExecutionAnalyzer()
+test.after(() => pipelineAnalyzer.dispose())
+
+async function analyzeDelete(text, cwd) {
+  return pipelineAnalyzer.analyze({
+    source: { kind: 'inline', text },
+    language: 'bash',
+    context: { domain: 'host', cwd, platform: process.platform },
+    origin: { entry: 'target-evidence' },
+  })
+}
+
+test('rm -rf of a tree CONTAINING .git confirms with the .git scope, never check-failed (DSR-032 decision 2)', async (t) => {
+  const parent = await makeFixture(t, {})
+  const root = path.join(parent, 'repo')
+  // A plain `.git` directory, NOT a real repository: the identity probe is not the subject
+  // here and the fixture must stay removable by an ordinary recursive delete.
+  await fs.mkdir(path.join(root, '.git', 'objects'), { recursive: true })
+  await fs.writeFile(path.join(root, 'keep.txt'), 'fixture')
+  await fs.writeFile(path.join(root, 'notes.md'), 'fixture')
+  // Real analyzer: `rm -rf repo` (cwd = parent) produces a recursive delete subtree fact.
+  const analysis = await analyzeDelete('rm -rf repo', parent)
+  assert.equal(analysis.status, 'complete')
+  const deleteOperation = analysis.operations.find((operation) => operation.action === 'delete')
+  assert.ok(deleteOperation, 'the analyzer must produce a delete fact')
+  assert.deepEqual(deleteOperation.target, { kind: 'subtree', root: 'repo' })
+
+  const evidence = await collectEvidence(analysis, { isProtectedPath: () => false })
+  // The in-tree `.git` is a deliberate unknown, not an observation failure.
+  assert.equal(evidence.inventory.kind, 'exact')
+  assert.equal(evidence.inventory.count, 2) // keep.txt + notes.md; .git contents are not counted
+  assert.ok(evidence.inventory.unknown.includes('git-metadata-inside-tree'))
+  assert.deepEqual(evidence.issues.filter((issue) => issue.kind === 'git-metadata-inside-tree'), [])
+  assert.deepEqual(evidence.identities, []) // the tree itself is not the git metadata body
+
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.notEqual(decision.ruleId, 'execution.check-failed')
+  assert.equal(decision.ruleId, 'data.delete.bulk')
+  // The user-visible range names the `.git` metadata that would also be destroyed.
+  assert.ok(JSON.stringify(decision.scope).includes('git metadata (.git)'), JSON.stringify(decision.scope))
+})
+
+test('rm -rf of the .git directory itself stays an absolute catastrophic deny (DSR-032: identity unchanged)', async (t) => {
+  const parent = await makeFixture(t, { dirs: ['repo/.git'] })
+  const gitDir = path.join(parent, 'repo', '.git')
+  const analysis = await analyzeDelete('rm -rf repo/.git', parent)
+  const deleteOperation = analysis.operations.find((operation) => operation.action === 'delete')
+  assert.ok(deleteOperation, 'the analyzer must produce a delete fact')
+  assert.deepEqual(deleteOperation.target, { kind: 'subtree', root: 'repo/.git' })
+  // Inject the read-only common-dir probe: this target IS the repository's real git dir.
+  // The identity layer is unchanged by DSR-032 decision 2 (only the in-tree case moved).
+  const gitRun = async (argv) => {
+    if (argv.includes('--git-common-dir')) return { stdout: gitDir }
+    throw new Error(`unexpected probe: ${argv.join(' ')}`)
+  }
+  const evidence = await collectEvidence(analysis, { isProtectedPath: () => false, gitRun })
+  assert.deepEqual(evidence.identities, [
+    { ruleId: 'catastrophic.git-metadata', path: await fs.realpath(gitDir), action: 'delete' },
+  ])
+  const decision = decide(evidence, {})
+  assert.equal(decision.kind, 'deny')
+  assert.equal(decision.ruleId, 'catastrophic.git-metadata')
+})
+
+test('ordinary directory deletes keep their allow/confirm tiers (DSR-032 regression)', async (t) => {
+  const small = await makeFixture(t, { files: ['a.txt', 'b.txt'] })
+  const smallEvidence = await collectEvidence(analysisWith([
+    deleteOp({ kind: 'subtree', root: small }, hostContext(small), { recursive: true }),
+  ]), { isProtectedPath: () => false })
+  assert.equal(smallEvidence.inventory.kind, 'exact')
+  assert.equal(smallEvidence.inventory.count, 2)
+  assert.deepEqual(smallEvidence.inventory.unknown, [])
+  assert.equal(decide(smallEvidence, {}).kind, 'allow')
+
+  const big = await makeFixture(t, { files: Array.from({ length: 25 }, (unused, index) => `f${String(index).padStart(2, '0')}.txt`) })
+  const bigEvidence = await collectEvidence(analysisWith([
+    deleteOp({ kind: 'subtree', root: big }, hostContext(big), { recursive: true }),
+  ]), { isProtectedPath: () => false })
+  assert.equal(bigEvidence.inventory.kind, 'lower-bound')
+  const bigDecision = decide(bigEvidence, {})
+  assert.equal(bigDecision.kind, 'confirm')
+  assert.equal(bigDecision.ruleId, 'data.delete.bulk')
 })
 
 test('a preview operation removes nothing and is not counted', async (t) => {

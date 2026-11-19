@@ -44,11 +44,11 @@ const OPTIONS = {
   condition: 'certain',
 }
 
-function run(name, args) {
+function run(name, args, extraOptions = {}) {
   const operations = []
   const candidates = []
   const gaps = []
-  const hit = resolveRemoteCommand(name, args, OPTIONS, {
+  const hit = resolveRemoteCommand(name, args, { ...OPTIONS, ...extraOptions }, {
     // Mirrors index.js env.operation: it materializes the boolean fields.
     operation(action, target, options) {
       operations.push({ action, target, recursive: options.recursive ?? false,
@@ -94,10 +94,35 @@ test('aws destructive subcommands confirm with their command scope', () => {
     'aws', 'dynamodb delete-table users')
 })
 
+test('aws batch analytics and log deletion confirm with their selector', () => {
+  // DSR-032 second pass: batch/analytics long tail.
+  assertConfirm(run('aws', ['glue', 'batch-delete-table', '--database-name', 'db',
+    '--tables-to-delete', 'Name=t1']), 'aws', 'glue batch-delete-table Name=t1')
+  assertConfirm(run('aws', ['glue', 'batch-delete-partition', '--database-name', 'db',
+    '--table-name', 't', '--partitions-to-delete', 'Values=p1']),
+  'aws', 'glue batch-delete-partition Values=p1')
+  assertConfirm(run('aws', ['logs', 'delete-log-stream', '--log-group-name', 'lg',
+    '--log-stream-name', 's1']), 'aws', 'logs delete-log-stream s1')
+  assertConfirm(run('aws', ['athena', 'delete-data-catalog', '--name', 'cat1']),
+    'aws', 'athena delete-data-catalog cat1')
+})
+
+test('aws athena TRUNCATE and DROP queries confirm with the SQL text', () => {
+  assertConfirm(run('aws', ['athena', 'start-query-execution', '--query-string', 'TRUNCATE TABLE events']),
+    'aws', 'athena: TRUNCATE TABLE events')
+  assertConfirm(run('aws', ['athena', 'start-query-execution', '--query-string', 'DROP DATABASE analytics']),
+    'aws', 'athena: DROP DATABASE analytics')
+  assertFree(run('aws', ['athena', 'start-query-execution', '--query-string', 'SELECT 1']))
+  assertFree(run('aws', ['athena', 'start-query-execution', '--query-string',
+    'DELETE FROM t WHERE id = 1']))
+})
+
 test('aws read-only and preview forms stay unmodeled', () => {
   assertFree(run('aws', ['s3', 'ls', 's3://bucket']))
   assertFree(run('aws', ['s3', 'rm', 's3://bucket', '--recursive', '--dryrun']))
   assertFree(run('aws', ['ec2', 'describe-instances']))
+  assertFree(run('aws', ['glue', 'get-tables', '--database-name', 'db']))
+  assertFree(run('aws', ['logs', 'describe-log-streams', '--log-group-name', 'lg']))
   assertFree(run('aws', ['--version']))
 })
 
@@ -114,8 +139,27 @@ test('gcloud/gsutil destructive subcommands confirm with their command scope', (
 test('gcloud/gsutil read-only forms stay unmodeled', () => {
   assertFree(run('gcloud', ['compute', 'instances', 'list']))
   assertFree(run('gcloud', ['projects', 'list']))
+  assertFree(run('gcloud', ['storage', 'ls', 'gs://bucket']))
+  assertFree(run('gcloud', ['iam', 'roles', 'list', '--project', 'p']))
+  assertFree(run('gcloud', ['dns', 'managed-zones', 'list']))
+  assertFree(run('gcloud', ['bigtable', 'instances', 'list']))
   assertFree(run('gcloud', ['--version']))
   assertFree(run('gsutil', ['ls', 'gs://bucket']))
+})
+
+test('gcloud storage/Artifact Registry/IAM/DNS/Bigtable deletion confirms', () => {
+  // DSR-032 second pass. `artifacts docker images delete` is the one four-token key.
+  assertConfirm(run('gcloud', ['storage', 'rm', '-r', 'gs://bucket/dir']), 'gcp', 'gs://bucket/dir')
+  assertConfirm(run('gcloud', ['storage', 'objects', 'delete', 'gs://bucket/key']), 'gcp', 'gs://bucket/key')
+  assertConfirm(run('gcloud', ['firestore', 'databases', 'delete', 'db1', '--project', 'p']), 'gcp', 'db1')
+  assertConfirm(run('gcloud', ['artifacts', 'docker', 'images', 'delete', 'us-docker.pkg.dev/p/r/img']),
+    'gcp', 'us-docker.pkg.dev/p/r/img')
+  assertConfirm(run('gcloud', ['artifacts', 'repositories', 'delete', 'repo1', '--location=us']), 'gcp', 'repo1')
+  assertConfirm(run('gcloud', ['iam', 'roles', 'delete', 'role1', '--project', 'p']), 'gcp', 'role1')
+  assertConfirm(run('gcloud', ['dns', 'managed-zones', 'delete', 'zone1']), 'gcp', 'zone1')
+  assertConfirm(run('gcloud', ['bigtable', 'instances', 'delete', 'inst1']), 'gcp', 'inst1')
+  // Already modeled in the first pass; kept here so the table stays one list.
+  assertConfirm(run('gcloud', ['projects', 'delete', 'p1', '--quiet']), 'gcp', 'p1')
 })
 
 // --- azure (F-28) ----------------------------------------------------------
@@ -133,7 +177,25 @@ test('az read-only forms stay unmodeled', () => {
   assertFree(run('az', ['vm', 'list']))
   assertFree(run('az', ['group', 'list']))
   assertFree(run('az', ['account', 'show']))
+  assertFree(run('az', ['account', 'management-group', 'list']))
+  assertFree(run('az', ['keyvault', 'show', '-n', 'kv1']))
+  assertFree(run('az', ['acr', 'repository', 'list', '--name', 'reg1']))
+  assertFree(run('az', ['ad', 'app', 'show', '--id', 'app1']))
   assertFree(run('az', ['--help']))
+})
+
+test('az purge/subscription/management-group/ACR/AD long tail confirms', () => {
+  // DSR-032 second pass; `account management-group delete` is the four-token key
+  // that must not fold into `group delete`.
+  assertConfirm(run('az', ['keyvault', 'purge', '-n', 'kv1']), 'azure', 'kv1')
+  assertConfirm(run('az', ['account', 'subscription', 'cancel', '--id', 'sub1']), 'azure', '(id sub1)')
+  assertConfirm(run('az', ['account', 'management-group', 'delete', '--name', 'mg1']), 'azure', 'mg1')
+  assertConfirm(run('az', ['acr', 'repository', 'delete', '--name', 'reg1', '--image', 'repo:tag']),
+    'azure', 'reg1 (image repo:tag)')
+  assertConfirm(run('az', ['ad', 'app', 'delete', '--id', 'app1']), 'azure', '(id app1)')
+  assertConfirm(run('az', ['ad', 'sp', 'delete', '--id', 'sp1']), 'azure', '(id sp1)')
+  assertConfirm(run('az', ['storage', 'blob', 'delete-batch', '--source', 'cont1', '--pattern', '*.log']),
+    'azure', '(source cont1) (pattern *.log)')
 })
 
 // --- SQL shells (F-29) -----------------------------------------------------
@@ -177,6 +239,20 @@ test('kubectl read-only and help forms stay unmodeled', () => {
   assertFree(run('kubectl', ['delete', '-f', 'manifest.yaml', '--dry-run=client']))
 })
 
+test('kubectl apply --force is a delete-recreate over the manifest target', () => {
+  // DSR-032 second pass: `--force` (not `--force-conflicts`) deletes and recreates.
+  assertConfirm(run('kubectl', ['apply', '--force', '-f', 'deploy.yaml']), 'k8s', 'apply --force deploy.yaml')
+  assertConfirm(run('kubectl', ['apply', '-k', 'overlays/prod', '--force']), 'k8s', 'apply --force overlays/prod')
+  assertConfirm(run('kubectl', ['apply', '--force', '-f', 'a.yaml', '--prune']),
+    'k8s', 'apply --prune --force a.yaml')
+  // A dry run stays a preview even together with `--force`.
+  assertFree(run('kubectl', ['apply', '-f', 'deploy.yaml', '--force', '--dry-run=client']))
+  assertFree(run('kubectl', ['apply', '-f', 'deploy.yaml', '--dry-run=server', '--force']))
+  // Plain apply and the server-side conflict flag are not deletion forms.
+  assertFree(run('kubectl', ['apply', '-f', 'x.yaml']))
+  assertFree(run('kubectl', ['apply', '-f', 'x.yaml', '--server-side', '--force-conflicts']))
+})
+
 // --- docker (F-31) ---------------------------------------------------------
 
 test('docker destructive prune/remove forms confirm with their scope', () => {
@@ -194,6 +270,26 @@ test('docker read-only forms stay unmodeled', () => {
   assertFree(run('docker', ['--version']))
 })
 
+test('compose down removes named volumes only with -v/--volumes', () => {
+  // DSR-032 second pass: `down` alone removes containers; `-v`/`--volumes` (or a
+  // down short-flag cluster containing `v`) removes the named volumes as well.
+  assertConfirm(run('docker', ['compose', 'down', '-v']), 'docker', 'compose down --volumes')
+  assertConfirm(run('docker', ['compose', 'down', '--volumes']), 'docker', 'compose down --volumes')
+  assertConfirm(run('docker', ['compose', '-f', 'prod.yml', 'down', '-v']),
+    'docker', 'compose down --volumes')
+  assertConfirm(run('docker', ['compose', 'down', '-vt', '5']), 'docker', 'compose down --volumes')
+  assertConfirm(run('docker-compose', ['down', '-v']), 'docker', 'docker-compose down --volumes')
+  assertConfirm(run('docker-compose', ['down', '--volumes']), 'docker', 'docker-compose down --volumes')
+  assertFree(run('docker', ['compose', 'down']))
+  assertFree(run('docker', ['compose', '-f', 'prod.yml', 'down']))
+  assertFree(run('docker', ['compose', 'ps']))
+  assertFree(run('docker', ['compose', 'up', '-d']))
+  assertFree(run('docker', ['compose', 'down', '-t', '5']))
+  assertFree(run('docker-compose', ['down']))
+  assertFree(run('docker-compose', ['ps']))
+  assertFree(run('docker-compose', ['down', '--help']))
+})
+
 // --- terraform (F-32) ------------------------------------------------------
 
 test('terraform destroy forms confirm with the state scope', () => {
@@ -208,6 +304,87 @@ test('terraform plan/validate/help stay unmodeled', () => {
   assertFree(run('terraform', ['apply', '-auto-approve']))
   assertFree(run('terraform', ['destroy', '-help']))
   assertFree(run('terraform', ['--version']))
+})
+
+// --- DSR-032 second pass: redis / snowsql / databricks / supabase ----------
+
+test('redis-cli shutdown is destructive only with NOSAVE', () => {
+  assertConfirm(run('redis-cli', ['shutdown', 'nosave']), 'redis', 'redis: SHUTDOWN NOSAVE')
+  assertConfirm(run('redis-cli', ['-n', '0', 'SHUTDOWN', 'NOSAVE']), 'redis', 'redis: SHUTDOWN NOSAVE')
+  assertFree(run('redis-cli', ['shutdown']))
+  assertFree(run('redis-cli', ['SHUTDOWN', 'SAVE']))
+  assertFree(run('redis-cli', ['GET', 'k']))
+  // The existing flush facts are untouched.
+  assertConfirm(run('redis-cli', ['FLUSHALL']), 'redis', 'redis: FLUSHALL')
+})
+
+test('SQL text recognizes DDL objects beyond table/database/schema', () => {
+  // DSR-032 second pass: warehouse/user/role were previously unmodeled.
+  assertConfirm(run('snowsql', ['-q', 'DROP WAREHOUSE wh1']), 'snowflake', 'snowsql: DROP WAREHOUSE wh1')
+  assertConfirm(run('snowsql', ['-q', 'drop user bob']), 'snowflake', 'snowsql: drop user bob')
+  assertConfirm(run('snowsql', ['-q', 'DROP ROLE analyst']), 'snowflake', 'snowsql: DROP ROLE analyst')
+  assertConfirm(run('snowsql', ['--query', 'DROP STAGE analytics.raw']),
+    'snowflake', 'snowsql: DROP STAGE analytics.raw')
+  assertConfirm(run('psql', ['-c', 'DROP VIEW public.active_users']), 'postgres', 'SQL: DROP VIEW public.active_users')
+  assertConfirm(run('psql', ['-c', 'DROP MATERIALIZED VIEW public.mv']), 'postgres', 'SQL: DROP MATERIALIZED VIEW public.mv')
+  assertFree(run('snowsql', ['-q', 'SELECT 1']))
+  assertFree(run('psql', ['-c', 'DROP INDEX IF EXISTS users_email_idx']))
+})
+
+test('databricks fs rm and supabase storage rm confirm with their target', () => {
+  assertConfirm(run('databricks', ['fs', 'rm', '-r', 'dbfs:/tmp/dataset']),
+    'databricks', 'databricks fs rm dbfs:/tmp/dataset/** (recursive)')
+  assertConfirm(run('databricks', ['fs', 'rm', 'dbfs:/tmp/file.parquet']),
+    'databricks', 'databricks fs rm dbfs:/tmp/file.parquet')
+  assertConfirm(run('databricks', ['-p', 'staging', 'fs', 'rm', '-r', 'dbfs:/tmp/x']),
+    'databricks', 'databricks fs rm dbfs:/tmp/x/** (recursive)')
+  assertFree(run('databricks', ['fs', 'ls', 'dbfs:/tmp']))
+  assertFree(run('databricks', ['fs', 'rm']))
+  assertConfirm(run('supabase', ['storage', 'rm', 'ss:///bucket/path/file.txt']),
+    'supabase', 'supabase storage rm ss:///bucket/path/file.txt')
+  assertFree(run('supabase', ['storage', 'ls', 'ss:///bucket']))
+  assertFree(run('supabase', ['db', 'dump']))
+})
+
+// --- DSR-032 second pass: BigQuery / Pulumi / MinIO clients ----------------
+
+test('bq rm and bq query confirm with their target or SQL text', () => {
+  assertConfirm(run('bq', ['rm', '-r', 'my_dataset']), 'bigquery', 'bq rm my_dataset/** (recursive)')
+  assertConfirm(run('bq', ['rm', '-t', 'my_dataset.my_table']), 'bigquery', 'bq rm my_dataset.my_table')
+  assertConfirm(run('bq', ['query', 'TRUNCATE TABLE d.t']), 'bigquery', 'bq query: TRUNCATE TABLE d.t')
+  assertConfirm(run('bq', ['--project_id', 'p', 'query', 'DROP TABLE d.t']), 'bigquery', 'bq query: DROP TABLE d.t')
+  assertConfirm(run('bq', ['query', 'DELETE FROM d.t']), 'bigquery', 'bq query: DELETE FROM d.t')
+  assertFree(run('bq', ['ls']))
+  assertFree(run('bq', ['show', 'd.t']))
+  assertFree(run('bq', ['query', 'SELECT 1']))
+  assertFree(run('bq', ['query', 'DELETE FROM d.t WHERE id = 1']))
+  assertFree(run('bq', ['query', '--dry_run', 'DROP TABLE d.t']))
+  assertFree(run('bq', ['rm']))
+})
+
+test('pulumi stack rm confirms with the stack; stack ls stays free', () => {
+  assertConfirm(run('pulumi', ['stack', 'rm', 'prod-old']), 'pulumi', 'pulumi stack rm prod-old')
+  assertConfirm(run('pulumi', ['--cwd', './prod', 'stack', 'rm', 'prod-old', '--yes']),
+    'pulumi', 'pulumi stack rm prod-old')
+  // No operand removes the selected stack, the same shape as `terraform workspace delete`.
+  assertConfirm(run('pulumi', ['stack', 'rm']), 'pulumi', 'pulumi stack rm (selected stack)')
+  assertFree(run('pulumi', ['stack', 'ls']))
+  assertFree(run('pulumi', ['stack', 'select', 'prod']))
+  assertFree(run('pulumi', ['preview']))
+  assertFree(run('pulumi', ['stack', 'rm', '--help']))
+})
+
+test('mc rb and mc rm confirm with the bucket or object target', () => {
+  assertConfirm(run('mc', ['rb', 'myminio/bucket']), 'minio', 'mc rb myminio/bucket')
+  assertConfirm(run('mc', ['rb', '--force', 'myminio/bucket']), 'minio', 'mc rb myminio/bucket')
+  assertConfirm(run('mc', ['rm', 'myminio/bucket/obj.txt']), 'minio', 'mc rm myminio/bucket/obj.txt')
+  assertConfirm(run('mc', ['--json', 'rm', '--recursive', '--force', '--dangerous', 'myminio/bucket']),
+    'minio', 'mc rm myminio/bucket/** (recursive)')
+  assertFree(run('mc', ['ls', 'myminio/bucket']))
+  assertFree(run('mc', ['stat', 'myminio/bucket/obj']))
+  assertFree(run('mc', ['cp', './a', 'myminio/bucket/']))
+  assertFree(run('mc', ['rm']))
+  assertFree(run('mc', ['--version']))
 })
 
 // --- interface guard -------------------------------------------------------
@@ -257,12 +434,51 @@ test('downloads, server-side copies, stdin and dynamic uploads stay free', () =>
 test('scp reads local sources only in the upload direction', () => {
   assertRead(run('scp', ['-r', './dir', 'host:/dst']), './dir')
   assertRead(run('scp', ['-P', '2222', './a', 'user@host:/b']), './a')
-  assertRead(run('scp', ['-i', 'id_ed25519', '-o', 'StrictHostKeyChecking=no', './a', 'host:/b']), './a')
   assertRead(run('scp', ['C:\\data\\a.txt', 'host:/b']), 'C:\\data\\a.txt')
+  // Second pass: `-i <file>` is authentication input with no outward transfer, so
+  // it no longer adds an identity read. The upload source keeps its own fact, and
+  // a download or a bare identity line produces nothing (was: identity read).
+  const withIdentity = run('scp', ['-i', 'id_ed25519', '-o', 'StrictHostKeyChecking=no', './a', 'host:/b'])
+  assert.deepEqual(withIdentity.operations.map((operation) => operation.target),
+    [{ kind: 'exact', paths: ['./a'] }])
+  assertFree(run('scp', ['-i', 'id_ed25519', 'host:/a', './b']))
+  assertFree(run('scp', ['-i/tmp/id_rsa', 'host:/a']))
   assertFree(run('scp', ['file', '.']))
   assertFree(run('scp', ['host:/a', '/b']))
   assertFree(run('scp', ['-', 'user@host:/b']))
   assertFree(run('scp', ['-r', './a']))
+})
+
+// --- DSR-032 决定 5: transfer identity files and sftp batch mode ----------
+
+test('sftp -i is authentication input and stays free', () => {
+  // Second pass: the identity file is not modeled as a disclosure read; `-i -`
+  // (stdin) and the interactive/help forms were already free.
+  assertFree(run('sftp', ['-i', 'id_rsa', 'host']))
+  assertFree(run('sftp', ['-i/tmp/id_ed25519', 'host']))
+  assertFree(run('sftp', ['-i', '-', 'host']))
+})
+
+test('sftp batch mode is an unverified-effect candidate carrying the batch scope', () => {
+  const direct = run('sftp', ['-b', 'batch.txt', 'host'])
+  assert.equal(direct.hit, true)
+  assert.equal(direct.operations.length, 0)
+  assert.equal(direct.candidates.length, 1)
+  assert.equal(direct.candidates[0].kind, 'unverified-effect')
+  const attached = run('sftp', ['-bbatch.txt', 'host'])
+  assert.equal(attached.candidates.length, 1)
+  const stdinBatch = run('sftp', ['-b', '-', 'host'])
+  assert.equal(stdinBatch.candidates.length, 1)
+  const heredoc = run('sftp', ['host'], { heredocs: [{ operator: '<<', body: 'put secret.txt\nrm /data\n' }] })
+  assert.equal(heredoc.candidates.length, 1)
+  assert.equal(heredoc.operations.length, 0)
+})
+
+test('interactive and help sftp forms stay free', () => {
+  assertFree(run('sftp', ['host']))
+  assertFree(run('sftp', ['-V']))
+  assertFree(run('sftp', ['-h']))
+  assertFree(run('sftp', ['host', 'get', 'file']))
 })
 
 // --- rsync upload reads (routed through commands.js) ----------------------
@@ -425,6 +641,29 @@ const DECISION_GROUPS = [
     'aws ec2 delete-volume --volume-ids=vol-2',
     'aws rds delete-db-instance --db-instance-identifier=db2',
     'aws dynamodb delete-table --table-name=t2',
+    // DSR-032 决定 9: analytics / streaming / audit / object-store long tail.
+    'aws eks delete-cluster --name prod-eks',
+    'aws glue delete-database --name legacy',
+    'aws glue delete-table --database-name db --name users',
+    'aws glue delete-partition --database-name db --table-name t --partition-values p1',
+    'aws glue delete-crawler --name crawler1',
+    'aws glue delete-job --job-name etl',
+    'aws athena start-query-execution --query-string "DROP TABLE analytics.events"',
+    'aws athena start-query-execution --query-string "delete from analytics.events"',
+    'aws redshift delete-cluster --cluster-identifier dw1',
+    'aws kinesis delete-stream --stream-name events',
+    'aws cloudtrail delete-trail --name org-trail',
+    'aws s3api delete-object --bucket b1 --key k1',
+    'aws s3api delete-objects --bucket b1 --delete file://list.json',
+    'aws s3 sync --delete ./site s3://bucket/site',
+    'aws ecr batch-delete-image --repository-name app --image-ids imageTag=latest',
+    // DSR-032 second pass: batch analytics / log / catalog deletion.
+    'aws glue batch-delete-table --database-name db --tables-to-delete Name=t1',
+    'aws glue batch-delete-partition --database-name db --table-name t --partitions-to-delete Values=p1',
+    'aws logs delete-log-stream --log-group-name lg --log-stream-name s1',
+    'aws athena start-query-execution --query-string "TRUNCATE TABLE events"',
+    'aws athena start-query-execution --query-string "DROP DATABASE analytics"',
+    'aws athena delete-data-catalog --name cat1',
   ]],
   ['gcloud', [
     'gcloud compute instances delete inst1 --quiet',
@@ -454,6 +693,16 @@ const DECISION_GROUPS = [
     'gcloud --project p compute instances delete vm-2',
     'gcloud --project=p compute instances delete vm-3',
     'gcloud --quiet compute instances delete vm-4',
+    'gcloud dataproc clusters delete dc1 --region=us-central1',
+    // DSR-032 second pass.
+    'gcloud storage rm -r gs://bucket/dir',
+    'gcloud storage objects delete gs://bucket/key',
+    'gcloud firestore databases delete db1',
+    'gcloud artifacts docker images delete us-docker.pkg.dev/p/r/img',
+    'gcloud artifacts repositories delete repo1',
+    'gcloud iam roles delete role1',
+    'gcloud dns managed-zones delete zone1',
+    'gcloud bigtable instances delete inst1',
   ]],
   ['gsutil', [
     'gsutil rm -r gs://bucket',
@@ -488,6 +737,14 @@ const DECISION_GROUPS = [
     'az storage container delete --account-name acc -n cont1',
     'az storage blob delete --account-name acc --container-name cont1 --name blob1',
     'az vm delete --name=vm2 --resource-group=rg2',
+    // DSR-032 second pass.
+    'az keyvault purge -n kv1',
+    'az account subscription cancel --id sub1',
+    'az account management-group delete --name mg1',
+    'az acr repository delete --name reg1 --image repo:tag',
+    'az ad app delete --id app1',
+    'az ad sp delete --id sp1',
+    'az storage blob delete-batch --source cont1 --pattern "*.log"',
   ]],
   ['kubectl', [
     'kubectl delete namespace prod',
@@ -510,6 +767,14 @@ const DECISION_GROUPS = [
     'kubectl replace --force -f deploy.yaml',
     'kubectl drain node1 --delete-emptydir-data',
     'kubectl drain node2 --force',
+    'kubectl apply --prune -f deploy.yaml',
+    'kubectl apply --prune -f ./manifests/',
+    'kubectl delete pods --all-namespaces',
+    'kubectl delete ns -A',
+    // DSR-032 second pass: apply --force deletes and recreates.
+    'kubectl apply --force -f deploy.yaml',
+    'kubectl apply -k overlays/prod --force',
+    'kubectl apply --force -f deploy.yaml --prune',
   ]],
   ['helm', [
     'helm uninstall rel1',
@@ -532,6 +797,11 @@ const DECISION_GROUPS = [
     'docker --context prod volume rm pgdata',
     'docker -H ssh://h system prune -af',
     'docker --context=prod volume rm pgdata2',
+    // DSR-032 second pass: compose down removes named volumes only with -v.
+    'docker compose down -v',
+    'docker compose down --volumes',
+    'docker compose -f prod.yml down -v',
+    'docker-compose down -v',
   ]],
   ['terraform', [
     'terraform destroy',
@@ -552,6 +822,8 @@ const DECISION_GROUPS = [
     'mongosh --eval "db.sessions.remove({})"',
     'redis-cli FLUSHALL',
     'redis-cli -n 0 FLUSHDB',
+    'redis-cli shutdown nosave',
+    'redis-cli SHUTDOWN NOSAVE',
     'mysqladmin drop appdb',
     'dropdb appdb',
     'clickhouse-client -q "DROP TABLE events"',
@@ -594,6 +866,47 @@ const DECISION_GROUPS = [
   ['infisical', [
     'infisical secrets delete API_KEY',
     'infisical secrets delete API_KEY --env prod',
+  ]],
+  ['azcopy', [
+    'azcopy remove https://acct.blob.core.windows.net/cont/blob',
+    'azcopy sync --delete ./site https://acct.blob.core.windows.net/web',
+  ]],
+  ['supabase', [
+    'supabase db reset',
+    'supabase migration down',
+    'supabase storage rm ss:///bucket/path/file.txt',
+  ]],
+  ['databricks', [
+    'databricks bundle destroy',
+    'databricks fs rm -r dbfs:/tmp/dataset',
+    'databricks fs rm dbfs:/tmp/file.parquet',
+  ]],
+  ['snowflake', [
+    'snowsql -q "DROP TABLE analytics.events"',
+    'snowsql --query "TRUNCATE TABLE analytics.events"',
+    'snowsql -q "DELETE FROM analytics.events"',
+    // DSR-032 second pass: warehouse/user/role DDL objects.
+    'snowsql -q "DROP WAREHOUSE wh1"',
+    'snowsql -q "drop user bob"',
+    'snowsql -q "DROP ROLE analyst"',
+  ]],
+  ['bigquery', [
+    'bq rm -r my_dataset',
+    'bq rm -t my_dataset.my_table',
+    'bq query "TRUNCATE TABLE d.t"',
+    'bq query "DROP TABLE d.t"',
+    'bq query "DELETE FROM d.t"',
+  ]],
+  ['pulumi', [
+    'pulumi stack rm prod-old',
+    'pulumi --cwd ./prod stack rm prod-old --yes',
+    'pulumi stack rm',
+  ]],
+  ['minio', [
+    'mc rb myminio/bucket',
+    'mc rb --force myminio/bucket',
+    'mc rm myminio/bucket/obj.txt',
+    'mc --json rm --recursive --force --dangerous myminio/bucket',
   ]],
 ]
 
@@ -672,6 +985,63 @@ const ALLOW_SURFACE = [
   'redis-cli GET k',
   'redis-cli KEYS *',
   'sqlite3 app.db "SELECT 1"',
+  // DSR-032 决定 9: read-only / query forms of the long-tail providers.
+  'aws eks list-clusters',
+  'aws glue get-databases',
+  'aws glue get-table --database-name db --name t',
+  'aws kinesis describe-stream --stream-name s',
+  'aws cloudtrail describe-trails',
+  'aws s3api list-objects --bucket b',
+  'aws athena start-query-execution --query-string "SELECT 1"',
+  'aws ecr describe-repositories',
+  'aws s3 sync --delete ./site ./local',
+  'gcloud dataproc clusters list',
+  'azcopy list https://acct.blob.core.windows.net/cont',
+  'azcopy copy ./a https://acct.blob.core.windows.net/cont/a',
+  'kubectl apply -f deploy.yaml',
+  'supabase db dump',
+  'databricks bundle validate',
+  'snowsql -q "SELECT 1"',
+  'sftp host',
+  'sftp -V',
+  'sftp -h',
+  // The transfer identity file is authentication input, not a disclosure read.
+  'sftp -i id_rsa host',
+  'scp -i id_ed25519 host:/data ./data',
+  // DSR-032 second pass: read-only forms of the newly modeled subcommands.
+  'gcloud storage ls',
+  'gcloud iam roles list',
+  'gcloud artifacts repositories list',
+  'gcloud dns managed-zones list',
+  'az keyvault show -n kv1',
+  'az keyvault purge --help',
+  'az account management-group list',
+  'az acr repository list --name reg1',
+  'aws glue get-tables --database-name db',
+  'aws logs describe-log-streams --log-group-name lg',
+  'aws athena start-query-execution --query-string "DELETE FROM t WHERE id = 1"',
+  'kubectl apply -f deploy.yaml --force --dry-run=client',
+  'kubectl apply -f deploy.yaml --server-side --force-conflicts',
+  'docker compose ps',
+  'docker compose down',
+  'docker compose down -t 5',
+  'docker-compose down',
+  'docker-compose ps',
+  'redis-cli shutdown',
+  'redis-cli SHUTDOWN SAVE',
+  'psql -c "DROP INDEX IF EXISTS users_email_idx"',
+  'bq ls',
+  'bq show my_dataset.my_table',
+  'bq query "SELECT 1"',
+  'bq query --dry_run "DROP TABLE d.t"',
+  'pulumi stack ls',
+  'pulumi stack select prod',
+  'pulumi preview',
+  'mc ls myminio/bucket',
+  'mc stat myminio/bucket/obj',
+  'mc cp ./a myminio/bucket/',
+  'databricks fs ls dbfs:/tmp',
+  'supabase storage ls ss:///bucket',
 ]
 
 test('previews and read-only forms stay allow with no candidates and no effective operations', async () => {
@@ -682,7 +1052,10 @@ const SCP_UPLOADS = [
   ['scp ./key user@host:/backup/key', ['./key']],
   ['scp -r ./dir host:/dst', ['./dir']],
   ['scp -P 2222 ./a ./b user@host:/dst/', ['./a', './b']],
-  ['scp -i id_ed25519 -o StrictHostKeyChecking=no ./archive.tgz user@host:/backup/', ['./archive.tgz']],
+  // Second pass: the `-i` identity file no longer adds a read fact, so the
+  // uploaded archive is the only local read.
+  ['scp -i id_ed25519 -o StrictHostKeyChecking=no ./archive.tgz user@host:/backup/',
+    ['./archive.tgz']],
 ]
 
 test('scp uploads only produce allowed local read facts (no candidates)', async () => {
@@ -718,4 +1091,42 @@ test('the upload read fact reaches the existing credential.file.read rule', asyn
   }, {})
   assert.equal(decision.kind, 'confirm')
   assert.equal(decision.ruleId, 'credential.file.read')
+})
+
+// --- DSR-032 决定 5: decision-level transfer facts ------------------------
+
+test('sftp batch mode confirms as execution.unverified-effect with its batch scope', async () => {
+  const commands = [
+    'sftp -b batch.txt host',
+    'sftp -b - host',
+    'sftp host <<EOF\nput id_rsa /tmp/\nEOF',
+  ]
+  for (const command of commands) {
+    const { analysis, decision } = await evaluate(command)
+    assert.equal(decision.kind, 'confirm',
+      `${command}: expected confirm, got ${decision.kind} ${decision.ruleId ?? ''}`)
+    assert.equal(decision.ruleId, 'execution.unverified-effect', command)
+    assert.equal(analysis.candidates.length, 1, command)
+    assert.equal(analysis.candidates[0].kind, 'unverified-effect', command)
+    assert.ok(analysis.candidates[0].knownScope.length > 0, `${command}: candidate scope`)
+    assert.deepEqual(analysis.operations, [], `${command}: batch mode emits no delete operation`)
+  }
+})
+
+test('the transfer identity file produces no read fact of its own', async () => {
+  // Second pass: `scp -i` / `sftp -i` authenticate with the key but do not read it
+  // for disclosure, so the transfer itself yields no effective operation.
+  for (const command of ['sftp -i id_rsa host', 'scp -i id_ed25519 host:/data ./data']) {
+    const { analysis, decision } = await evaluate(command)
+    assert.equal(decision.kind, 'allow', `${command}: expected allow, got ${decision.kind} ${decision.ruleId ?? ''}`)
+    assert.deepEqual(analysis.candidates, [], command)
+    assert.deepEqual((analysis.operations ?? []).filter((operation) => operation.preview !== true), [], command)
+  }
+  // The uploaded source keeps its read fact and stays reachable by the credential rule.
+  const upload = await evaluate('scp -i id_ed25519 ./archive.tgz user@host:/backup/')
+  assert.equal(upload.decision.kind, 'allow',
+    `expected allow, got ${upload.decision.kind} ${upload.decision.ruleId ?? ''}`)
+  assert.deepEqual(upload.analysis.candidates, [])
+  assert.deepEqual((upload.analysis.operations ?? []).filter((operation) => operation.preview !== true)
+    .map((operation) => operation.target), [{ kind: 'exact', paths: ['./archive.tgz'] }])
 })

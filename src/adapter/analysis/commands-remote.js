@@ -40,6 +40,24 @@ function isPreview(args) {
       value.startsWith('--dry-run=') || value.startsWith('--dryrun=')))
 }
 
+/** Literal value of `--flag value` / `--flag=value`; `undefined` when absent,
+ * `null` when present with a non-literal value (DSR-032 决定 5/9 selectors). */
+function flagValue(args, flag) {
+  for (let index = 0; index < args.length; index++) {
+    const value = args[index]
+    if (typeof value !== 'string') continue
+    if (value === flag) {
+      const assigned = args[index + 1]
+      return typeof assigned === 'string' ? assigned : null
+    }
+    if (value.startsWith(`${flag}=`)) {
+      const assigned = value.slice(flag.length + 1)
+      return assigned || null
+    }
+  }
+  return undefined
+}
+
 const REMOTE_URL = /^[a-z0-9]+:\/\//iu
 
 /**
@@ -128,6 +146,23 @@ const AWS_DELETIONS = new Map([
   ['rds delete-db-cluster', { flags: ['--db-cluster-identifier'], label: 'rds delete-db-cluster' }],
   ['dynamodb delete-table', { flags: ['--table-name'], label: 'dynamodb delete-table' }],
   ['dynamodb delete-backup', { flags: ['--backup-arn'], label: 'dynamodb delete-backup' }],
+  // DSR-032 决定 9: analytics / streaming / audit long tail (confirm grade).
+  ['eks delete-cluster', { flags: ['--name'], label: 'eks delete-cluster' }],
+  ['glue delete-database', { flags: ['--name'], label: 'glue delete-database' }],
+  ['glue delete-table', { flags: ['--name'], label: 'glue delete-table' }],
+  ['glue delete-partition', { flags: ['--partition-values'], label: 'glue delete-partition' }],
+  ['glue delete-crawler', { flags: ['--name'], label: 'glue delete-crawler' }],
+  ['glue delete-job', { flags: ['--job-name'], label: 'glue delete-job' }],
+  ['redshift delete-cluster', { flags: ['--cluster-identifier'], label: 'redshift delete-cluster' }],
+  ['kinesis delete-stream', { flags: ['--stream-name'], label: 'kinesis delete-stream' }],
+  ['cloudtrail delete-trail', { flags: ['--name'], label: 'cloudtrail delete-trail' }],
+  ['ecr batch-delete-image', { flags: ['--repository-name'], label: 'ecr batch-delete-image' }],
+  // DSR-032 second pass: batch analytics/log deletion.
+  ['glue batch-delete-table', { flags: ['--tables-to-delete'], label: 'glue batch-delete-table' }],
+  ['glue batch-delete-partition',
+    { flags: ['--partitions-to-delete'], label: 'glue batch-delete-partition' }],
+  ['logs delete-log-stream', { flags: ['--log-stream-name'], label: 'logs delete-log-stream' }],
+  ['athena delete-data-catalog', { flags: ['--name'], label: 'athena delete-data-catalog' }],
 ])
 
 /** s3 `cp`/`sync` flags: known booleans and value-taking options. */
@@ -209,7 +244,18 @@ function awsCommand(args, options, env) {
     const tail = rest.slice(2)
     if (sub === 'cp' || sub === 'sync') {
       const operands = cloudOperands(tail, 0, { valueFlags: AWS_S3_VALUE_FLAGS, boolFlags: AWS_S3_BOOL_FLAGS })
-      return emitCloudUpload(operands, 's3://', options, env)
+      let emitted = emitCloudUpload(operands, 's3://', options, env)
+      // DSR-032 决定 9: `aws s3 sync --delete <local> s3://…` mirrors deletions
+      // onto the remote destination. A local destination is left to the local
+      // deletion surface, so it produces nothing here.
+      if (sub === 'sync' && tail.some((value) => value === '--delete') && Array.isArray(operands) && operands.length) {
+        const destination = operands[operands.length - 1]
+        if (typeof destination === 'string' && destination.toLowerCase().startsWith('s3://')) {
+          emitRemoteDelete('aws', `s3 sync --delete ${destination} (remote mirror)`, options, env)
+          emitted = true
+        }
+      }
+      return emitted
     }
     if (sub !== 'rm' && sub !== 'rb') return false
     const targets = tail.filter((value) => typeof value === 'string' && /^s3:\/\//iu.test(value))
@@ -225,6 +271,41 @@ function awsCommand(args, options, env) {
     const recursive = tail.includes('--recursive')
     const scope = recursive ? targets.map((url) => `${url}/** (recursive)`).join(' ') : targets.join(' ')
     return emitRemoteDelete('aws', scope, options, env)
+  }
+  // DSR-032 决定 9: object deletion names bucket and key literally. `--delete`
+  // carries the key list JSON (the scope stays the addressed bucket); a call
+  // without the selector is a usage error and stays free.
+  if (service === 's3api' && (sub === 'delete-object' || sub === 'delete-objects')) {
+    const tail = rest.slice(2)
+    const bucket = flagValue(tail, '--bucket')
+    if (sub === 'delete-object') {
+      const key = flagValue(tail, '--key')
+      if (typeof bucket === 'string' && typeof key === 'string') {
+        return emitRemoteDelete('aws', `s3api delete-object ${bucket}/${key}`, options, env)
+      }
+      if (bucket === null || key === null) {
+        return emitRemoteDelete('aws', 's3api delete-object (selection not literal)', options, env)
+      }
+      return false
+    }
+    if (typeof bucket === 'string') {
+      if (flagValue(tail, '--delete') === undefined) return false
+      return emitRemoteDelete('aws', `s3api delete-objects ${bucket}`, options, env)
+    }
+    if (bucket === null) return emitRemoteDelete('aws', 's3api delete-objects (selection not literal)', options, env)
+    return false
+  }
+  // DSR-032 决定 9: an Athena query string is destructive only when its literal
+  // text is DROP/TRUNCATE/DELETE without WHERE; anything else stays a gap.
+  if (service === 'athena' && sub === 'start-query-execution') {
+    const query = flagValue(rest.slice(2), '--query-string')
+    if (typeof query !== 'string') return false
+    const scopes = sqlDestructiveScopes([query])
+    if (!scopes.length) return false
+    for (const scope of scopes) {
+      emitRemoteDelete('aws', `athena: ${scope.startsWith('SQL: ') ? scope.slice(5) : scope}`, options, env)
+    }
+    return true
   }
   const entry = AWS_DELETIONS.get(`${service} ${sub}`)
   if (!entry) return false
@@ -262,8 +343,18 @@ const GCLOUD_DELETIONS = new Set([
   'deployment-manager deployments delete',
   'bigquery datasets delete',
   'bigquery tables delete',
+  'dataproc clusters delete',
   'spanner instances delete',
   'redis instances delete',
+  // DSR-032 second pass: storage/Artifact Registry/IAM/DNS/Bigtable long tail.
+  'storage rm',
+  'storage objects delete',
+  'firestore databases delete',
+  'artifacts docker images delete',
+  'artifacts repositories delete',
+  'iam roles delete',
+  'dns managed-zones delete',
+  'bigtable instances delete',
 ])
 /** gcloud flags that take a value and may precede the resource name. */
 const GCLOUD_VALUE_FLAGS = new Set(['--zone', '--region', '--location', '--project', '--configuration',
@@ -271,10 +362,11 @@ const GCLOUD_VALUE_FLAGS = new Set(['--zone', '--region', '--location', '--proje
   '--account', '--billing-project', '--verbosity', '--content-type', '--cache-control', '--storage-class',
   '--encryption-key', '--decryption-key', '--continue-on-error', '--perf-trace-token', '--trace-token'])
 const GCLOUD_BOOLEAN_FLAGS = new Set(['--quiet', '--no-quiet', '--async', '--recursive', '-r', '--all',
-  '--no-clobber', '--preserve-acl', '--all-versions', '--gzip-in-flight', '--no-gzip-in-flight'])
+  '--no-clobber', '--preserve-acl', '--all-versions', '--gzip-in-flight', '--no-gzip-in-flight',
+  '--delete-tags', '--delete-unmatched-destination-objects'])
 
 function gcloudDeletionKey(args) {
-  for (const length of [3, 2]) {
+  for (const length of [4, 3, 2]) {
     if (args.length < length) continue
     const key = args.slice(0, length)
       .map((value) => typeof value === 'string' ? value.toLowerCase() : '')
@@ -392,6 +484,7 @@ const AZ_DELETIONS = new Map([
   ['sql db delete', azRoles({ '-s': 'server', '--server': 'server' })],
   ['storage account delete', azRoles()],
   ['keyvault delete', azRoles()],
+  ['keyvault purge', azRoles({ '--location': 'location' })],
   ['keyvault key delete', azRoles({ '--vault-name': 'vault' })],
   ['keyvault secret delete', azRoles({ '--vault-name': 'vault' })],
   ['webapp delete', azRoles()],
@@ -402,20 +495,31 @@ const AZ_DELETIONS = new Map([
   ['disk delete', azRoles()],
   ['snapshot delete', azRoles()],
   ['acr delete', azRoles()],
+  ['acr repository delete', azRoles({ '--registry': 'registry', '--repository': 'repository',
+    '--image': 'image' })],
   ['cosmosdb delete', azRoles()],
   ['redis delete', azRoles()],
   ['identity delete', azRoles()],
+  ['ad app delete', azRoles({ '--id': 'id' })],
+  ['ad sp delete', azRoles({ '--id': 'id' })],
+  ['account subscription cancel', azRoles({ '--id': 'id' })],
+  ['account management-group delete', azRoles({ '--id': 'id' })],
   ['role assignment delete', azRoles({ '--assignee': 'assignee', '--assignee-object-id': 'assignee',
     '--role': 'role', '--scope': 'scope', '--ids': 'ids' })],
   ['storage container delete', azRoles({ '--account-name': 'account' })],
   ['storage blob delete', azRoles({ '--account-name': 'account', '--container-name': 'container' })],
+  ['storage blob delete-batch', azRoles({ '--account-name': 'account', '--source': 'source',
+    '--pattern': 'pattern' })],
 ])
 const AZ_BOOLEAN_FLAGS = new Set(['-y', '--yes', '--no-wait', '--force', '--verbose', '--debug',
-  '--only-show-errors', '--include-inherited', '--overwrite'])
-const AZ_ROLE_ORDER = ['group', 'server', 'vault', 'account', 'container', 'assignee', 'role', 'scope', 'ids']
+  '--only-show-errors', '--include-inherited', '--overwrite', '--recursive', '--delete-snapshots'])
+const AZ_ROLE_ORDER = ['group', 'server', 'vault', 'account', 'container', 'registry', 'repository',
+  'image', 'source', 'pattern', 'id', 'location', 'assignee', 'role', 'scope', 'ids']
 const AZ_ROLE_LABELS = {
   group: 'resource group', server: 'server', vault: 'vault', account: 'account',
-  container: 'container', assignee: 'assignee', role: 'role', scope: 'scope', ids: 'ids',
+  container: 'container', registry: 'registry', repository: 'repository', image: 'image',
+  source: 'source', pattern: 'pattern', id: 'id', location: 'location',
+  assignee: 'assignee', role: 'role', scope: 'scope', ids: 'ids',
 }
 
 function azScope(key, name, qualifiers, dynamic) {
@@ -447,18 +551,29 @@ function azUpload(args, options, env) {
 }
 
 function azCommand(args, options, env) {
-  const tokens = args.slice(0, 3).map((value) => typeof value === 'string' ? value.toLowerCase() : '')
+  const tokens = args.slice(0, 4).map((value) => typeof value === 'string' ? value.toLowerCase() : '')
   if (tokens[0] === 'storage' && tokens[1] === 'blob' && tokens[2] === 'upload') {
     return azUpload(args.slice(3), options, env)
   }
   if (isPreview(args)) return false
-  // Subcommands are `service [noun] delete`: try the three-token path first.
-  const key3 = tokens.slice(0, 3).join(' ').trim()
-  const key2 = tokens.slice(0, 2).join(' ').trim()
-  const roles = AZ_DELETIONS.get(key3) ?? AZ_DELETIONS.get(key2)
-  const key = AZ_DELETIONS.has(key3) ? key3 : key2
+  // Subcommands are `service [noun…] delete`; the longest literal key wins, so
+  // `account management-group delete` is not folded into `group delete`.
+  let key
+  let roles
+  let start = 0
+  for (const length of [4, 3, 2]) {
+    if (args.length < length) continue
+    const slice = args.slice(0, length)
+    if (!slice.every((value) => typeof value === 'string')) continue
+    const candidate = slice.join(' ').toLowerCase()
+    const found = AZ_DELETIONS.get(candidate)
+    if (!found) continue
+    key = candidate
+    roles = found
+    start = length
+    break
+  }
   if (!roles) return false
-  const start = AZ_DELETIONS.has(key3) ? 3 : 2
   const name = []
   const qualifiers = new Map()
   let dynamic = false
@@ -492,13 +607,23 @@ function azCommand(args, options, env) {
 
 const SQL_PROGRAMS = new Map([['psql', 'postgres'], ['mysql', 'mysql'], ['sqlite3', 'sqlite']])
 
+/**
+ * Irreversible SQL statements: `DROP <object>` for every schema-level object a
+ * shell client can name (table/database/schema plus warehouse/user/role/stage/
+ * function/… for warehouse dialects such as Snowflake), `TRUNCATE`, and
+ * `DELETE` without a WHERE clause (DSR-032 second pass). Multiword object kinds
+ * come first so `DROP MATERIALIZED VIEW` is not read as `DROP MATERIAL`.
+ */
+const SQL_DESTRUCTIVE_DDL =
+  /^drop\s+(?:materialized\s+view|dynamic\s+table|external\s+table|network\s+policy|table|database|schema|warehouse|user|role|view|sequence|stage|function|procedure|policy|share|stream|task|pipe|integration|format)\b/iu
+
 function sqlDestructiveScopes(statements) {
   const scopes = []
   for (const text of statements) {
     for (const raw of text.split(';')) {
       const sql = raw.trim()
       if (!sql) continue
-      if (/^drop\s+(?:table|database|schema)\b/iu.test(sql) || /^truncate(?:\s+table)?\s+\S/iu.test(sql)) {
+      if (SQL_DESTRUCTIVE_DDL.test(sql) || /^truncate(?:\s+table)?\s+\S/iu.test(sql)) {
         scopes.push(`SQL: ${sql}`)
         continue
       }
@@ -587,6 +712,7 @@ const REDIS_VALUE_FLAGS = new Set(['-h', '--host', '-p', '--port', '-s', '--sock
 function redisCommand(args, options, env) {
   if (isPreview(args)) return false
   let command
+  let commandIndex = -1
   for (let index = 0; index < args.length; index++) {
     const value = args[index]
     if (typeof value !== 'string') return false
@@ -599,11 +725,21 @@ function redisCommand(args, options, env) {
       return false
     }
     command = value
+    commandIndex = index
     break
   }
   if (typeof command !== 'string') return false
   const upper = command.toUpperCase()
-  if (upper !== 'FLUSHALL' && upper !== 'FLUSHDB') return false
+  if (upper !== 'FLUSHALL' && upper !== 'FLUSHDB') {
+    // `SHUTDOWN NOSAVE` exits without writing the RDB or the AOF: data since the
+    // last save is lost. A plain `SHUTDOWN` saves first and stays free
+    // (DSR-032 second pass).
+    if (upper !== 'SHUTDOWN') return false
+    const nosave = args.slice(commandIndex + 1).some((value) =>
+      typeof value === 'string' && value.toLowerCase() === 'nosave')
+    if (!nosave) return false
+    return emitRemoteDelete('redis', 'redis: SHUTDOWN NOSAVE', options, env)
+  }
   return emitRemoteDelete('redis', `redis: ${upper}`, options, env)
 }
 
@@ -681,13 +817,14 @@ const KUBECTL_GLOBAL_VALUE_FLAGS = new Set(['-n', '--namespace', '--context', '-
 const KUBECTL_SUB_VALUE_FLAGS = new Set(['-n', '--namespace', '--context', '--cluster', '--user',
   '--kubeconfig', '-s', '--server', '-l', '--selector', '--field-selector', '-o', '--output',
   '--grace-period', '--timeout', '--wait', '--v'])
-const KUBECTL_SUB_BOOLEAN_FLAGS = new Set(['-a', '--all', '--force', '--now', '--ignore-not-found',
+const KUBECTL_SUB_BOOLEAN_FLAGS = new Set(['-a', '--all', '--all-namespaces', '--force', '--now', '--ignore-not-found',
   '--cascade', '--recursive', '--raw', '--wait', '--openapi-patch', '--server-side', '--flush-backoff'])
 
 function kubectlDelete(rest, options, env) {
   const names = []
   const files = []
   let all = false
+  let allNamespaces = false
   for (let i = 0; i < rest.length; i++) {
     const value = rest[i]
     if (typeof value !== 'string') return false
@@ -704,15 +841,64 @@ function kubectlDelete(rest, options, env) {
       files.push(file)
       continue
     }
+    // `-A` is `--all-namespaces` and must be read before the lowercase `-a`
+    // alias below would fold it into plain `--all` (DSR-032 决定 9).
+    if (lower === '--all-namespaces' || value === '-A') { allNamespaces = true; continue }
     if (lower === '--all' || lower === '-a') { all = true; continue }
     if (lower.includes('=')) continue
     if (KUBECTL_SUB_VALUE_FLAGS.has(lower)) { i++; continue }
     if (KUBECTL_SUB_BOOLEAN_FLAGS.has(lower)) continue
     return false
   }
-  if (!names.length && !files.length && !all) return false
-  const scope = [names.join(' '), files.join(' '), all && '--all'].filter(Boolean).join(' ').trim()
+  if (!names.length && !files.length && !all && !allNamespaces) return false
+  const scope = [names.join(' '), files.join(' '), all && '--all', allNamespaces && '--all-namespaces']
+    .filter(Boolean).join(' ').trim()
   return emitRemoteDelete('k8s', scope || 'cluster resources (delete)', options, env)
+}
+
+const KUBECTL_APPLY_VALUE_FLAGS = new Set([...KUBECTL_SUB_VALUE_FLAGS, '-k', '--kustomize',
+  '--prune-allowlist', '--prune-whitelist', '--field-manager', '--cache-dir', '--template', '--validate'])
+const KUBECTL_APPLY_BOOLEAN_FLAGS = new Set([...KUBECTL_SUB_BOOLEAN_FLAGS, '--prune', '--server-dry-run',
+  '--dry-run', '--openapi-patch', '--force-conflicts'])
+
+/** `kubectl apply --prune` deletes the previously applied objects that are absent
+ * from the new manifest set, and `kubectl apply --force` deletes and recreates
+ * every object it updates (delete-recreate). Both are deletion facts whose scope
+ * states the flag and the manifest target; `--dry-run` stays a preview
+ * (DSR-032 决定 9 and the second pass). */
+function kubectlApply(rest, options, env) {
+  let prune = false
+  let force = false
+  const files = []
+  for (let i = 0; i < rest.length; i++) {
+    const value = rest[i]
+    if (typeof value !== 'string') return false
+    if (!value.startsWith('-')) continue
+    const lower = value.toLowerCase()
+    if (lower === '--dry-run' || lower.startsWith('--dry-run=') ||
+      lower === '--server-dry-run' || lower.startsWith('--server-dry-run=')) return false
+    if (lower === '--prune' || lower === '--prune=true') { prune = true; continue }
+    if (lower === '--force' || lower === '--force=true') { force = true; continue }
+    if (lower === '-f' || lower === '--filename' || lower.startsWith('--filename=')) {
+      const file = lower.startsWith('--filename=') ? value.slice('--filename='.length) : rest[++i]
+      if (typeof file !== 'string') return false
+      files.push(file)
+      continue
+    }
+    if (lower === '-k' || lower === '--kustomize' || lower.startsWith('--kustomize=')) {
+      const dir = lower.startsWith('--kustomize=') ? value.slice('--kustomize='.length) : rest[++i]
+      if (typeof dir !== 'string') return false
+      files.push(dir)
+      continue
+    }
+    if (lower.includes('=')) continue
+    if (KUBECTL_APPLY_VALUE_FLAGS.has(lower)) { i++; continue }
+    if (KUBECTL_APPLY_BOOLEAN_FLAGS.has(lower)) continue
+    return false
+  }
+  if ((!prune && !force) || !files.length) return false
+  const marker = [prune && '--prune', force && '--force'].filter(Boolean).join(' ')
+  return emitRemoteDelete('k8s', `apply ${marker} ${files.join(' ')}`, options, env)
 }
 
 /** `kubectl replace --force -f <file>` deletes and recreates the manifest objects. */
@@ -782,6 +968,7 @@ function kubectlCommand(args, options, env) {
   }
   const sub = typeof args[index] === 'string' ? args[index].toLowerCase() : ''
   if (sub === 'replace') return kubectlReplace(args.slice(index + 1), options, env)
+  if (sub === 'apply') return kubectlApply(args.slice(index + 1), options, env)
   if (sub === 'drain') return kubectlDrain(args.slice(index + 1), options, env)
   if (sub !== 'delete') return false
   return kubectlDelete(args.slice(index + 1), options, env)
@@ -840,6 +1027,47 @@ const DOCKER_GLOBAL_VALUE_FLAGS = new Set(['--context', '--host', '-h', '--confi
   '--tlscacert', '--tlscert', '--tlskey'])
 const DOCKER_GLOBAL_BOOL_FLAGS = new Set(['--tls', '--tlsverify', '-d', '--debug'])
 
+const COMPOSE_GLOBAL_VALUE_FLAGS = new Set(['-f', '--file', '-p', '--project-name', '--env-file', '--profile',
+  '--project-directory', '--ansi', '--parallel'])
+const COMPOSE_GLOBAL_BOOL_FLAGS = new Set(['--compatibility', '--verbose', '--no-ansi', '--tls',
+  '--tlsverify', '--dry-run'])
+
+/** `docker compose down` / `docker-compose down` removes containers only unless it
+ * carries the volume switch: `-v`, `--volumes`, or a `down` short-flag cluster
+ * containing `v` (`-vt`) then removes the named volumes and their data. A plain
+ * `down`, `ps`, `up` and every other subcommand stay free (DSR-032 second pass). */
+function composeDownVolumes(args, program, options, env) {
+  let index = 0
+  while (index < args.length) {
+    const value = args[index]
+    if (typeof value !== 'string') return false
+    if (!value.startsWith('-')) break
+    const eq = value.indexOf('=')
+    const flag = (eq < 0 ? value : value.slice(0, eq)).toLowerCase()
+    if (eq >= 0) { index++; continue }
+    if (COMPOSE_GLOBAL_VALUE_FLAGS.has(flag)) { index += 2; continue }
+    if (COMPOSE_GLOBAL_BOOL_FLAGS.has(flag)) { index++; continue }
+    return false
+  }
+  const sub = typeof args[index] === 'string' ? args[index].toLowerCase() : ''
+  if (sub !== 'down') return false
+  let volumes = false
+  for (let cursor = index + 1; cursor < args.length; cursor++) {
+    const value = args[cursor]
+    if (typeof value !== 'string') return false
+    if (value === '--volumes' || value === '--volumes=true') { volumes = true; continue }
+    if (value.startsWith('--')) continue
+    if (/^-[A-Za-z]+$/u.test(value) && value.slice(1).includes('v')) volumes = true
+  }
+  if (!volumes) return false
+  return emitRemoteDelete('docker', `${program} down --volumes`, options, env)
+}
+
+function dockerComposeCommand(args, options, env) {
+  if (isPreview(args)) return false
+  return composeDownVolumes(args, 'docker-compose', options, env)
+}
+
 function dockerCommand(args, options, env) {
   if (isPreview(args)) return false
   const start = skipGlobalFlags(args, DOCKER_GLOBAL_VALUE_FLAGS, DOCKER_GLOBAL_BOOL_FLAGS)
@@ -847,6 +1075,7 @@ function dockerCommand(args, options, env) {
   const rest = args.slice(start)
   const first = typeof rest[0] === 'string' ? rest[0].toLowerCase() : ''
   const second = typeof rest[1] === 'string' ? rest[1].toLowerCase() : ''
+  if (first === 'compose') return composeDownVolumes(rest.slice(1), 'compose', options, env)
   if (first === 'system' && second === 'prune') return emitRemoteDelete('docker', 'docker system (prune)', options, env)
   if (first === 'system' && second === 'reset') return emitRemoteDelete('docker', 'docker system (reset)', options, env)
   if (first === 'volume' && second === 'prune') return emitRemoteDelete('docker', 'docker volume (prune)', options, env)
@@ -941,6 +1170,31 @@ function isRemoteSpec(value) {
   return !host.includes('/') && !host.includes('\\')
 }
 
+/**
+ * Value of `-b` in an sftp command line, separated or attached.
+ * `undefined` when absent, `null` when present with a non-literal value, and
+ * `'-'` when explicitly stdin (DSR-032 决定 5).
+ */
+function transferFlagValue(args, short, long) {
+  for (let index = 0; index < args.length; index++) {
+    const value = args[index]
+    if (typeof value !== 'string') continue
+    if (value === '--') return undefined
+    if (value === short || (long && value === long)) {
+      const assigned = args[index + 1]
+      return typeof assigned === 'string' ? assigned : null
+    }
+    if (long && value.startsWith(`${long}=`)) {
+      const assigned = value.slice(long.length + 1)
+      return assigned || null
+    }
+    if (!long || !value.startsWith('--')) {
+      if (value.startsWith(short) && value.length > short.length) return value.slice(short.length)
+    }
+  }
+  return undefined
+}
+
 function scpOperands(args) {
   const operands = []
   for (let index = 0; index < args.length; index++) {
@@ -966,7 +1220,13 @@ function scpOperands(args) {
   return operands
 }
 
-/** Upload direction only: a remote destination means the local sources are read. */
+/**
+ * `scp` reads its local sources in the upload direction; that read is a
+ * `read-content` fact and the caller's credential rule decides what happens
+ * next. The `-i` identity file is ordinary authentication input with no
+ * outward transfer, so it produces nothing (the first pass modeled it as a
+ * read; CSN exempts the same form).
+ */
 function scpCommand(args, options, env) {
   if (isPreview(args)) return false
   const operands = scpOperands(args)
@@ -979,6 +1239,234 @@ function scpCommand(args, options, env) {
     emitted = true
   }
   return emitted
+}
+
+/**
+ * `sftp` batch mode executes commands that may upload credentials or delete
+ * remote files, so an explicit `-b <batchfile>` (or `-b -` / a heredoc feeding
+ * stdin) is an `unverified-effect` candidate whose scope names the batch. An
+ * interactive `sftp host` stays a gap. `-i <file>` is authentication input and
+ * produces no read fact, matching `scp`.
+ */
+function sftpCommand(args, options, env) {
+  if (isPreview(args)) return false
+  if (args.some((value) => typeof value === 'string' &&
+    (value === '-V' || value === '-h' || value === '--version' || value === '--help'))) return false
+  const batch = transferFlagValue(args, '-b', '--batchfile')
+  let batchScope
+  if (typeof batch === 'string') batchScope = batch === '-' ? 'sftp batch (stdin)' : `sftp batch ${batch}`
+  else if (batch === null) batchScope = 'sftp batch (batchfile not literal)'
+  else {
+    const heredocs = Array.isArray(options.heredocs)
+      ? options.heredocs.filter((entry) => typeof entry?.body === 'string' && entry.body !== '')
+      : []
+    if (heredocs.length) batchScope = 'sftp batch (stdin heredoc)'
+  }
+  if (batchScope) {
+    env.candidate('unverified-effect', 'SFTP batch may upload credentials or delete remote files',
+      [batchScope], options.origin)
+    return true
+  }
+  return false
+}
+
+// --- azcopy / data-warehouse clients (DSR-032 决定 9) ----------------------
+
+const AZCOPY_VALUE_FLAGS = new Set(['--log-level', '--output-type', '--output-level', '--cap-mbps', '--cmd',
+  '--from-to', '--include-pattern', '--exclude-pattern', '--include-path', '--exclude-path',
+  '--include-regex', '--exclude-regex', '--list-of-files', '--block-size-mb', '--trusted-microsoft-suffixes',
+  '--s2s-preserve-access-tier', '--s2s-detect-source-changed'])
+const AZCOPY_BOOL_FLAGS = new Set(['-r', '--recursive', '--delete', '--version', '-h', '--help', '--overwrite',
+  '--put-md5', '--check-md5', '--preserve-smb-permissions', '--preserve-permissions', '--decompress'])
+
+/** `azcopy remove <remote>` and `azcopy sync --delete <src> <remote dst>` destroy
+ * remote data; `azcopy list`/`copy` and local destinations stay free. */
+function azcopyCommand(args, options, env) {
+  if (isPreview(args)) return false
+  let index = 0
+  while (index < args.length) {
+    const value = args[index]
+    if (typeof value !== 'string') return false
+    if (!value.startsWith('-')) break
+    if (value === '-h' || value === '--help' || value === '--version') return false
+    const eq = value.indexOf('=')
+    const flag = (eq < 0 ? value : value.slice(0, eq)).toLowerCase()
+    if (eq >= 0) { index++; continue }
+    if (AZCOPY_VALUE_FLAGS.has(flag)) { index += 2; continue }
+    if (AZCOPY_BOOL_FLAGS.has(flag)) { index++; continue }
+    return false
+  }
+  const sub = typeof args[index] === 'string' ? args[index].toLowerCase() : ''
+  const tail = args.slice(index + 1)
+  if (sub === 'remove') {
+    const names = collectNames(tail, 0, AZCOPY_VALUE_FLAGS, AZCOPY_BOOL_FLAGS)
+    if (!names) return false
+    const remote = names.filter((name) => typeof name === 'string' && REMOTE_URL.test(name))
+    if (!remote.length) return false
+    return emitRemoteDelete('azcopy', `azcopy remove ${remote.join(' ')}`, options, env)
+  }
+  if (sub !== 'sync') return false
+  if (!tail.some((value) => typeof value === 'string' && value.toLowerCase() === '--delete')) return false
+  const names = collectNames(tail, 0, AZCOPY_VALUE_FLAGS, AZCOPY_BOOL_FLAGS)
+  if (!names || names.length < 2) return false
+  const destination = names[names.length - 1]
+  if (typeof destination !== 'string' || !REMOTE_URL.test(destination)) return false
+  return emitRemoteDelete('azcopy', `azcopy sync --delete ${names.join(' ')} (remote mirror)`, options, env)
+}
+
+const SUPABASE_VALUE_FLAGS = new Set(['--project-ref', '--workdir', '--db-url'])
+const SUPABASE_BOOL_FLAGS = new Set(['--linked', '--local', '--experimental', '--yes', '-y', '--debug'])
+
+function supabaseCommand(args, options, env) {
+  if (isPreview(args)) return false
+  const first = typeof args[0] === 'string' ? args[0].toLowerCase() : ''
+  const second = typeof args[1] === 'string' ? args[1].toLowerCase() : ''
+  if (first === 'db' && second === 'reset') return emitRemoteDelete('supabase', 'supabase db reset', options, env)
+  if (first === 'migration' && second === 'down') return emitRemoteDelete('supabase', 'supabase migration down', options, env)
+  // DSR-032 second pass: `supabase storage rm` deletes storage objects.
+  if (first === 'storage' && second === 'rm') {
+    const names = collectNames(args, 2, SUPABASE_VALUE_FLAGS, SUPABASE_BOOL_FLAGS)
+    if (!names || !names.length) return false
+    return emitRemoteDelete('supabase', `supabase storage rm ${names.join(' ')}`, options, env)
+  }
+  return false
+}
+
+const DATABRICKS_VALUE_FLAGS = new Set(['-p', '--profile', '-t', '--target', '--host', '--token',
+  '--cluster-id', '-c', '--config-file', '-o', '--output', '--log-file', '--log-level', '--debug-level',
+  '--progress-format'])
+const DATABRICKS_BOOL_FLAGS = new Set(['--debug', '--verbose'])
+const DATABRICKS_FS_VALUE_FLAGS = new Set()
+const DATABRICKS_FS_BOOL_FLAGS = new Set(['-r', '--recursive'])
+
+function databricksCommand(args, options, env) {
+  if (isPreview(args)) return false
+  const start = skipGlobalFlags(args, DATABRICKS_VALUE_FLAGS, DATABRICKS_BOOL_FLAGS)
+  if (start === null) return false
+  const rest = args.slice(start)
+  const first = typeof rest[0] === 'string' ? rest[0].toLowerCase() : ''
+  const second = typeof rest[1] === 'string' ? rest[1].toLowerCase() : ''
+  if (first === 'bundle' && second === 'destroy') {
+    return emitRemoteDelete('databricks', 'databricks bundle destroy', options, env)
+  }
+  // DSR-032 second pass: `databricks fs rm` deletes DBFS / Unity Catalog Volume data.
+  if (first === 'fs' && second === 'rm') {
+    const tail = rest.slice(2)
+    const names = collectNames(tail, 0, DATABRICKS_FS_VALUE_FLAGS, DATABRICKS_FS_BOOL_FLAGS)
+    if (!names || !names.length) return false
+    const recursive = tail.some((value) => value === '-r' || value === '--recursive')
+    const scope = names.map((name) => recursive ? `${name}/** (recursive)` : name).join(' ')
+    return emitRemoteDelete('databricks', `databricks fs rm ${scope}`, options, env)
+  }
+  return false
+}
+
+/** `snowsql -q "<sql>"`: only a literal DROP/TRUNCATE/DELETE-without-WHERE query
+ * is destructive; anything else stays a gap. */
+function snowsqlCommand(args, options, env) {
+  if (isPreview(args)) return false
+  const queries = []
+  for (let index = 0; index < args.length; index++) {
+    const value = args[index]
+    if (typeof value !== 'string' || !value.startsWith('-')) continue
+    const eq = value.indexOf('=')
+    const flag = (eq < 0 ? value : value.slice(0, eq)).toLowerCase()
+    if (flag !== '-q' && flag !== '--query') continue
+    const assigned = eq < 0 ? args[++index] : value.slice(eq + 1)
+    if (typeof assigned === 'string') queries.push(assigned)
+  }
+  const scopes = sqlDestructiveScopes(queries)
+  if (!scopes.length) return false
+  for (const scope of scopes) {
+    emitRemoteDelete('snowflake', `snowsql: ${scope.startsWith('SQL: ') ? scope.slice(5) : scope}`, options, env)
+  }
+  return true
+}
+
+// --- bq / pulumi / mc (DSR-032 second pass) ---------------------------------
+
+const BQ_VALUE_FLAGS = new Set(['-p', '--project_id', '--project-id', '--location', '--format', '--api',
+  '--headless', '--max_rows', '--max_rows_per_page', '--job_id', '--apilog', '--job_property',
+  '--service_account', '--service_account_credential_file', '--discovery_file', '--iam_token',
+  '--dataset_id', '--table_id', '--use_legacy_sql'])
+const BQ_BOOL_FLAGS = new Set(['-q', '--quiet', '--synchronous', '--batch', '--debug',
+  '--enable_reservation', '--fingerprint_job_id'])
+const BQ_RM_BOOL_FLAGS = new Set([...BQ_BOOL_FLAGS, '-f', '--force', '-r', '--recursive', '-t', '--table',
+  '-d', '--dataset', '--transfer_config', '--reservation'])
+
+/** `bq rm [-r] <dataset|table>` and `bq query "<destructive SQL>"`. `bq ls`,
+ * `bq show`, `bq query "SELECT …"` and every `--dry_run` stay free. */
+function bqCommand(args, options, env) {
+  if (isPreview(args)) return false
+  if (args.some((value) => typeof value === 'string' &&
+    (value === '--dry_run' || value.startsWith('--dry_run=') ||
+      value === '--dry-run' || value.startsWith('--dry-run=')))) return false
+  const start = skipGlobalFlags(args, BQ_VALUE_FLAGS, BQ_BOOL_FLAGS)
+  if (start === null) return false
+  const rest = args.slice(start)
+  const sub = typeof rest[0] === 'string' ? rest[0].toLowerCase() : ''
+  if (sub === 'rm') {
+    const tail = rest.slice(1)
+    const names = collectNames(tail, 0, BQ_VALUE_FLAGS, BQ_RM_BOOL_FLAGS)
+    if (!names || !names.length) return false
+    const recursive = tail.some((value) => value === '-r' || value === '--recursive')
+    const scope = names.map((name) => recursive ? `${name}/** (recursive)` : name).join(' ')
+    return emitRemoteDelete('bigquery', `bq rm ${scope}`, options, env)
+  }
+  if (sub !== 'query') return false
+  // `bq query` takes the statement as a positional operand; stdin-fed SQL
+  // (`bq query < file.sql`) is not literal here and stays a gap.
+  const names = collectNames(rest.slice(1), 0, BQ_VALUE_FLAGS, BQ_BOOL_FLAGS)
+  if (!names || !names.length) return false
+  const scopes = sqlDestructiveScopes([names.join(' ')])
+  if (!scopes.length) return false
+  for (const scope of scopes) {
+    emitRemoteDelete('bigquery', `bq query: ${scope.startsWith('SQL: ') ? scope.slice(5) : scope}`, options, env)
+  }
+  return true
+}
+
+const PULUMI_VALUE_FLAGS = new Set(['-s', '--stack', '--cwd', '-C', '--color', '--logfile', '--logflow',
+  '--logtostderr', '--logverbose', '--profiling', '--otel', '--tracing'])
+const PULUMI_BOOL_FLAGS = new Set(['-y', '--yes', '-f', '--force', '--preserve-config', '--remove',
+  '--non-interactive', '--json', '-v', '--verbose', '-d', '--debug', '-t', '--trace', '-h', '--help'])
+
+/** `pulumi stack rm [stack]` removes the stack and its history; a stack named by
+ * `-s/--stack` or by the positional operand. `pulumi stack ls` stays free. */
+function pulumiCommand(args, options, env) {
+  if (isPreview(args)) return false
+  const start = skipGlobalFlags(args, PULUMI_VALUE_FLAGS, PULUMI_BOOL_FLAGS)
+  if (start === null) return false
+  const rest = args.slice(start)
+  if (typeof rest[0] !== 'string' || rest[0].toLowerCase() !== 'stack') return false
+  if (typeof rest[1] !== 'string' || rest[1].toLowerCase() !== 'rm') return false
+  const names = collectNames(rest.slice(2), 0, PULUMI_VALUE_FLAGS, PULUMI_BOOL_FLAGS)
+  if (!names) return false
+  if (!names.length) return emitRemoteDelete('pulumi', 'pulumi stack rm (selected stack)', options, env)
+  return emitRemoteDelete('pulumi', `pulumi stack rm ${names.join(' ')}`, options, env)
+}
+
+const MC_VALUE_FLAGS = new Set(['-C', '--config-dir', '--limit-upload', '--limit-download', '--older-than',
+  '--newer-than', '--storage-class', '--attr', '--encrypt-key', '--exclude', '--include'])
+const MC_BOOL_FLAGS = new Set(['-q', '--quiet', '--no-color', '--json', '--debug', '-r', '--recursive',
+  '--force', '--dangerous', '--versions', '--bypass', '--watch', '-w', '--insecure'])
+
+/** `mc rb <alias/bucket>` removes a bucket; `mc rm [-r] <target>` removes objects.
+ * `mc ls`, `mc cp`, `mc stat` and the other read/copy verbs stay free. */
+function mcCommand(args, options, env) {
+  if (isPreview(args)) return false
+  if (args.some((value) => value === '--version' || value === '--help' || value === '-h')) return false
+  const start = skipGlobalFlags(args, MC_VALUE_FLAGS, MC_BOOL_FLAGS)
+  if (start === null) return false
+  const rest = args.slice(start)
+  const sub = typeof rest[0] === 'string' ? rest[0].toLowerCase() : ''
+  if (sub !== 'rb' && sub !== 'rm') return false
+  const tail = rest.slice(1)
+  const names = collectNames(tail, 0, MC_VALUE_FLAGS, MC_BOOL_FLAGS)
+  if (!names || !names.length) return false
+  const recursive = sub === 'rm' && tail.some((value) => value === '-r' || value === '--recursive')
+  const scope = recursive ? `${names.join(' ')}/** (recursive)` : names.join(' ')
+  return emitRemoteDelete('minio', `mc ${sub} ${scope}`, options, env)
 }
 
 // --- shared flag/operand helpers -------------------------------------------
@@ -1301,8 +1789,17 @@ const REMOTE_PROGRAMS = new Map([
   ['kubectl', kubectlCommand],
   ['helm', helmCommand],
   ['docker', dockerCommand],
+  ['docker-compose', dockerComposeCommand],
   ['terraform', terraformCommand],
+  ['pulumi', pulumiCommand],
   ['scp', scpCommand],
+  ['sftp', sftpCommand],
+  ['azcopy', azcopyCommand],
+  ['bq', bqCommand],
+  ['mc', mcCommand],
+  ['supabase', supabaseCommand],
+  ['databricks', databricksCommand],
+  ['snowsql', snowsqlCommand],
   ['gh', ghCommand],
   ['restic', resticCommand],
   ['borg', borgCommand],

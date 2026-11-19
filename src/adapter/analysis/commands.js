@@ -665,9 +665,12 @@ function wrapperUnwrap(name, args, options, env) {
 
 const CMD_SWITCH = /^[-/](?:c|k|d|a|u|q|v|x|t|e|r|s)(?::\S*)?$/iu
 
-/** Extract the payload words of a `cmd /c <text>` invocation, or null when the
- * switches cannot be proven (`/k`, an unknown switch, a non-literal token, or no
- * payload). Shared by the local `cmd` entry and the `ssh host cmd /c …` channel. */
+/** Extract the payload words of a `cmd /c <text>` / `cmd /k <text>` invocation, or
+ * null when the switches cannot be proven (an unknown switch, a non-literal token,
+ * or no payload). `cmd /k <text>` runs the same body and stays interactive
+ * afterwards, so it takes the same control-flow analysis; a bare `cmd /k` has no
+ * payload and stays a gap. Shared by the local `cmd` entry and the `ssh host cmd
+ * /c …` channel. */
 function cmdPayload(args) {
   let index = 0
   while (index < args.length) {
@@ -675,7 +678,6 @@ function cmdPayload(args) {
     if (typeof value !== 'string') return null
     if (!/[-/]/u.test(value.charAt(0))) break
     if (!CMD_SWITCH.test(value)) return null
-    if (value.toLowerCase() === '/k' || value.toLowerCase() === '-k') return null
     index += 1
   }
   const payload = args.slice(index)
@@ -683,12 +685,204 @@ function cmdPayload(args) {
   return payload
 }
 
-/** `cmd /c <text>` (F-09..F-11 entry from the shell layer): the payload is joined
- * back into one cmd command line and routed through the bounded cmd lexer. */
+// cmd.exe control-flow markers and the deletion family (DSR-032 决定 8). The
+// lexer proves neither `for`/`if` bodies nor `%VAR%`/`!VAR!` expansion or caret
+// escapes, so a text that mixes control flow WITH a deletion in COMMAND POSITION is
+// confirmed on the range instead of being silently allowed. The deletion family is
+// never matched anywhere in the text: a segment led by `echo`/`rem` carries data,
+// and a word that is not a command is not a deletion.
+const CMD_CONTROL_FLOW = /\b(?:for|if|start|call)\b|%[A-Za-z_][A-Za-z0-9_]*%|![A-Za-z_][A-Za-z0-9_]*!|\^|[()]/iu
+const CMD_DELETE_FAMILY = new Set(['del', 'erase', 'rd', 'rmdir', 'move'])
+/** Segment leaders whose remaining words are data, never commands. */
+const CMD_DATA_LEADERS = new Set(['echo', 'rem'])
+/** cmd keywords that hand the command position to the words after them. */
+const CMD_COMMAND_INTRODUCERS = new Set(['do', 'else'])
+const CMD_DELETE_ANYWHERE = /(?:^|[^a-z0-9_])(?:del|erase|rd|rmdir|move)(?:[^a-z0-9_]|$)/iu
+const CMD_CONTROL_FLOW_SCOPE_LIMIT = 200
+
+/** One segment's leading word, normalized: a leading `@` echo-suppression prefix
+ * and an attached switch run (`del/q`) are both part of the same command word. */
+function cmdWord(raw) {
+  const stripped = raw.replace(/^@+/u, '').toLowerCase()
+  const slash = stripped.indexOf('/')
+  return slash > 0 ? stripped.slice(0, slash) : stripped
+}
+
+/** Split cmd.exe text into command segments: an unquoted `&`, `|` or line break
+ * starts a new command; a `^`-escaped character is data, and so is anything inside
+ * double quotes. Parentheses do not split a segment (an `echo` group is data right
+ * up to its closing parenthesis), but they do open a command position below. */
+function cmdSegments(text) {
+  const segments = []
+  let current = ''
+  let quoted = false
+  for (let index = 0; index < text.length; index++) {
+    const ch = text[index]
+    if (ch === '^') {
+      index += 1 // the escaped character is a literal, never a separator
+      current += ' '
+      continue
+    }
+    if (ch === '"') { quoted = !quoted; current += ch; continue }
+    if (!quoted && (ch === '&' || ch === '|' || ch === '\n' || ch === '\r')) {
+      segments.push(current)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  segments.push(current)
+  return segments
+}
+
+/** Read one quote-aware word at or after `index`: `{ word, next }`, or null. */
+function cmdWordAt(segment, index) {
+  let at = index
+  while (at < segment.length && /\s/u.test(segment[at])) at += 1
+  if (at >= segment.length) return null
+  let word = ''
+  let quoted = false
+  while (at < segment.length) {
+    const ch = segment[at]
+    if (ch === '"') { quoted = !quoted; at += 1; continue }
+    if (!quoted && /\s/u.test(ch)) break
+    word += ch
+    at += 1
+  }
+  return { word, next: at }
+}
+
+/** Index just past an `if` condition — `if [/i] [not] exist|defined|errorlevel|
+ * cmdextversion <value>` or `if [/i] [not] <a>==<b>` — or -1 when the condition
+ * shape is not provable. The word after it is a command position. */
+function cmdAfterIfCondition(segment, index) {
+  let token = cmdWordAt(segment, index)
+  if (token === null) return -1
+  let head = cmdWord(token.word)
+  if (head === '/i' || head === '-i') {
+    token = cmdWordAt(segment, token.next)
+    if (token === null) return -1
+    head = cmdWord(token.word)
+  }
+  if (head === 'not') {
+    token = cmdWordAt(segment, token.next)
+    if (token === null) return -1
+    head = cmdWord(token.word)
+  }
+  if (['exist', 'defined', 'errorlevel', 'cmdextversion'].includes(head)) {
+    const value = cmdWordAt(segment, token.next)
+    return value === null ? -1 : value.next
+  }
+  if (head.includes('==')) return token.next // `if "%x%"=="1" …`
+  return -1
+}
+
+/** Index just past the `do` that opens a `for` body, or -1 when the body boundary
+ * is not provable. The for header cannot itself contain an unquoted `do` word. */
+function cmdAfterForHeader(segment, index) {
+  let at = index
+  for (;;) {
+    const token = cmdWordAt(segment, at)
+    if (token === null) return -1
+    if (cmdWord(token.word) === 'do') return token.next
+    at = token.next
+  }
+}
+
+/** Index of the next unquoted `)` at or after `index`, or -1. */
+function cmdGroupEnd(segment, index) {
+  let quoted = false
+  for (let at = index; at < segment.length; at++) {
+    const ch = segment[at]
+    if (ch === '"') { quoted = !quoted; continue }
+    if (!quoted && ch === ')') return at
+  }
+  return -1
+}
+
+/** True when this segment runs the deletion family as a command. Words inside an
+ * `echo`/`rem` argument list are data; after the group's closing `)` the next word
+ * is a command position again. */
+function cmdSegmentDeletesAtCommandPosition(segment) {
+  let at = 0
+  for (;;) {
+    while (at < segment.length && (/\s/u.test(segment[at]) || segment[at] === '(' || segment[at] === ')')) at += 1
+    const token = cmdWordAt(segment, at)
+    if (token === null) return false
+    const word = cmdWord(token.word)
+    if (CMD_DATA_LEADERS.has(word)) {
+      const end = cmdGroupEnd(segment, token.next)
+      if (end < 0) return false // the rest of this segment is echo/rem data
+      at = end + 1
+      continue
+    }
+    if (word === 'if') {
+      const next = cmdAfterIfCondition(segment, token.next)
+      // An unprovable condition keeps the segment's deletion word under unproven
+      // control flow (the pre-refinement behavior, scoped to this segment).
+      if (next < 0) return CMD_DELETE_ANYWHERE.test(segment)
+      at = next
+      continue
+    }
+    if (word === 'for') {
+      const body = cmdAfterForHeader(segment, token.next)
+      if (body < 0) return false
+      at = body
+      continue
+    }
+    if (word === 'start' || word === 'call') {
+      // `start [/switches] ["title"] <program>`, `call <label|program>`.
+      at = token.next
+      for (;;) {
+        const operand = cmdWordAt(segment, at)
+        if (operand === null) return false
+        const lower = cmdWord(operand.word)
+        if (word === 'start' && (lower === '' || lower.startsWith('/') || lower.startsWith('-'))) {
+          at = operand.next
+          continue
+        }
+        break
+      }
+      continue
+    }
+    if (CMD_COMMAND_INTRODUCERS.has(word)) { at = token.next; continue }
+    return CMD_DELETE_FAMILY.has(word)
+  }
+}
+
+/** True when the cmd text mixes control flow with a deletion in command position. */
+function cmdControlFlowDeletes(text) {
+  for (const segment of cmdSegments(text)) {
+    if (cmdSegmentDeletesAtCommandPosition(segment)) return true
+  }
+  return false
+}
+
+/** Emit the range-confirmed delete fact for cmd text that mixes control flow with
+ * a deletion in command position. Returns true when the fact was emitted; the
+ * caller keeps its own fallback for every other text. `options` carries the
+ * execution context so the ssh channel's payload stays in its own domain (D2). */
+function emitCmdControlFlowDelete(text, options, env) {
+  if (!(CMD_CONTROL_FLOW.test(text) && cmdControlFlowDeletes(text))) return false
+  env.operation('delete', {
+    kind: 'unknown',
+    reason: 'cmd-control-flow',
+    knownScope: [text.slice(0, CMD_CONTROL_FLOW_SCOPE_LIMIT)],
+  }, options)
+  return true
+}
+
+/** `cmd /c <text>` / `cmd /k <text>` (F-09..F-11 entry from the shell layer): the
+ * payload is joined back into one cmd command line and routed through the bounded
+ * cmd lexer. `/c` and `/k` run the same body; `/k` only keeps the prompt open. */
 function cmdCommand(args, options, env) {
   const payload = cmdPayload(args)
   if (payload === null) { env.gap('cmd-inline', options.origin); return }
-  resolveCmdText(payload.join(' '), { origin: options.origin, condition: options.condition }, env)
+  const text = payload.join(' ')
+  // DSR-032 决定 8: control flow plus a deletion family cannot be shadowed by the
+  // lexer's `cmd-inline` gap. The literal (bounded) text is the known scope.
+  if (emitCmdControlFlowDelete(text, options, env)) return
+  resolveCmdText(text, { origin: options.origin, condition: options.condition }, env)
 }
 
 /** cmd.exe builtin deletion family (F-09/F-10): `rmdir`/`rd` and `del`/`erase`
@@ -798,6 +992,39 @@ const SSH_VALUE_LETTERS = new Set([...'bDEeFIiJLlmOopQRSwWc'])
 const SSH_POWERSHELL_RECEIVERS = new Set(['powershell', 'pwsh', 'powershell.exe', 'pwsh.exe'])
 const SSH_CMD_RECEIVERS = new Set(['cmd', 'cmd.exe'])
 
+/** DSR-032 决定 4 (revised): reverse forwarding (`-R`) and SOCKS (`-D`) are
+ * unverified-effect candidates with the option text as scope. `-L` (local
+ * forwarding) is not one of them and stays a coverage gap. `-J`/`-o ProxyJump=…`
+ * is ordinary jump-host administration (neither reference project blocks it), so
+ * it produces no candidate either. `-o ProxyCommand=<value>` is NOT confirmed as a
+ * tunnel: its value is a LOCAL command line, analyzed here as POSIX text in this
+ * unit's context, so only what that command itself proves is reported —
+ * `ProxyCommand="nc %h %p"` proves nothing (放行), `ProxyCommand='bash -c "rm -rf
+ * /x"'` is the deletion it literally is. The tunnel fact stays independent of the
+ * remote command analysis, so both can coexist. */
+function emitSshTunnel(flag, value, options, env) {
+  if (typeof value !== 'string') return
+  if (flag === '-o') {
+    const proxy = /^\s*proxy(command|jump)\s*=\s*(.*)$/iu.exec(value)
+    if (proxy === null) return
+    if (proxy[1].toLowerCase() === 'jump') return // a jump host leaves no local effect
+    if (proxy[2] === '') return
+    // `%h`/`%p` stay literal words: the net-tool analysis treats them as operands,
+    // so a plain connection proxy command produces no fact.
+    env.child({
+      source: { kind: 'inline', text: proxy[2] },
+      language: 'posix',
+      context: options.context,
+      condition: options.condition,
+      origin: options.origin,
+    })
+    return
+  }
+  if (!['-R', '-D'].includes(flag)) return
+  env.candidate('unverified-effect', 'ssh remote forwarding or SOCKS proxy could expose local services / tunnel traffic',
+    [`ssh ${flag} ${value}`], options.origin)
+}
+
 /** `ssh [options] <host> [command…]`: everything after the destination is one
  * POSIX shell command line executed in the `ssh` domain; a heredoc fed to a
  * POSIX shell receiver is that shell's stdin script, and a heredoc fed to a bare
@@ -813,6 +1040,7 @@ function sshCommand(args, options, env) {
     if (value.startsWith('-') && value !== '-') {
       if (SSH_VALUE_FLAGS.has(value)) {
         if (index + 1 >= args.length) { env.gap('unmodeled-command', options.origin); return }
+        emitSshTunnel(value, args[index + 1], options, env)
         index += 2
         continue
       }
@@ -827,7 +1055,11 @@ function sshCommand(args, options, env) {
         return
       }
       const attached = /^-([a-zA-Z])(\S+)$/u.exec(value)
-      if (attached && SSH_VALUE_LETTERS.has(attached[1])) { index += 1; continue }
+      if (attached && SSH_VALUE_LETTERS.has(attached[1])) {
+        emitSshTunnel(`-${attached[1]}`, attached[2], options, env)
+        index += 1
+        continue
+      }
       if (value.length === 2 && SSH_BOOLEAN_FLAGS.has(value)) { index += 1; continue }
       env.gap('unmodeled-command', options.origin)
       return
@@ -852,8 +1084,12 @@ function sshCommand(args, options, env) {
   if (SSH_CMD_RECEIVERS.has(loweredReceiver)) {
     const payload = cmdPayload(rest.slice(1))
     if (payload === null) { env.gap('cmd-inline', options.origin); return }
+    const text = payload.join(' ')
+    // DSR-032 决定 8 applies to the ssh cmd channel too; the fact keeps the ssh
+    // domain so it never enters the host inventory.
+    if (emitCmdControlFlowDelete(text, { ...options, context: { domain: 'ssh' } }, env)) return
     env.child({
-      source: { kind: 'inline', text: payload.join(' ') },
+      source: { kind: 'inline', text },
       language: 'cmd',
       context: { domain: 'ssh' },
       condition: options.condition, origin: options.origin,
@@ -876,6 +1112,131 @@ function sshCommand(args, options, env) {
     context: { domain: 'ssh', platform: 'linux' },
     condition: options.condition, origin: options.origin,
   })
+}
+
+// --- transfer / listener tools: nc, ncat, socat, telnet (DSR-032 决定 3) ---------
+
+// nc/ncat short options that take a value: `-e`/`-c` are the execution channel,
+// the rest only shift the operand positions and never prove an action themselves.
+const NET_VALUE_LETTERS = new Set([...'ecwpsioxqTImMXW'])
+const NET_BOOL_LETTERS = new Set([...'lkuvzdrnN'])
+// The long spellings of the execution channel (`nc --exec`, `ncat --sh-exec`,
+// `ncat --lua-exec`), attached or separate.
+const NET_EXEC_LONGS = new Set(['--exec', '--sh-exec', '--lua-exec'])
+
+/** Local path of a socat `FILE:`/`OPEN:`/`CREATE:` address (before its `,opt,…`
+ * suffix), or null when the address is not one of those kinds. */
+function socatAddressPath(address) {
+  const colon = address.indexOf(':')
+  if (colon <= 0) return null
+  const kind = address.slice(0, colon).toLowerCase()
+  if (!['file', 'open', 'create'].includes(kind)) return null
+  const rest = address.slice(colon + 1)
+  const comma = rest.indexOf(',')
+  const value = comma < 0 ? rest : rest.slice(0, comma)
+  return value === '' ? null : value
+}
+
+/** The network-class socat address kinds: `TCP:`/`UDP:`/`OPENSSL:`/`SOCKS:`/
+ * `PROXY:`/`HTTP:` and their `4`/`6` and `-LISTEN`/`-CONNECT`/… spellings. A socat
+ * call without one of these connects two local endpoints and moves no data off the
+ * host (DCG's `socat-relay` and its `socat STDIO UNIX-CONNECT:…` allowance agree). */
+const SOCAT_NETWORK_ADDRESS =
+  /^(?:openssl|socks4a?|socks5h?|socks|tcp|udp|proxy|http|https|sctp)(?:4|6)?(?:-[a-z]+)?(?:4|6)?:/iu
+
+/** True when at least one socat address names a network endpoint. */
+function socatNetworkAddress(address) {
+  return typeof address === 'string' && SOCAT_NETWORK_ADDRESS.test(address)
+}
+
+/** `nc`/`ncat`/`netcat`/`nc.traditional`/`socat`: the execution channel
+ * (`-e`/`-c`/`--exec`/`--sh-exec`/`--lua-exec`, socat `EXEC:`/`SYSTEM:` address) is
+ * a dynamic-execution candidate; a socat local file address is a read/write fact. A
+ * plain listener/connection (`nc -l 8080`, `nc host port`, `telnet host`,
+ * `socat -h`) produces no fact and stays a coverage gap (放行). A socat call with no
+ * network address (`socat EXEC:cat UNIX-CONNECT:/tmp/x`, `socat STDIO
+ * UNIX-CONNECT:…`) is local-only: it produces no EXEC candidate and no file fact.
+ * Redirects on stdin are already covered by the shell layer's redirect facts. */
+function netToolCommand(name, args, options, env) {
+  if (name === 'telnet') { env.gap('unmodeled-command', options.origin); return }
+  const socat = name === 'socat'
+  const addresses = []
+  let execSeen = null
+  let unmodeled = false
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i]
+    if (typeof value !== 'string') { unmodeled = true; continue }
+    if (value === '--') {
+      for (let j = i + 1; j < args.length; j++) {
+        if (typeof args[j] === 'string') addresses.push({ value: args[j], index: j })
+        else unmodeled = true
+      }
+      break
+    }
+    if (value === '-') { addresses.push({ value, index: i }); continue } // STDIO address / operand
+    if (value.startsWith('--')) {
+      const eq = value.indexOf('=')
+      const lower = (eq < 0 ? value : value.slice(0, eq)).toLowerCase()
+      if (lower === '--help' || lower === '--version') { env.gap('unmodeled-command', options.origin); return }
+      // `--exec`, `--sh-exec` and `--lua-exec` all hand the socket to a local
+      // program (Gnu netcat / Nmap ncat spellings), attached or separate.
+      if (!socat && NET_EXEC_LONGS.has(lower)) {
+        const program = eq < 0 ? args[i + 1] : value.slice(eq + 1)
+        if (eq < 0) i += 1
+        if (typeof program === 'string' && program !== '') execSeen = { flag: lower, program }
+        else unmodeled = true
+        continue
+      }
+      continue // other long switches; socat long options are not needed for the scope
+    }
+    if (value.startsWith('-') && value.length > 1) {
+      let advance = 1
+      for (let k = 1; k < value.length; k++) {
+        const letter = value[k]
+        if (!socat && (letter === 'e' || letter === 'c')) {
+          const attached = value.slice(k + 1)
+          const program = attached !== '' ? attached : args[i + 1]
+          if (attached === '') advance = 2
+          if (typeof program === 'string') execSeen = { flag: `-${letter}`, program }
+          else unmodeled = true
+          break // a value letter ends the cluster
+        }
+        if (NET_VALUE_LETTERS.has(letter)) {
+          if (value.slice(k + 1) === '') advance = 2
+          break
+        }
+        if (!NET_BOOL_LETTERS.has(letter)) unmodeled = true
+      }
+      i += advance - 1
+      continue
+    }
+    addresses.push({ value, index: i })
+  }
+  if (socat) {
+    // Both ends local: no network peer, so no execution channel and no outbound
+    // file read to report (放行, gap below).
+    if (!addresses.some((address) => socatNetworkAddress(address.value))) {
+      env.gap(unmodeled ? 'command-options' : 'unmodeled-command', options.origin)
+      return
+    }
+    for (const address of addresses) {
+      if (/exec:/iu.test(address.value) || /system:/iu.test(address.value)) {
+        env.candidate('dynamic-execution', 'socat executes a program over the connection',
+          [`socat ${address.value}`], options.origin)
+      }
+    }
+    for (const address of addresses) {
+      const local = socatAddressPath(address.value)
+      if (local === null) continue
+      const kind = address.value.slice(0, address.value.indexOf(':')).toLowerCase()
+      emitTargets(kind === 'create' ? 'write-content' : 'read-content',
+        [{ value: local, index: address.index }], options, env)
+    }
+  } else if (execSeen !== null) {
+    env.candidate('dynamic-execution', `${name} executes a program over the connection`,
+      [`${name} ${execSeen.flag} ${execSeen.program}`], options.origin)
+  }
+  env.gap(unmodeled ? 'command-options' : 'unmodeled-command', options.origin)
 }
 
 // --- awk system() payloads ------------------------------------------------------
@@ -973,11 +1334,18 @@ const TAR_BOOLEAN_LONGS = new Set(['--create', '--gzip', '--verbose', '--list', 
  * directory in force when it appears; an unprovable `-C` value (dynamic or a
  * relative value with no provable cwd) leaves that member's target unknown with
  * a non-empty known scope. Without `--remove-files` the call stays the existing
- * unmodeled-command gap. */
+ * unmodeled-command gap.
+ *
+ * DSR-032: `tar --delete -f <archive> <members…>` (GNU tar) deletes entries INSIDE
+ * the archive, which is irreversible and names nothing on the filesystem. The
+ * archive and the member patterns are the known scope of one confirmed dynamic
+ * deletion; a missing archive or member list is a usage error (gap). */
 function tarCommand(args, options, env) {
   const api = options.context?.platform === 'win32' ? path.win32 : path.posix
   let removeFiles = false
+  let deleteEntries = false
   let archiveNamed = false
+  let archivePath
   let filesFrom = false
   let unmodeled = false
   let sawDirectory = false
@@ -1010,11 +1378,15 @@ function tarCommand(args, options, env) {
       const eq = value.indexOf('=')
       const name = eq < 0 ? value : value.slice(0, eq)
       if (name === '--remove-files') removeFiles = true
+      // GNU tar `--delete`: delete entries from the archive (no source member is
+      // removed from the filesystem, which is why it is its own fact below).
+      else if (name === '--delete') deleteEntries = true
       else if (name === '--directory') {
         applyDirectory(eq < 0 ? args[i + 1] : value.slice(eq + 1))
         if (eq < 0) i += 1
       } else if (name === '--file') {
         archiveNamed = true
+        archivePath = eq < 0 ? args[i + 1] : value.slice(eq + 1)
         if (eq < 0) i += 1 // the archive path is the next argument
       } else if (name === '--files-from' || name === '--exclude-from') {
         filesFrom = name === '--files-from'
@@ -1040,8 +1412,9 @@ function tarCommand(args, options, env) {
       }
       if (letter === 'f') {
         archiveNamed = true
-        if (letters.slice(k + 1) === '' && advance < args.length && typeof args[advance] === 'string') advance += 1
-        else if (letters.slice(k + 1) === '') unmodeled = true
+        if (letters.slice(k + 1) !== '') archivePath = letters.slice(k + 1)
+        else if (advance < args.length && typeof args[advance] === 'string') { archivePath = args[advance]; advance += 1 }
+        else unmodeled = true
         break // the cluster ends at its value letter
       }
       if (letter === 'T') {
@@ -1060,6 +1433,22 @@ function tarCommand(args, options, env) {
       if (!TAR_BOOLEAN_LETTERS.has(letter)) unmodeled = true
     }
     i = advance
+  }
+  // DSR-032: `tar --delete -f <archive> <members…>` removes archive entries. The
+  // archive name and the member patterns are the known scope; without a literal
+  // archive (the `-f/--file` value) or without members it is a usage error (gap).
+  if (deleteEntries) {
+    if (typeof archivePath !== 'string' || archivePath === '' || positionals.length === 0) {
+      env.gap('command-options', options.origin)
+      return
+    }
+    env.operation('delete', {
+      kind: 'unknown',
+      reason: 'archive-entry-delete',
+      knownScope: [archivePath, ...positionals.map(({ value }) =>
+        typeof value === 'string' ? value : '(unresolved member)')],
+    }, options)
+    return
   }
   if (!removeFiles) { env.gap('unmodeled-command', options.origin); return }
   const sources = archiveNamed ? positionals : positionals.slice(1)
@@ -1166,10 +1555,15 @@ function emitArchivedSourceDeletes(sources, { recurse, tool, options, env, archi
 /** `7z a -sdel …`: compression deletes the source members afterwards. Every
  * 7-Zip switch carries its value attached (`-mx=9`, `-oDIR`, `-x!…`), so switches
  * never consume the next token; the first positional is the archive name and the
- * rest are members. Without `-sdel` the call stays a coverage gap. */
+ * rest are members. Without `-sdel` the call stays a coverage gap.
+ *
+ * DSR-032: `7z d <archive> <members…>` deletes entries inside the archive. The
+ * archive and the member patterns are the known scope of one confirmed dynamic
+ * deletion; a missing archive or member list is a usage error (gap). Other
+ * subcommands, and `7z a` without `-sdel`, keep the coverage gap. */
 function sevenZipCommand(args, options, env) {
   const sub = typeof args[0] === 'string' ? args[0].toLowerCase() : ''
-  if (sub !== 'a') { env.gap('unmodeled-command', options.origin); return }
+  if (sub !== 'a' && sub !== 'd') { env.gap('unmodeled-command', options.origin); return }
   let deleteAfter = false
   const positionals = []
   for (let i = 1; i < args.length; i++) {
@@ -1187,6 +1581,21 @@ function sevenZipCommand(args, options, env) {
     }
     positionals.push({ value, index: i })
   }
+  if (sub === 'd') {
+    const archive = positionals[0]
+    const members = positionals.slice(1)
+    if (typeof archive?.value !== 'string' || archive.value === '' || members.length === 0) {
+      env.gap('command-options', options.origin)
+      return
+    }
+    env.operation('delete', {
+      kind: 'unknown',
+      reason: 'archive-entry-delete',
+      knownScope: [archive.value, ...members.map(({ value }) =>
+        typeof value === 'string' ? value : '(unresolved member)')],
+    }, options)
+    return
+  }
   if (!deleteAfter) { env.gap('unmodeled-command', options.origin); return }
   const sources = positionals.slice(1)
   if (sources.length === 0) { env.gap('command-options', options.origin); return }
@@ -1201,6 +1610,7 @@ function zipCommand(args, options, env) {
   let move = false
   let recurse = false
   let fromFile = false
+  let deleteEntries = false
   const positionals = []
   for (let i = 0; i < args.length; i++) {
     const value = args[i]
@@ -1213,6 +1623,8 @@ function zipCommand(args, options, env) {
       const eq = value.indexOf('=')
       const name = eq < 0 ? value : value.slice(0, eq)
       if (name === '--move') { move = true; continue }
+      // DSR-032 决定 6: `--delete` removes archive entries.
+      if (name === '--delete') { deleteEntries = true; continue }
       if (ZIP_VALUE_LONG.has(name)) { if (eq < 0) i += 1; continue }
       if (ZIP_BOOL_LONG.has(name)) continue
       env.gap('unmodeled-command', options.origin)
@@ -1222,6 +1634,8 @@ function zipCommand(args, options, env) {
       for (let k = 1; k < value.length; k++) {
         const letter = value[k]
         if (letter === 'm') { move = true; continue }
+        // DSR-032 决定 6: GNU zip `-d` deletes entries from the archive.
+        if (letter === 'd') { deleteEntries = true; continue }
         if (letter === 'r' || letter === 'R') { recurse = true; continue }
         if (letter === '@') { fromFile = true; break }
         if (ZIP_VALUE_SHORT.has(letter)) {
@@ -1235,6 +1649,24 @@ function zipCommand(args, options, env) {
       continue
     }
     positionals.push({ value, index: i })
+  }
+  // DSR-032 决定 6: `zip -d <archive> <members…>` irreversibly drops archive
+  // entries. The archive and the member patterns are the known scope; a missing
+  // archive or member list is a usage error (gap, no fact).
+  if (deleteEntries) {
+    const archive = positionals[0]
+    const members = positionals.slice(1)
+    if (typeof archive?.value !== 'string' || archive.value === '' || members.length === 0) {
+      env.gap('command-options', options.origin)
+      return
+    }
+    env.operation('delete', {
+      kind: 'unknown',
+      reason: 'zip-entry-delete',
+      knownScope: [archive.value, ...members.map(({ value }) =>
+        typeof value === 'string' ? value : '(unresolved member)')],
+    }, options)
+    return
   }
   if (!move) { env.gap('unmodeled-command', options.origin); return }
   if (fromFile) {
@@ -1459,6 +1891,35 @@ function diskutilCommand(args, options, env) {
 }
 
 const PARTED_WRITE_SUBCOMMANDS = new Set(['mklabel', 'mkpart', 'rm', 'resizepart'])
+// GNU parted abbreviates an unambiguous command (and its keywords) to a prefix:
+// `p`=print, `h`=help, `q`=quit, `u`=unit. No write command shares those prefixes.
+const PARTED_READ_SUBCOMMANDS = new Set(['print', 'unit', 'help', 'quit', 'select', 'version', 'free', 'align-check',
+  'p', 'h', 'q', 'u'])
+// Literal words a read-only parted script may carry besides its commands (unit
+// names, print selectors and the partition-number operand). Anything else keeps
+// the script unproven.
+const PARTED_SCRIPT_WORDS = new Set(['devices', 'free', 'list', 'all', 'optimal', 'minimal',
+  'cyl', 'chs', 'compact', 's', 'B', 'kB', 'MB', 'GB', 'TB', 'MiB', 'GiB', 'TiB', '%'])
+
+/** DSR-032 决定 7: a parted script on stdin (`printf 'p\n' | parted <device>`) can
+ * rewrite the partition table, so it is the interactive-session candidate. The
+ * pipeline provenance names the upstream literal words (quoting is not preserved),
+ * and the upstream program name is not part of the script it prints: when every
+ * remaining word is a read-only subcommand (or one of the keywords/values those
+ * subcommands take) the script cannot write and the candidate is withdrawn. A
+ * pipeline with no such words, or with any word this does not prove, stays a
+ * candidate. */
+function partedReadOnlyScript(source) {
+  if (typeof source !== 'string' || source === '') return false
+  const start = source.search(/\s/u)
+  if (start < 0) return false
+  // printf-style escapes (`\n`) separate the script's lines.
+  const words = source.slice(start).replace(/\\[nrt]/gu, '\n').split(/[\s;]+/u).filter((word) => word !== '')
+  if (words.length === 0) return false
+  if (!PARTED_READ_SUBCOMMANDS.has(words[0])) return false
+  return words.every((word) => PARTED_READ_SUBCOMMANDS.has(word) || PARTED_SCRIPT_WORDS.has(word) ||
+    /^\d+%?$/u.test(word))
+}
 
 function partedCommand(args, options, env) {
   let i = 0
@@ -1484,7 +1945,29 @@ function partedCommand(args, options, env) {
   // destructive form; the device is the literal operand before it, when present.
   const rest = args.slice(i)
   const writeIndex = rest.findIndex((value) => typeof value === 'string' && PARTED_WRITE_SUBCOMMANDS.has(value))
-  if (writeIndex < 0) { env.gap('unmodeled-command', options.origin); return }
+  if (writeIndex < 0) {
+    // DSR-032 决定 7: `parted <device>` with no subcommand starts the interactive
+    // session (or reads a script from stdin), which can rewrite the partition
+    // table. The device text is the checkable scope; a literal `/dev/…` device also
+    // keeps the device-mutation fact for the identity probes. An explicit read-only
+    // subcommand (`print`, `unit`, …) or no device operand stays a coverage gap.
+    if (rest.some((value) => typeof value === 'string' && PARTED_READ_SUBCOMMANDS.has(value))) {
+      env.gap('unmodeled-command', options.origin)
+      return
+    }
+    // A read-only stdin script (`printf 'p\n' | parted <device>`) proves no write.
+    if (partedReadOnlyScript(options.pipeline?.source)) {
+      env.gap('unmodeled-command', options.origin)
+      return
+    }
+    const deviceIndex = rest.findIndex((value) => typeof value === 'string' && !value.startsWith('-'))
+    if (deviceIndex < 0) { env.gap('unmodeled-command', options.origin); return }
+    const device = rest[deviceIndex]
+    env.candidate('unverified-effect', 'parted interactive session may write the partition table',
+      [`parted ${device}`], options.origin)
+    if (device.startsWith('/dev/')) storageMutationFact(device, options, env)
+    return
+  }
   const device = rest.slice(0, writeIndex).find((value) => typeof value === 'string' && !value.startsWith('-'))
   storageMutationFact(device, options, env)
 }
@@ -1802,7 +2285,17 @@ function gitCommand(args, options, env) {
     (cmd === 'gc' && (has('--prune=now') || has('--prune=all'))) ||
     ['filter-branch', 'filter-repo'].includes(cmd) || rewritesRefs || isReset ||
     (cmd === 'reflog' && rest[0] === 'expire' && has('--all') && (has('--expire=now') || has('--expire=all')))
-  const action = dangerous ? 'git-history-destroy' : cmd === 'clean' ? 'git-clean' : cmd === 'restore' ? 'git-restore'
+  // DSR-032 决定 1: `git restore --staged` without an explicit worktree selector
+  // only rewrites the index, never the working tree, so it produces no destructive
+  // fact (放行). A worktree selector (`-W`/`--worktree`), or the absence of
+  // `--staged`, keeps the existing worktree-restore fact.
+  const shortFlagHas = (letter) => flags.some((value) => typeof value === 'string' &&
+    /^-[A-Za-z]+$/u.test(value) && value.includes(letter))
+  const restoreStaged = cmd === 'restore' && (has('--staged') || shortFlagHas('S'))
+  const restoreWorktree = cmd === 'restore' && (has('--worktree') || shortFlagHas('W'))
+  const indexOnlyRestore = restoreStaged && !restoreWorktree
+  const action = dangerous ? 'git-history-destroy' : cmd === 'clean' ? 'git-clean'
+    : cmd === 'restore' ? (indexOnlyRestore ? undefined : 'git-restore')
     : cmd === 'worktree' && rest[0] === 'remove' ? 'git-worktree-remove' : undefined
   if (!action) {
     // DSR-031 决定 8 (facts side): `<subcommand> --abort` is modeled as a Git state
@@ -2055,6 +2548,11 @@ export function resolveCommand(executable, args, unit, env) {
   if (name === 'shred') return shredCommand(args, options, env)
   if (name === 'rsync') return rsyncCommand(args, options, env)
   if (name === 'ssh' && !unit.cmdDialect) return sshCommand(args, options, env)
+  // `netcat` and `nc.traditional` are the same tool under its package spellings.
+  if ((name === 'nc' || name === 'ncat' || name === 'netcat' || name === 'nc.traditional' ||
+    name === 'socat' || name === 'telnet') && !unit.cmdDialect) {
+    return netToolCommand(name, args, options, env)
+  }
   // DSR-031 决定 7: `unshare` is a transparent wrapper. The inner program is
   // analyzed with the wrapper's arguments trimmed; the wrapper itself adds no
   // candidate and no denial, and a missing program operand is a plain gap.

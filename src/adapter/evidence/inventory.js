@@ -356,13 +356,16 @@ async function walkDirectory(state, operation, absolute, rootDev, maxDepth, dept
         return
       }
       // Git metadata inside the walked tree (worktree pointer or inner repo): its common-dir
-      // body is never ordinary counted entries. Flag it and leave the inventory unproven
-      // rather than silently skipping contents (under-count) or counting metadata as files.
+      // body is never ordinary counted entries. DSR-032 decision 2: record it as a
+      // DELIBERATE unknown (this subtree's disposability stays incomplete) and keep walking
+      // the sibling entries. A whole-tree delete therefore confirms with the observed count
+      // instead of failing the check. Deleting `.git` (or its contents) AS THE TARGET is a
+      // separate catastrophic identity in the identity layer; that verdict is unchanged.
       if (ctx.windows ? entry.name.toLowerCase() === '.git' : entry.name === '.git') {
-        ctx.noteIssue({ kind: 'git-metadata-inside-tree', reason: 'git metadata inside the traversal tree', path: child })
-        noteFailure(state, 'git-metadata-inside-tree')
+        noteUnknown(state, 'git-metadata-inside-tree')
+        noteGitMetadataScope(state, operation, child)
         markIncomplete()
-        return
+        continue
       }
       let info
       try {
@@ -693,6 +696,25 @@ function noteAbortScope(operation, text) {
   if (!target || typeof target !== 'object' || target.kind !== 'unknown') return
   const list = Array.isArray(target.knownScope) ? target.knownScope : (target.knownScope = [])
   if (!list.includes(text)) list.push(text)
+}
+
+/**
+ * DSR-032 decision 2: name the in-tree Git metadata through an EXISTING display channel so
+ * the confirmation shows that `.git` would be destroyed together with the surrounding
+ * tree. An `unknown` target reports its scope through `knownScope`; a `subtree` target is
+ * reported through the inventory's own `unknown` list (both channels are copied verbatim
+ * into the decision scope). No new state field is introduced.
+ */
+function noteGitMetadataScope(state, operation, absolute) {
+  const target = operation?.target
+  if (!target || typeof target !== 'object') return
+  const text = `git metadata (.git) at ${absolute} would also be destroyed`
+  if (target.kind === 'unknown') {
+    const list = Array.isArray(target.knownScope) ? target.knownScope : (target.knownScope = [])
+    if (!list.includes(text)) list.push(text)
+    return
+  }
+  if (target.kind === 'subtree' || operation.recursive === true) noteUnknown(state, text)
 }
 
 async function observeGitOperation(state, operation, ctx) {
