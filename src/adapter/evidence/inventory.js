@@ -226,6 +226,58 @@ async function observeHostOperation(state, operation, ctx) {
   }
 }
 
+/** True when `name` is the conventional Git directory name (`.git`) for the platform. */
+function isGitDirName(name, windows) {
+  return windows ? name.toLowerCase() === '.git' : name === '.git'
+}
+
+/** True when an ancestor path segment is a `.git` directory, so the target is INSIDE a
+ * repository's metadata body (e.g. `repo/.git/objects`). */
+function insideGitDir(absolute) {
+  return absolute.split(/[\\/]/u).slice(0, -1).some((part) => part.toLowerCase() === '.git')
+}
+
+/** True when `absolute` itself looks like a real Git directory body: a `HEAD` file plus an
+ * `objects` or `refs` directory. This catches bare repositories and renamed git dirs. */
+async function looksLikeGitDir(absolute) {
+  try {
+    const head = await fs.lstat(path.join(absolute, 'HEAD'))
+    if (!head.isFile()) return false
+  } catch { return false }
+  for (const child of ['objects', 'refs']) {
+    try {
+      if ((await fs.lstat(path.join(absolute, child))).isDirectory()) return true
+    } catch { /* keep checking */ }
+  }
+  return false
+}
+
+/** DSR-033: a deletion target that is or is inside a COMPLETE Git repository's metadata
+ * body. A `.git` FILE is a linked-worktree pointer (history lives elsewhere) and is NOT a
+ * complete repository: it stays an ordinary file. */
+async function isGitRepositoryTarget(absolute, windows) {
+  if (insideGitDir(absolute)) return true
+  if (isGitDirName(path.basename(absolute), windows)) {
+    try { return (await fs.lstat(absolute)).isDirectory() } catch { return false }
+  }
+  return looksLikeGitDir(absolute)
+}
+
+/** Record a complete-repository destruction as a deliberate unknown: the policy confirms
+ * (approval prompt) with the repository metadata named in the scope. No catastrophic
+ * identity is produced (DSR-033). */
+function noteGitRepositoryTarget(state, operation, absolute) {
+  noteUnknown(state, 'git-repository-target')
+  const text = `complete Git repository metadata (.git) at ${absolute} would be destroyed`
+  const target = operation?.target
+  if (target && typeof target === 'object' && target.kind === 'unknown') {
+    const list = Array.isArray(target.knownScope) ? target.knownScope : (target.knownScope = [])
+    if (!list.includes(text)) list.push(text)
+  } else {
+    noteUnknown(state, text)
+  }
+}
+
 async function observeExactPaths(state, operation, rawPaths, cwd, ctx) {
   const paths = (Array.isArray(rawPaths) ? rawPaths : []).filter((value) => typeof value === 'string' && value !== '')
   if (paths.length === 0) { noteUnknown(state, 'empty-exact-target'); return }
@@ -252,6 +304,10 @@ async function observeEntry(state, operation, absolute, ctx, { isRoot = false } 
   }
   if (isRoot) await recordRealPath(state, absolute, ctx, info.isSymbolicLink())
   if (info.isSymbolicLink()) return countLink(state, absolute, operation.action, ctx)
+  if (info.isDirectory() && await isGitRepositoryTarget(absolute, ctx.windows)) {
+    noteGitRepositoryTarget(state, operation, absolute)
+    return
+  }
   if (info.isFile()) return countFile(state, absolute, operation.action, ctx)
   if (info.isDirectory()) {
     if (operation.recursive !== true) {
@@ -295,6 +351,7 @@ async function observeSubtree(state, operation, rawRoot, maxDepthOption, cwd, ct
     noteFailure(state, 'ambiguous-entry')
     return
   }
+  if (await isGitRepositoryTarget(root, ctx.windows)) { noteGitRepositoryTarget(state, operation, root); return }
   await recordRealPath(state, root, ctx, false)
   state.roots.push(root)
   await walkDirectory(state, operation, root, info.dev, maxDepth, 0, ctx)
@@ -355,18 +412,6 @@ async function walkDirectory(state, operation, absolute, rootDev, maxDepth, dept
         markIncomplete()
         return
       }
-      // Git metadata inside the walked tree (worktree pointer or inner repo): its common-dir
-      // body is never ordinary counted entries. DSR-032 decision 2: record it as a
-      // DELIBERATE unknown (this subtree's disposability stays incomplete) and keep walking
-      // the sibling entries. A whole-tree delete therefore confirms with the observed count
-      // instead of failing the check. Deleting `.git` (or its contents) AS THE TARGET is a
-      // separate catastrophic identity in the identity layer; that verdict is unchanged.
-      if (ctx.windows ? entry.name.toLowerCase() === '.git' : entry.name === '.git') {
-        noteUnknown(state, 'git-metadata-inside-tree')
-        noteGitMetadataScope(state, operation, child)
-        markIncomplete()
-        continue
-      }
       let info
       try {
         info = await fs.lstat(child)
@@ -389,6 +434,16 @@ async function walkDirectory(state, operation, absolute, rootDev, maxDepth, dept
         continue
       }
       if (info.isDirectory()) {
+        // DSR-033: a `.git` DIRECTORY inside the tree is a complete repository body. Record
+        // it as a deliberate unknown (this subtree's count stays incomplete → the policy
+        // confirms with the observed count) and keep walking siblings. A `.git` FILE is a
+        // linked-worktree pointer and is counted as an ordinary file above.
+        if (isGitDirName(entry.name, ctx.windows)) {
+          noteUnknown(state, 'git-metadata-inside-tree')
+          noteGitMetadataScope(state, operation, child)
+          markIncomplete()
+          continue
+        }
         // Same-device st_dev guard plus the Linux mount snapshot (which also catches
         // same-device bind mounts). A crossing makes the traversal set unprovable.
         if (info.dev !== rootDev) {

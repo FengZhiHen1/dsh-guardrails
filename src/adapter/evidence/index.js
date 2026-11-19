@@ -401,7 +401,7 @@ async function collectIdentities(operation, state, ctx, identities) {
     else ctx.noteIssue({ kind: 'device-identity-unproven', reason: 'device probe could not prove physical identity', path: absolute })
   }
 
-  // 3) Ordinary paths: system tree and git common-dir identities, destructive only.
+  // 3) Ordinary paths: host system tree identities only, destructive operations only.
   if (!DESTRUCTIVE.has(action) || operation.preview === true) return
   for (const absolute of identityPaths(target, operation.context?.cwd)) {
     if (isDeviceNamespacePath(absolute, ctx.platform)) continue // handled above
@@ -413,11 +413,10 @@ async function collectIdentities(operation, state, ctx, identities) {
       identities.push({ ruleId: RULES.root, path: real, action })
       continue
     }
-    // The real Git common-dir body (or its object store): shared across worktrees.
-    const common = await ctx.commonDirFor(path.dirname(real))
-    if (common && (sameRealPath(real, common, ctx.windows) || sameRealPath(real, path.join(common, 'objects'), ctx.windows))) {
-      identities.push({ ruleId: RULES.gitMetadata, path: real, action })
-    }
+    // DSR-033: destroying a complete Git repository (the `.git` body itself, a bare repo,
+    // or a directory tree containing one) is an approval prompt, not an absolute deny.
+    // The inventory expresses it as a deliberate unknown with a scope sentence; no
+    // catastrophic identity is produced here any more.
   }
 }
 
@@ -490,8 +489,4 @@ async function knownRealPath(state, absolute, ctx) {
   const real = probe.state === 'known' ? probe.path : null
   state.realPaths.set(key, real)
   return real
-}
-
-function sameRealPath(a, b, windows) {
-  return comparable(a, windows) === comparable(b, windows)
 }

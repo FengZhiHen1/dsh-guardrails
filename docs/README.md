@@ -65,5 +65,6 @@
 | [DSR-030](decisions/DSR-030-远程载荷与设备擦除的工具面补齐.md) | 远程载荷与设备擦除的工具面补齐 | heredoc 正文、`ssh` 远程命令、`tar --remove-files`、设备擦除工具与 `awk system` 的判定 |
 | [DSR-031](decisions/DSR-031-剩余未做项补齐与外传管道边界.md) | 剩余未做项补齐与外传、管道边界 | `ssh`/`wsl` heredoc 传递、`ssh` PowerShell/cmd 通道、`sgdisk`/`parted` 写子命令、`tar -C`、云/DB/K8s 与备份密钥矩阵、元数据端点与传输读事实、`unshare`、`git --abort` 状态探测、PowerShell 管道删除、`docker run|exec` 载荷 |
 | [DSR-032](decisions/DSR-032-过度防御修正与隧道控制流长尾的灾难防御.md) | 过度防御修正与隧道、控制流、云长尾的灾难防御 | `git restore --staged` 与含 `.git` 目录删除的误伤修正、`nc`/`socat`/`ssh -R`/`sftp -b`、`parted` 交互、`zip -d`/`tar --delete`/`7z d`、`cmd for/if/%VAR%`、云与数据仓库长尾 |
+| [DSR-033](decisions/DSR-033-完整Git仓库删除改为审批.md) | 完整 Git 仓库删除改为审批（ask） | `.git` 主体、bare 仓库、含 `.git` 的树改为确认；worktree（`.git` 文件指针）不触发；`catastrophic.git-metadata` 保留但不再产生 |
 
 其余历史 DSR 按当时语境阅读。DSR-010 与 DSR-012 引用的历史 Shell 章节可通过本页「历史章节索引」定位现行语法角色与数据位置。

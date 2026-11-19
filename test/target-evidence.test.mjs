@@ -192,26 +192,47 @@ test('rm -rf of a tree CONTAINING .git confirms with the .git scope, never check
   assert.ok(JSON.stringify(decision.scope).includes('git metadata (.git)'), JSON.stringify(decision.scope))
 })
 
-test('rm -rf of the .git directory itself stays an absolute catastrophic deny (DSR-032: identity unchanged)', async (t) => {
-  const parent = await makeFixture(t, { dirs: ['repo/.git'] })
-  const gitDir = path.join(parent, 'repo', '.git')
+test('rm -rf of a complete repository .git is an approval prompt, not an absolute deny (DSR-033)', async (t) => {
+  const parent = await makeFixture(t, { files: ['repo/.git/HEAD', 'repo/.git/objects/keep', 'repo/a.txt'] })
   const analysis = await analyzeDelete('rm -rf repo/.git', parent)
   const deleteOperation = analysis.operations.find((operation) => operation.action === 'delete')
   assert.ok(deleteOperation, 'the analyzer must produce a delete fact')
-  assert.deepEqual(deleteOperation.target, { kind: 'subtree', root: 'repo/.git' })
-  // Inject the read-only common-dir probe: this target IS the repository's real git dir.
-  // The identity layer is unchanged by DSR-032 decision 2 (only the in-tree case moved).
-  const gitRun = async (argv) => {
-    if (argv.includes('--git-common-dir')) return { stdout: gitDir }
-    throw new Error(`unexpected probe: ${argv.join(' ')}`)
-  }
-  const evidence = await collectEvidence(analysis, { isProtectedPath: () => false, gitRun })
-  assert.deepEqual(evidence.identities, [
-    { ruleId: 'catastrophic.git-metadata', path: await fs.realpath(gitDir), action: 'delete' },
-  ])
+  // DSR-033: the identity layer no longer emits catastrophic.git-metadata for a complete
+  // repository target; the inventory records a deliberate unknown so the policy asks.
+  const evidence = await collectEvidence(analysis, { isProtectedPath: () => false })
+  assert.deepEqual(evidence.identities, [])
+  assert.ok(evidence.inventory.unknown.includes('git-repository-target'))
   const decision = decide(evidence, {})
-  assert.equal(decision.kind, 'deny')
-  assert.equal(decision.ruleId, 'catastrophic.git-metadata')
+  assert.equal(decision.kind, 'confirm')
+  assert.match(decision.ruleId, /^data\.delete\./u)
+  assert.ok(JSON.stringify(decision.scope).includes('complete Git repository metadata (.git)'))
+})
+
+test('a linked-worktree .git pointer is not a complete repository (DSR-033)', async (t) => {
+  const parent = await makeFixture(t, { files: ['wt/.git', 'wt/a.txt', 'wt/b.txt'] })
+  // Deleting the worktree tree counts its ordinary files (the pointer included): small → allow.
+  const tree = await collectEvidence(analysisWith([
+    deleteOp({ kind: 'subtree', root: 'wt' }, hostContext(parent), { recursive: true }),
+  ]), { isProtectedPath: () => false })
+  assert.deepEqual(tree.inventory.unknown, [], 'a .git pointer file is not git metadata')
+  assert.equal(tree.inventory.count, 3)
+  assert.equal(decide(tree, {}).kind, 'allow')
+  // Deleting only the pointer file is an ordinary single-file delete.
+  const pointer = await collectEvidence(analysisWith([
+    deleteOp({ kind: 'subtree', root: 'wt/.git' }, hostContext(parent), { recursive: true }),
+  ]), { isProtectedPath: () => false })
+  assert.deepEqual(pointer.inventory.unknown, [])
+  assert.equal(decide(pointer, {}).kind, 'allow')
+})
+
+test('a bare repository directory is an approval prompt (DSR-033)', async (t) => {
+  const parent = await makeFixture(t, { files: ['repo.git/HEAD', 'repo.git/objects/keep', 'repo.git/refs/heads/main'] })
+  const evidence = await collectEvidence(analysisWith([
+    deleteOp({ kind: 'subtree', root: 'repo.git' }, hostContext(parent), { recursive: true }),
+  ]), { isProtectedPath: () => false })
+  assert.ok(evidence.inventory.unknown.includes('git-repository-target'))
+  assert.deepEqual(evidence.identities, [])
+  assert.equal(decide(evidence, {}).kind, 'confirm')
 })
 
 test('ordinary directory deletes keep their allow/confirm tiers (DSR-032 regression)', async (t) => {
