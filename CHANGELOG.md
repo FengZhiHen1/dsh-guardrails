@@ -2,6 +2,15 @@
 
 本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
+## 0.5.0
+
+- **过度防御修正（用户反馈驱动）**：`git restore --staged <paths>` 只还原索引，恢复为放行；删除含 `.git` 的目录（如清理临时仓库）从 `execution.check-failed` 拒绝改为**确认**，范围注明「`.git` 元数据将一并销毁」；以 `.git` 或其内容本身为目标的删除仍按 `catastrophic.git-metadata` 绝对拒绝。`scp`/`sftp -i` 身份文件不再触发凭据读确认（正常认证用途）。
+- **隧道与传输（灾难防御）**：`nc`/`ncat`/`netcat`/`socat` 的 `-e`/`--exec`/`--sh-exec`/`--lua-exec` 与 `socat EXEC:/SYSTEM:` 是执行通道（确认；`socat` 还要求另一端是网络地址，纯本地放行）；`ssh -R`/`-D` 反向转发与 SOCKS 确认，`ssh -o ProxyCommand=<value>` 的值按本地命令文本分析，`-L`/`-J` 放行；`sftp -b` 批处理确认。
+- **归档与分区**：`zip -d`、`tar --delete`、`7z d` 是归档内删除（确认）；`parted` 无写子命令但带设备时是交互式设备写入入口（确认，设备路径可证时进入设备身份判定），只读子命令含缩写 `p/h/q/u` 放行。
+- **`cmd.exe` 控制流**：`for`/`if`/`%VAR%`/`!VAR!`/`^`/`(`/`)`/`start`/`call` 且**命令位**出现删除族时按范围确认；`echo`/`rem` 的参数是数据、不误报；`/k` 与 `/c` 同路分析正文。
+- **云与数据仓库长尾**：补齐 `aws`（`eks`/`glue batch-delete-*`/`athena`/`redshift`/`kinesis`/`cloudtrail`/`logs`/`s3api delete-object(s)`/`s3 sync --delete`/`ecr batch-delete-image`）、`gcloud`（`storage rm`/`objects delete`/`firestore`/`artifacts`/`iam roles`/`dns managed-zones`/`bigtable`/`projects delete`）、`az`（`keyvault purge`/`account subscription cancel`/`management-group delete`/`acr repository`/`ad app|sp`/`storage blob delete-batch`）、`kubectl apply --force`、`docker compose down -v`、`redis-cli shutdown nosave`、`bq`/`pulumi`/`mc`/`databricks fs rm`/`supabase storage rm`、SQL DDL 对象扩展（`warehouse`/`user`/`role` 等）。
+- **不变**：不新增规则号；普通只读用法与既有回归（`git status`/`checkout -b`/`find` 无 `-delete`/`rsync` 无 `--delete`/`kubectl get`/`aws s3 ls`/`docker ps`/`ssh host ls`/`nc -l`/`parted -l`/`cmd /c dir` 等）保持放行且零候选。见 [DSR-032](docs/decisions/DSR-032-过度防御修正与隧道控制流长尾的灾难防御.md)。
+
 ## 0.4.0
 
 - **剩余形态补齐（默认放行不变）**：`ssh host <<EOF` 与 `wsl … bash <<EOF` 的 heredoc 正文按远端 shell 脚本分析；`ssh host powershell|pwsh` 与 `ssh host cmd /c` 按对应方言分析载荷；`sgdisk` 的 `-d`/`-n`/`-t`/`-A`/`-c`/`-Z`/`-o`（`-P` 为预览）与 `parted resizepart` 进入设备变更判定；`tar -C` 按目录重定位 `--remove-files` 成员，`7z a -sdel`/`zip -m` 与 `tar --remove-files` 同档；`unshare` 作为透明包装解包；`git rebase|merge|cherry-pick|revert|am --abort` 仅在只读探测证明有进行中状态时确认（无进行中状态放行，探测失败不升级为检查故障）；PowerShell 管道中无显式路径的删除按相邻上游命令范围确认；`docker run|exec` 的载荷仅在宿主绑定挂载、`--device` 或 `--privileged` 时按容器域分析。见 [DSR-031](docs/decisions/DSR-031-剩余未做项补齐与外传管道边界.md)。
