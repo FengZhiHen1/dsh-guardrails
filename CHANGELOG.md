@@ -2,6 +2,12 @@
 
 本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
+## Unreleased
+
+- **新增配置项 `alwaysAsk`**（默认 `true`，可热改）：会话审批策略为 `never` 或审批 seam 缺失时，插件经官方问答通道弹出一次通用单问题问答确认；设为 `false` 时退回自动拒绝。
+- **确认通道回退与两个新拒绝码**：通道优先级为「审批 seam 存在且有效策略 `ask` → 官方审批」「策略为 `never` 或审批 seam 缺失，且 `alwaysAsk` 开启 → 问答通道」「其余拒绝；审批 seam 存在但无应答方直接 `APPROVAL_UNAVAILABLE`，不回退问答」；新增 `APPROVAL_POLICY_NEVER`（策略为 `never` 且没有交互应答方接受该确认）与 `APPROVAL_DELEGATED`（委派子代理会话无法询问用户）。见 [DSR-034](docs/decisions/DSR-034-插件自有确认通道与never策略回退.md)。
+- **误归因修正**：`APPROVAL_REJECTED` 现在只在真的有人拒绝时出现；策略拒绝与「无法询问用户」不再被表述为用户拒绝。
+
 ## 0.5.1
 
 - **完整 Git 仓库的删除改为审批（ask）**：删除 `.git` 主体、其子目录（`objects`/`refs`）、bare 仓库目录，或包含 `.git` 目录的目录树时，产出**确认**（`data.delete.bulk`/`data.delete.dynamic`，范围说明「complete Git repository metadata (.git) … would be destroyed」），不再 `catastrophic.git-metadata` 绝对拒绝。Git worktree / Linked Worktree（`.git` 是文件指针）不触发该审批，按普通文件计数删除。销毁历史的 Git 子命令（`filter-branch`/`git reset --hard` 等）仍绝对拒绝。见 [DSR-033](docs/decisions/DSR-033-完整Git仓库删除改为审批.md)。

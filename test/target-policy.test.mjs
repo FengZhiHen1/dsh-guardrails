@@ -40,6 +40,7 @@ test('normalizePolicy: defaults for empty and missing config', () => {
     assert.deepEqual(policy.sensitiveFiles, [])
     assert.equal(policy.builtinSensitiveAsk, true)
     assert.equal(policy.askTimeoutMs, 120000)
+    assert.equal(policy.alwaysAsk, true) // protective default (keep asking when approvals are off)
     assert.deepEqual(policy.rules, {})
     assert.deepEqual(policy.allowOnce, [])
     assert.equal(policy.tightenOnly, true) // protective default (受保护项始终生效)
@@ -52,6 +53,14 @@ test('normalizePolicy: defaults for empty and missing config', () => {
     assert.equal(policy.builtinSensitiveAsk, true)
     assert.deepEqual(policy.configIssues, [{ code: 'config-not-object', count: 1 }])
   }
+})
+
+test('normalizePolicy: alwaysAsk defaults to true; a non-boolean is reported and keeps the protective default', () => {
+  assert.equal(normalizePolicy({}).alwaysAsk, true)
+  assert.equal(normalizePolicy({ alwaysAsk: false }).alwaysAsk, false)
+  const invalid = normalizePolicy({ alwaysAsk: 'yes' })
+  assert.equal(invalid.alwaysAsk, true)
+  assert.deepEqual(invalid.configIssues, [{ code: 'always-ask-invalid', count: 1 }])
 })
 
 test('normalizePolicy: valid values pass through; tightenOnly true accepted', () => {

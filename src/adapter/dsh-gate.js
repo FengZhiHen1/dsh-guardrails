@@ -239,18 +239,66 @@ export function installGate(ctx, deps) {
     unavailable: 'APPROVAL_UNAVAILABLE: No approval channel or requesting agent is available for this confirmation; invocation refused.',
     failed: 'APPROVAL_FAILED: The approval request could not be recorded; invocation refused.',
     budget: 'APPROVAL_TIMEOUT: The bounded wait budget was already spent on the first confirmation; invocation refused. Re-issue the call to start a new bounded confirmation.',
+    policyNever: 'APPROVAL_POLICY_NEVER: The session approval policy is "never" and no interactive answerer accepted this confirmation; the operation was refused without a user decision.',
+    delegated: 'APPROVAL_DELEGATED: This operation runs in a delegated subagent session, which cannot ask the user; invocation refused. Re-run it from the parent session.',
+  }
+
+  /** Sentinel distinguishing "the wait was cancelled" from a channel result. */
+  const CANCELLED = Symbol('guardrails-ask-cancelled')
+
+  /**
+   * Effective host approval policy for one invocation, read fail-closed: an
+   * unreadable policy counts as `never`, so the gate can never silently grant.
+   * Precedence matches the official seam: session override, then config default.
+   */
+  function readApprovalState(execution) {
+    let approval
+    try { approval = ctx.get('approval') } catch { approval = undefined }
+    let policyName = 'never'
+    try {
+      const session = execution?.agent?.session
+      const override = approval && typeof approval.overrideOf === 'function'
+        ? approval.overrideOf(session)
+        : undefined
+      const configured = approval?.config?.policy
+      policyName = (override ?? configured ?? 'ask') === 'never' ? 'never' : 'ask'
+    } catch {
+      policyName = 'never'
+    }
+    return { approval, policyName }
+  }
+
+  /** Fetch an optional service without letting a provider lookup throw. */
+  function optionalService(key) {
+    try { return ctx.get(key) } catch { return undefined }
+  }
+
+  /** Selected labels for the guardrails question from one answer batch. Only an
+   * entry whose id matches exactly counts; anything else is treated as no answer. */
+  function selectedLabels(answer, id) {
+    const answers = answer?.answers
+    if (!Array.isArray(answers)) return []
+    const item = answers.find((entry) => entry && entry.id === id)
+    const selected = item?.selected
+    return Array.isArray(selected) ? selected.filter((label) => typeof label === 'string') : []
+  }
+
+  /** Map one question-channel exception onto the closed denial codes. */
+  function questionFailureReason(error) {
+    const code = error && typeof error === 'object' ? error.code : undefined
+    if (code === 'DELEGATED_CALLER') return APPROVAL_DENIALS.delegated
+    if (code === 'NO_PROVIDER' || code === 'CALLER_NOT_LIVE') return APPROVAL_DENIALS.policyNever
+    if (code === 'ASK_ABORTED') return APPROVAL_DENIALS.cancelled
+    return APPROVAL_DENIALS.failed
   }
 
   /**
-   * One plugin-owned bounded ask (DSR-016): waits at most `waitMs`, links the
-   * caller signal, the plugin lifetime, and a self-owned timer; maps the
-   * official outcome word list one-to-one and treats every non-grant as deny.
+   * Shared bounded wait: links `baseSignals`, a self-owned timer and a cancel
+   * sentinel; `run(signal)` performs the channel call. The timer wins over a
+   * concurrent abort so a budget expiry is reported as a timeout. Channel
+   * exceptions are rethrown to the caller, which owns the code mapping.
    */
-  async function askOnce(execution, reason, waitMs, baseSignals) {
-    const approval = ctx.get('approval')
-    if (!approval || typeof approval.request !== 'function' || !execution.agent) {
-      return { granted: false, reason: APPROVAL_DENIALS.unavailable }
-    }
+  async function runBoundedAsk(run, waitMs, baseSignals) {
     const controller = new AbortController()
     const signal = AbortSignal.any([controller.signal, ...baseSignals.filter(Boolean)])
     let timedOut = false
@@ -260,34 +308,97 @@ export function installGate(ctx, deps) {
     }, Math.max(1, waitMs))
     let stop
     const cancelled = new Promise((resolve) => {
-      stop = () => resolve('cancelled')
+      stop = () => resolve(CANCELLED)
       if (signal.aborted) stop()
       else signal.addEventListener('abort', stop, { once: true })
     })
     try {
-      const outcome = await Promise.race([
-        approval.request({
+      const result = await Promise.race([run(signal), cancelled])
+      if (timedOut) return { granted: false, reason: APPROVAL_DENIALS.timeout }
+      if (result === CANCELLED) return { granted: false, reason: APPROVAL_DENIALS.cancelled }
+      return result
+    } catch (error) {
+      if (timedOut) return { granted: false, reason: APPROVAL_DENIALS.timeout }
+      throw error
+    } finally {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', stop)
+    }
+  }
+
+  /** Existing official approval.request path (mapping unchanged). */
+  async function askViaApproval(execution, reason, waitMs, baseSignals, approval) {
+    if (typeof approval.request !== 'function' || !execution.agent) {
+      return { granted: false, reason: APPROVAL_DENIALS.unavailable }
+    }
+    try {
+      return await runBoundedAsk(async (signal) => {
+        const outcome = await approval.request({
           agent: execution.agent,
           toolName: execution.name,
           callId: execution.callId,
           reason,
           signal,
-        }),
-        cancelled,
-      ])
-      if (timedOut) return { granted: false, reason: APPROVAL_DENIALS.timeout }
-      if (outcome === 'allowed-once') return { granted: true }
-      if (outcome === 'rejected') return { granted: false, reason: APPROVAL_DENIALS.rejected }
-      if (outcome === 'cancelled') return { granted: false, reason: APPROVAL_DENIALS.cancelled }
-      if (outcome === 'unavailable') return { granted: false, reason: APPROVAL_DENIALS.unavailable }
-      // Closed word list: an unknown outcome never reads as a grant.
-      return { granted: false, reason: APPROVAL_DENIALS.failed }
+        })
+        if (outcome === 'allowed-once') return { granted: true }
+        if (outcome === 'rejected') return { granted: false, reason: APPROVAL_DENIALS.rejected }
+        if (outcome === 'cancelled') return { granted: false, reason: APPROVAL_DENIALS.cancelled }
+        if (outcome === 'unavailable') return { granted: false, reason: APPROVAL_DENIALS.unavailable }
+        // Closed word list: an unknown outcome never reads as a grant.
+        return { granted: false, reason: APPROVAL_DENIALS.failed }
+      }, waitMs, baseSignals)
     } catch {
       return { granted: false, reason: APPROVAL_DENIALS.failed }
-    } finally {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', stop)
     }
+  }
+
+  /** Independent interactive question channel: one approval-shaped question. */
+  async function askViaQuestions(execution, reason, waitMs, baseSignals, userQuestions) {
+    const approveLabel = 'Allow once'
+    const rejectLabel = 'Reject'
+    const id = 'guardrails-confirm'
+    try {
+      return await runBoundedAsk(async (signal) => {
+        const answer = await userQuestions.ask({
+          questions: [{
+            id,
+            question: 'Allow this guarded operation once?',
+            detail: reason,
+            options: [{ label: approveLabel }, { label: rejectLabel }],
+            intent: { kind: 'approval', approve: approveLabel, reject: rejectLabel },
+          }],
+          agent: execution.agent,
+          signal,
+        })
+        if (selectedLabels(answer, id).includes(approveLabel)) return { granted: true }
+        // Reject, empty or malformed answers are all a real refusal, never a grant.
+        return { granted: false, reason: APPROVAL_DENIALS.rejected }
+      }, waitMs, baseSignals)
+    } catch (error) {
+      return { granted: false, reason: questionFailureReason(error) }
+    }
+  }
+
+  /**
+   * One plugin-owned bounded ask (DSR-016): choose the channel, then wait at most
+   * `waitMs` with the approval budget, caller signal and lifetime linked. The
+   * budget, closed "never grant on unknown" mapping and one-time semantics are
+   * identical on both channels.
+   */
+  async function askOnce(execution, reason, waitMs, baseSignals, policy) {
+    const { approval, policyName } = readApprovalState(execution)
+    // The official approval seam owns the decision whenever its policy allows asking.
+    if (approval && policyName !== 'never') {
+      return askViaApproval(execution, reason, waitMs, baseSignals, approval)
+    }
+    // Policy "never" (or a missing approval seam): ask through the independent
+    // interactive question channel when enabled; otherwise refuse with the accurate
+    // "nothing was shown" code (never the "user rejected" text).
+    const userQuestions = optionalService('userQuestions')
+    if (policy?.alwaysAsk === true && userQuestions && typeof userQuestions.ask === 'function' && execution.agent) {
+      return askViaQuestions(execution, reason, waitMs, baseSignals, userQuestions)
+    }
+    return { granted: false, reason: APPROVAL_DENIALS.policyNever }
   }
 
   /**
@@ -351,7 +462,7 @@ export function installGate(ctx, deps) {
     if (askReason.kind === 'deny') return { kind: 'deny', decision: askReason }
     const budget = askBudget(policy)
     const startedAt = Date.now()
-    const grant = await askOnce(execution, askReason.reason, budget, [lifetime.signal, execution.signal])
+    const grant = await askOnce(execution, askReason.reason, budget, [lifetime.signal, execution.signal], policy)
     if (!grant.granted) return { kind: 'deny', decision: renderVerdict({ ...verdict, kind: 'deny', reason: grant.reason }) }
     if (signal.aborted || lifetime.signal.aborted) {
       return { kind: 'deny', decision: fault('ANALYSIS_CANCELLED', 'invocation cancelled before dispatch.') }
@@ -413,7 +524,7 @@ export function installGate(ctx, deps) {
       }
       const reAsk = renderVerdict(revisit.verdict)
       if (reAsk.kind === 'deny') return { kind: 'deny', decision: reAsk }
-      const reGrant = await askOnce(execution, reAsk.reason, remaining, [lifetime.signal, execution.signal])
+      const reGrant = await askOnce(execution, reAsk.reason, remaining, [lifetime.signal, execution.signal], policy)
       if (!reGrant.granted) return { kind: 'deny', decision: renderVerdict({ ...revisit.verdict, kind: 'deny', reason: reGrant.reason }) }
       if (lifetime.signal.aborted || execution.signal?.aborted) return denyCancel()
       previous = revisit

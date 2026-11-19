@@ -294,7 +294,7 @@ const MARKED_LIST_MAX = 1024
 const ALLOW_ONCE_MAX = 64
 const DETAIL_MAX = 64
 const KNOWN_POLICY_KEYS = new Set([
-  'sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs', 'rules', 'allowOnce', 'tightenOnly', 'configIssues',
+  'sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs', 'alwaysAsk', 'rules', 'allowOnce', 'tightenOnly', 'configIssues',
 ])
 
 /** Documented configurable rule ids (规则模型 rule catalog). Per-rule config and
@@ -346,6 +346,7 @@ export function normalizePolicy(config, options = {}) {
     sensitiveFiles: [],
     builtinSensitiveAsk: true,
     askTimeoutMs: ASK_TIMEOUT_DEFAULT,
+    alwaysAsk: true,
     rules: {},
     allowOnce: [],
     tightenOnly: true,
@@ -383,6 +384,13 @@ export function normalizePolicy(config, options = {}) {
   if (config.builtinSensitiveAsk !== undefined) {
     if (typeof config.builtinSensitiveAsk === 'boolean') policy.builtinSensitiveAsk = config.builtinSensitiveAsk
     else issues.add('builtin-sensitive-ask-invalid')
+  }
+
+  // alwaysAsk: protective default is true (keep asking when approvals are disabled).
+  // An invalid value is reported and the protective default is kept.
+  if (config.alwaysAsk !== undefined) {
+    if (typeof config.alwaysAsk === 'boolean') policy.alwaysAsk = config.alwaysAsk
+    else issues.add('always-ask-invalid')
   }
 
   // askTimeoutMs: bounded; 0 maps to the default, never to unlimited waiting.

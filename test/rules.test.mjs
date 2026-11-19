@@ -179,19 +179,19 @@ test('.env templates and near-miss dotenv names are not carriers either', () => 
 
 // ---------- V2 config evaluation ----------
 
-test('RULE_KEYS is exactly the V2 pair + the plugin-owned timeout bound', () => {
-  assert.deepEqual(RULE_KEYS, ['sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs'])
+test('RULE_KEYS is exactly the V2 pair + the plugin-owned timeout bound and alwaysAsk', () => {
+  assert.deepEqual(RULE_KEYS, ['sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs', 'alwaysAsk'])
 })
 
-test('evaluateRules: defaults (empty marks, builtin list on)', () => {
-  assert.deepEqual(evaluateRules({}), { sensitiveFiles: [], builtinSensitiveAsk: true, askTimeoutMs: 120_000 })
-  assert.deepEqual(evaluateRules(undefined), { sensitiveFiles: [], builtinSensitiveAsk: true, askTimeoutMs: 120_000 })
+test('evaluateRules: defaults (empty marks, builtin list on, always ask on)', () => {
+  assert.deepEqual(evaluateRules({}), { sensitiveFiles: [], builtinSensitiveAsk: true, askTimeoutMs: 120_000, alwaysAsk: true })
+  assert.deepEqual(evaluateRules(undefined), { sensitiveFiles: [], builtinSensitiveAsk: true, askTimeoutMs: 120_000, alwaysAsk: true })
 })
 
 test('evaluateRules: accepts explicit values', () => {
   assert.deepEqual(
-    evaluateRules({ sensitiveFiles: ['E:/p/.env.production'], builtinSensitiveAsk: false }),
-    { sensitiveFiles: ['E:/p/.env.production'], builtinSensitiveAsk: false, askTimeoutMs: 120_000 },
+    evaluateRules({ sensitiveFiles: ['E:/p/.env.production'], builtinSensitiveAsk: false, alwaysAsk: false }),
+    { sensitiveFiles: ['E:/p/.env.production'], builtinSensitiveAsk: false, askTimeoutMs: 120_000, alwaysAsk: false },
   )
 })
 
@@ -200,6 +200,7 @@ test('evaluateRules: mount-time validation fails loudly', () => {
   assert.throws(() => evaluateRules([]), /must be an object/)
   assert.throws(() => evaluateRules({ bogus: true }), /unknown config key/)
   assert.throws(() => evaluateRules({ builtinSensitiveAsk: 'yes' }), /must be a boolean/)
+  assert.throws(() => evaluateRules({ alwaysAsk: 'yes' }), /alwaysAsk must be a boolean/)
   assert.throws(() => evaluateRules({ sensitiveFiles: 'E:/p/.env' }), /must be an array/)
   assert.throws(() => evaluateRules({ sensitiveFiles: ['.env'] }), /absolute file paths/)
   assert.throws(() => evaluateRules({ sensitiveFiles: ['E:/p', ''] }), /non-empty strings/)

@@ -61,7 +61,7 @@ export function textMentionsCredential(text) {
 }
 
 /** Supported settings. */
-export const RULE_KEYS = ['sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs']
+export const RULE_KEYS = ['sensitiveFiles', 'builtinSensitiveAsk', 'askTimeoutMs', 'alwaysAsk']
 /** Zero is a legacy alias for the bounded default, never unlimited waiting. */
 export const ASK_TIMEOUT_MIN = 0
 /** One hour caps interactive waits even in unattended profiles. */
@@ -80,8 +80,12 @@ export function evaluateRules(config = {}) {
   }
   const unknown = Object.keys(config).filter((key) => !RULE_KEYS.includes(key))
   if (unknown.length) throw new Error(`dsh-guardrails: unknown config key(s): ${unknown.join(', ')}`)
-  const { sensitiveFiles = [], builtinSensitiveAsk = true, askTimeoutMs = DEFAULT_ASK_TIMEOUT_MS } = config
+  const { sensitiveFiles = [], builtinSensitiveAsk = true, askTimeoutMs = DEFAULT_ASK_TIMEOUT_MS, alwaysAsk = true } = config
   if (typeof builtinSensitiveAsk !== 'boolean') throw new Error('builtinSensitiveAsk must be a boolean')
+  // When the host approval policy is "never" (or the approval seam is absent), ask
+  // through the interactive question channel instead of refusing silently. true by
+  // default; false restores the automatic refusal.
+  if (typeof alwaysAsk !== 'boolean') throw new Error('alwaysAsk must be a boolean')
   if (!Number.isInteger(askTimeoutMs) || askTimeoutMs < ASK_TIMEOUT_MIN || askTimeoutMs > ASK_TIMEOUT_MAX) {
     throw new Error(`askTimeoutMs must be an integer between ${ASK_TIMEOUT_MIN} and ${ASK_TIMEOUT_MAX}`)
   }
@@ -96,5 +100,5 @@ export function evaluateRules(config = {}) {
     }
     if (/[*?]/.test(entry)) throw new Error('sensitiveFiles does not support globs or wildcards')
   }
-  return { sensitiveFiles: [...sensitiveFiles], builtinSensitiveAsk, askTimeoutMs: askTimeoutMs || DEFAULT_ASK_TIMEOUT_MS }
+  return { sensitiveFiles: [...sensitiveFiles], builtinSensitiveAsk, askTimeoutMs: askTimeoutMs || DEFAULT_ASK_TIMEOUT_MS, alwaysAsk }
 }

@@ -56,6 +56,29 @@ function gateOrThrow() {
   return gate
 }
 
+/**
+ * Mount the real runtime composition with the real ApprovalService configured
+ * `ask` (the harness `real-never` option can only configure `never`). A test can
+ * then append an `approval/policy` session event to create a session-level
+ * override, which is the production path this fixture exists to exercise.
+ */
+async function mountRealApproval(t, { root, gateModule, config }) {
+  const rt = harness.runtime
+  const ctx = new rt.cordis.Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(rt.prompt.default)
+  await ctx.plugin(rt.tools.default)
+  await ctx.plugin(rt.native)
+  ctx.provide('workingDirectory', { get: () => root, ensure: async () => root })
+  ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'workspace-write', workspaceRoot: root }) })
+  const fsLocal = await harness.loadRuntimePackage('@deepseek-ai/dsh-fs-local')
+  await ctx.plugin(fsLocal.default, { cwd: root })
+  await ctx.plugin(rt.projections.default)
+  await ctx.plugin(rt.userApproval.default, { policy: 'ask' })
+  await ctx.plugin({ name: 'guardrails-test-mount', inject: ['tools'], apply: gateModule.apply }, config ?? {})
+  return ctx
+}
+
 test('harness: the real runtime composition dispatches an ordinary tool once', { skip: runtimeSkip }, async t => {
   const { ctx, root } = await harness.mount(t, { label: 'selfcheck' })
   const counter = { calls: 0 }
@@ -151,7 +174,7 @@ test('GT-08: a protected file changed during approval is refused before dispatch
   assert.match(result.error?.message ?? '', /GUARD_SCOPE_CHANGED/)
 })
 
-test('GT-13: the real ApprovalService never policy rejects the protected-read confirmation', { skip: gateSkip }, async t => {
+test('GT-13: the real ApprovalService never policy makes the gate refuse with APPROVAL_POLICY_NEVER and no UI', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'approval-never')
   const marked = join(root, 'id_rsa')
   const ordinary = join(root, 'ordinary.txt')
@@ -167,13 +190,82 @@ test('GT-13: the real ApprovalService never policy rejects the protected-read co
   const ordinaryResult = await harness.runTool(ctx, agent, 'read', { file_path: ordinary })
   assert.equal(ordinaryResult.isError, false, ordinaryResult.error?.message)
   const protectedResult = await harness.runTool(ctx, agent, 'read', { file_path: marked })
-  assert.equal(protectedResult.isError, true, 'the never policy resolves before any grant')
+  assert.equal(protectedResult.isError, true, 'the never policy refuses without reaching any answerer')
   assert.equal(counter.calls, 1, 'only the ordinary read dispatched')
+  // With alwaysAsk on but no mounted interactive answerer, the gate reports the accurate
+  // "no answerer accepted" code — never the "user rejected" text.
+  const message = protectedResult.error?.message ?? ''
+  assert.match(message, /APPROVAL_POLICY_NEVER/)
+  assert.doesNotMatch(message, /The user rejected/)
+  // The never policy is now resolved by the gate before the approval seam, so the
+  // official approval audit pair is intentionally not written on this path.
   const types = session.snapshotEvents().map(event => event.type)
-  assert.ok(types.includes('approval/asked'), 'the ask was audited')
-  assert.ok(types.includes('approval/decided'), 'the decision was audited')
-  const decided = session.snapshotEvents().find(event => event.type === 'approval/decided')
-  assert.equal(decided.data.outcome, 'rejected')
+  assert.ok(!types.includes('approval/asked'))
+})
+
+test('alwaysAsk: with the real never policy and an interactive answerer, a protected read asks through the question channel and grants', { skip: gateSkip }, async t => {
+  const root = await harness.fixtureRoot(t, 'always-ask')
+  const marked = join(root, 'id_rsa')
+  await writeFile(marked, 'synthetic fixture only')
+  const { ctx } = await harness.mount(t, {
+    workingDirectory: root, gate: gateOrThrow(), config: { sensitiveFiles: [marked] }, approval: 'real-never',
+  })
+  const asks = []
+  ctx.provide('userQuestions', {
+    async ask(request) {
+      asks.push(request)
+      return { answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }
+    },
+  })
+  const counter = { calls: 0 }
+  harness.registerCounting(ctx, 'read', counter)
+  const session = harness.realSession('target-runtime-always-ask')
+  const agent = { session, ctx }
+  const result = await harness.runTool(ctx, agent, 'read', { file_path: marked })
+  assert.equal(result.isError, false, result.error?.message)
+  assert.equal(counter.calls, 1, 'the granted protected read dispatched its body')
+  assert.equal(asks.length, 1, 'exactly one interactive question was asked')
+  const question = asks[0].questions[0]
+  assert.equal(question.intent.kind, 'approval')
+  assert.ok(typeof question.detail === 'string' && question.detail.length > 0)
+  assert.match(question.detail, /GUARDRAILS/)
+  // The real approval seam stayed out of the decision: no approval audit pair was written.
+  assert.ok(!session.snapshotEvents().some(event => event.type === 'approval/asked'))
+})
+
+test('alwaysAsk: a session approval-policy override to never asks through the question channel and grants one invocation', { skip: gateSkip }, async t => {
+  const root = await harness.fixtureRoot(t, 'override-never')
+  const marked = join(root, 'id_rsa')
+  await writeFile(marked, 'synthetic fixture only')
+  // Real ApprovalService configured `ask`; the never policy comes from a session
+  // override event, not from config.policy — the production session-switch path.
+  const ctx = await mountRealApproval(t, { root, gateModule: gateOrThrow(), config: { sensitiveFiles: [marked] } })
+  const asks = []
+  ctx.provide('userQuestions', {
+    async ask(request) {
+      asks.push(request)
+      return { answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }
+    },
+  })
+  const counter = { calls: 0 }
+  harness.registerCounting(ctx, 'read', counter)
+  const session = harness.realSession('target-runtime-override-never')
+  session.append('approval/policy', { policy: 'never' })
+  const agent = { session, ctx }
+
+  const first = await harness.runTool(ctx, agent, 'read', { file_path: marked })
+  assert.equal(first.isError, false, first.error?.message)
+  assert.equal(counter.calls, 1, 'the granted protected read dispatched its body once')
+  assert.equal(asks.length, 1, 'exactly one interactive question was asked')
+  assert.equal(asks[0].questions[0].intent.kind, 'approval')
+  assert.ok(!session.snapshotEvents().some(event => event.type === 'approval/asked'),
+    'the overridden never policy bypasses the approval audit seam')
+
+  // One-time authorization: a second identical invocation asks again and grants again.
+  const second = await harness.runTool(ctx, agent, 'read', { file_path: marked })
+  assert.equal(second.isError, false, second.error?.message)
+  assert.equal(counter.calls, 2, 'the second granted read dispatched its body')
+  assert.equal(asks.length, 2, 'a fresh invocation asks again')
 })
 
 test('GT-12: a registered tool outside the deletion analysis keeps the DSH permission flow', { skip: gateSkip }, async t => {

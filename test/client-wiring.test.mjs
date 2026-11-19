@@ -40,7 +40,7 @@ test('Host disables duplicate generation without asking for client services', as
   try {
     assert.deepEqual(configurations, [{ presentation: { auto: false }, owner: ctx.fiber }])
     const bound = guardrails.Config({})
-    assert.deepEqual(Object.keys(bound).sort(), ['askTimeoutMs', 'builtinSensitiveAsk', 'rules', 'sensitiveFiles', 'tightenOnly'])
+    assert.deepEqual(Object.keys(bound).sort(), ['alwaysAsk', 'askTimeoutMs', 'builtinSensitiveAsk', 'rules', 'sensitiveFiles', 'tightenOnly'])
     for (const value of Object.values(bound)) assert.equal(typeof value.get, 'function')
   } finally {
     while (effects.length) await effects.pop()()

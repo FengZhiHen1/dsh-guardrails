@@ -26,6 +26,8 @@ window.__ModuleLoader__.load({
         empty: '尚未添加自定义文件。',
         builtin: '内置敏感文件', builtinHelpLabel: '内置敏感文件说明',
         builtinHint: '对内置名单（私钥、工具凭据文件、系统凭据库、分页与休眠文件）的内容操作请求批准。关闭后，自定义敏感文件清单仍生效。',
+        alwaysAsk: '宿主审批关闭时仍弹确认', alwaysAskHelpLabel: '关于审批关闭时的确认',
+        alwaysAskHint: '当宿主以关闭审批的方式运行（例如完全访问）时，改经交互问答通道弹确认，而不是静默拒绝；没有客户端应答的无人值守会话仍会拒绝。',
         timeout: '审批等待时间', seconds: '秒', timeoutShort: '默认 120 秒，最长 3600 秒。', timeoutHelpLabel: '审批等待时间说明',
         timeoutHint: '超时或取消后拒绝本次操作，迟到的批准不再生效。',
         loading: '正在读取配置…', unavailable: '当前无法读取此插件配置。请确认插件已启用并重新打开此页。',
@@ -44,6 +46,8 @@ window.__ModuleLoader__.load({
         empty: 'No custom files added.',
         builtin: 'Built-in sensitive files', builtinHelpLabel: 'About built-in sensitive files',
         builtinHint: 'Request approval for content operations on the built-in list: private keys, tool credential files, system credential stores, and page/hibernation files. Turning this off keeps your custom sensitive-file list active.',
+        alwaysAsk: 'Ask even when the session approval policy is off', alwaysAskHelpLabel: 'About asking when approvals are off',
+        alwaysAskHint: 'When the host runs with approvals disabled (for example full access), ask through the interactive question channel instead of refusing silently. Headless sessions without a client still refuse.',
         timeout: 'Approval wait', seconds: 'seconds', timeoutShort: 'Default: 120 seconds. Maximum: 3600 seconds.', timeoutHelpLabel: 'About the approval wait',
         timeoutHint: 'Timeout or cancellation refuses the operation; late approval cannot authorize it.',
         loading: 'Loading settings…', unavailable: 'Settings are unavailable. Confirm the plugin is enabled and reopen this page.',
@@ -59,6 +63,7 @@ window.__ModuleLoader__.load({
     const helpContent = {
       files: ['filesHelpLabel', 'filesHint'],
       builtin: ['builtinHelpLabel', 'builtinHint'],
+      alwaysAsk: ['alwaysAskHelpLabel', 'alwaysAskHint'],
       timeout: ['timeoutHelpLabel', 'timeoutHint'],
       scope: ['scopeHelpLabel', 'scopeBody'],
     }
@@ -109,8 +114,9 @@ window.__ModuleLoader__.load({
     function toDraft(value) {
       const files = Array.isArray(value?.sensitiveFiles) ? value.sensitiveFiles.filter(entry => typeof entry === 'string') : []
       const builtin = typeof value?.builtinSensitiveAsk === 'boolean' ? value.builtinSensitiveAsk : true
+      const alwaysAsk = typeof value?.alwaysAsk === 'boolean' ? value.alwaysAsk : true
       const timeout = Number.isInteger(value?.askTimeoutMs) && value.askTimeoutMs > 0 ? value.askTimeoutMs : 120000
-      return { files: files.join('\n'), builtin, seconds: String(timeout / 1000) }
+      return { files: files.join('\n'), builtin, alwaysAsk, seconds: String(timeout / 1000) }
     }
     function parseDraft(draft) {
       const sensitiveFiles = draft.files.split(/\r?\n/).filter(line => line.trim() !== '')
@@ -118,7 +124,7 @@ window.__ModuleLoader__.load({
       const milliseconds = Math.round(seconds * 1000)
       if (!draft.seconds.trim() || !Number.isFinite(seconds) || seconds <= 0 || seconds > 3600 || Math.abs(milliseconds - seconds * 1000) > 0.000001) return { error: 'timeoutError' }
       if (sensitiveFiles.length > 1024 || sensitiveFiles.some(path => path.length > 32768 || /[\0*?]/.test(path) || !(/^[A-Za-z]:[\\/]/.test(path) || path.startsWith('/') || path.startsWith('\\\\')))) return { error: 'pathError' }
-      return { value: { sensitiveFiles, builtinSensitiveAsk: draft.builtin, askTimeoutMs: milliseconds } }
+      return { value: { sensitiveFiles, builtinSensitiveAsk: draft.builtin, alwaysAsk: draft.alwaysAsk !== false, askTimeoutMs: milliseconds } }
     }
     function Editor({ form, t }) {
       const snapshot = form?.state
@@ -138,7 +144,7 @@ window.__ModuleLoader__.load({
       const baseline = toDraft(snapshot.value)
       const draft = edit?.draft ?? baseline
       const parsed = parseDraft(draft)
-      const dirty = edit !== null && (draft.files !== baseline.files || draft.builtin !== baseline.builtin || draft.seconds !== baseline.seconds)
+      const dirty = edit !== null && (draft.files !== baseline.files || draft.builtin !== baseline.builtin || draft.alwaysAsk !== baseline.alwaysAsk || draft.seconds !== baseline.seconds)
       const locked = !snapshot.writable || outcome === 'saving'
       function change(key, value) {
         setEdit(previous => ({ revision: previous?.revision ?? snapshot.revision, draft: { ...(previous?.draft ?? baseline), [key]: value } }))
@@ -185,6 +191,11 @@ window.__ModuleLoader__.load({
             h('label', { className: 'gr-check' }, h('input', { type: 'checkbox', checked: draft.builtin, disabled: locked, 'aria-describedby': describedBy(openHelp === 'builtin' ? helpId('builtin') : ''), onChange: event => change('builtin', event.target.checked) }), t('builtin')),
             helpButton('builtin')),
           helpRegion('builtin')),
+        h('div', { className: 'gr-field' },
+          h('div', { className: 'gr-check-row' },
+            h('label', { className: 'gr-check' }, h('input', { type: 'checkbox', checked: draft.alwaysAsk, disabled: locked, 'aria-describedby': describedBy(openHelp === 'alwaysAsk' ? helpId('alwaysAsk') : ''), onChange: event => change('alwaysAsk', event.target.checked) }), t('alwaysAsk')),
+            helpButton('alwaysAsk')),
+          helpRegion('alwaysAsk')),
         h('div', { className: 'gr-field' },
           h('div', { className: 'gr-label-row' }, h('label', { htmlFor: uid + '-wait' }, t('timeout')), helpButton('timeout')),
           h('div', { className: 'gr-number' }, h('input', { id: uid + '-wait', className: 'gr-input', type: 'number', min: 0.001, max: 3600, step: 0.001, value: draft.seconds, disabled: locked,

@@ -16,7 +16,7 @@ const plain = value => JSON.parse(JSON.stringify(value))
 test('settings converts seconds to milliseconds without losing legacy values or exact path spaces', () => {
   const draft = plugin.toDraft({ sensitiveFiles: ['E:/a b/x', '/tmp/with trailing space '], builtinSensitiveAsk: false, askTimeoutMs: 1501 })
   assert.equal(draft.seconds, '1.501')
-  assert.deepEqual(plain(plugin.parseDraft(draft).value), { sensitiveFiles: ['E:/a b/x', '/tmp/with trailing space '], builtinSensitiveAsk: false, askTimeoutMs: 1501 })
+  assert.deepEqual(plain(plugin.parseDraft(draft).value), { sensitiveFiles: ['E:/a b/x', '/tmp/with trailing space '], builtinSensitiveAsk: false, alwaysAsk: true, askTimeoutMs: 1501 })
   assert.equal(plugin.toDraft({ sensitiveFiles: [], builtinSensitiveAsk: true, askTimeoutMs: 0 }).seconds, '120')
 })
 
@@ -49,15 +49,26 @@ test('settings puts long explanations behind the info disclosure', () => {
   assert.match(source, /role: 'region'/)
   assert.match(source, /helpRegion\('files'\)/)
   assert.match(source, /helpRegion\('builtin'\)/)
+  assert.match(source, /helpRegion\('alwaysAsk'\)/)
   assert.match(source, /helpRegion\('timeout'\)/)
   assert.match(source, /helpRegion\('scope'\)/)
   assert.match(source, /filesHelpLabel/)
+  assert.match(source, /alwaysAskHelpLabel/)
   assert.match(source, /scopeHelpLabel/)
 })
 
 test('settings derives safe drafts from partial or stale served sections', () => {
-  assert.deepEqual(plain(plugin.toDraft({})), { files: '', builtin: true, seconds: '120' })
-  assert.deepEqual(plain(plugin.toDraft({ sensitiveFiles: [1, '/ok'], builtinSensitiveAsk: 'no', askTimeoutMs: -5 })), { files: '/ok', builtin: true, seconds: '120' })
+  assert.deepEqual(plain(plugin.toDraft({})), { files: '', builtin: true, alwaysAsk: true, seconds: '120' })
+  assert.deepEqual(plain(plugin.toDraft({ sensitiveFiles: [1, '/ok'], builtinSensitiveAsk: 'no', askTimeoutMs: -5 })), { files: '/ok', builtin: true, alwaysAsk: true, seconds: '120' })
+})
+
+test('settings round-trips alwaysAsk so the toggle saves and reads back', () => {
+  const draft = plugin.toDraft({ sensitiveFiles: [], builtinSensitiveAsk: true, alwaysAsk: false, askTimeoutMs: 120000 })
+  assert.equal(draft.alwaysAsk, false)
+  const parsed = plain(plugin.parseDraft(draft).value)
+  assert.equal(parsed.alwaysAsk, false)
+  // A legacy draft without the key keeps the protective default (true).
+  assert.equal(plain(plugin.parseDraft({ files: '', builtin: true, seconds: '120' }).value).alwaysAsk, true)
 })
 
 test('settings owns bilingual dictionary and row slot resources for unload', () => {

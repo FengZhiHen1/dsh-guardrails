@@ -945,3 +945,195 @@ test('revisit verdict deny refuses even after a grant', async () => {
   assert.equal(decision.kind, 'deny')
   assert.match(decision.reason, /catastrophic\.root/)
 })
+
+// ---------------------------------------------------------------------------
+// alwaysAsk: the interactive question channel when the approval policy is "never"
+// ---------------------------------------------------------------------------
+
+/** Question-channel double: records each request and resolves `respond(request)`. */
+function questionService(respond, log = []) {
+  const service = {
+    calls: 0,
+    ask(request) {
+      service.calls += 1
+      log.push(request)
+      return Promise.resolve().then(() => respond(request))
+    },
+  }
+  return service
+}
+
+/** Approval-seam double for the "never" policy; its request must never run. */
+function neverApproval() {
+  const approval = {
+    config: { policy: 'never' },
+    calls: 0,
+    request() {
+      approval.calls += 1
+      throw new Error('approval.request must not run when the policy is never')
+    },
+  }
+  return approval
+}
+
+const NEVER_POLICY = { askTimeoutMs: 120000, alwaysAsk: true }
+
+test('policy never + alwaysAsk asks once through the question channel and grants one invocation', async () => {
+  const askLog = []
+  const approval = neverApproval()
+  const userQuestions = questionService(id => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  installGate(ctx, deps)
+  const listener = preExecuteOf(state)
+
+  const first = execution({ name: 'bash', args: { command: 'rm -rf ./build' } })
+  const decision = await listener(first, async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'allow')
+  assert.equal(approval.calls, 0, 'the approval seam is bypassed under the never policy')
+  assert.equal(askLog.length, 1, 'exactly one question request per invocation')
+  const request = askLog[0]
+  assert.equal(request.questions.length, 1)
+  const question = request.questions[0]
+  assert.equal(question.id, 'guardrails-confirm')
+  assert.equal(question.intent.kind, 'approval')
+  assert.equal(question.intent.approve, 'Allow once')
+  assert.equal(question.intent.reject, 'Reject')
+  assert.ok(typeof question.detail === 'string' && question.detail.length > 0, 'detail is the rendered block')
+  assert.deepEqual(question.options.map(option => option.label), ['Allow once', 'Reject'])
+  assert.equal(question.multiSelect, undefined)
+  assert.equal(request.wait, undefined)
+  assert.equal(request.agent, first.agent)
+
+  // The grant is one-time for that exact call: a new identical invocation re-asks.
+  const second = execution({ name: 'bash', args: { command: 'rm -rf ./build' } })
+  const again = await listener(second, async () => ({ kind: 'allow' }))
+  assert.equal(again.kind, 'allow')
+  assert.equal(askLog.length, 2, 'a fresh invocation asks again')
+})
+
+test('policy never + alwaysAsk without a question provider refuses with APPROVAL_POLICY_NEVER', async () => {
+  const approval = neverApproval()
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_POLICY_NEVER/)
+  assert.doesNotMatch(decision.reason, /The user rejected/, 'a silent refusal must never be reported as a user rejection')
+  assert.equal(approval.calls, 0)
+})
+
+test('policy never + alwaysAsk:false refuses without touching the question channel', async () => {
+  const askLog = []
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: { askTimeoutMs: 120000, alwaysAsk: false } })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_POLICY_NEVER/)
+  assert.equal(askLog.length, 0, 'the question channel is never asked when alwaysAsk is false')
+  assert.equal(approval.calls, 0)
+})
+
+test('policy ask + approval seam rejected stays APPROVAL_REJECTED and never asks questions', async () => {
+  const askLog = []
+  const approval = { config: { policy: 'ask' }, calls: 0, request() { approval.calls += 1; return Promise.resolve('rejected') } }
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_REJECTED/)
+  assert.match(decision.reason, /The user rejected/)
+  assert.equal(approval.calls, 1)
+  assert.equal(askLog.length, 0)
+})
+
+test('question channel DELEGATED_CALLER maps to APPROVAL_DELEGATED', async () => {
+  const delegated = Object.assign(new Error('delegated'), { code: 'DELEGATED_CALLER' })
+  const approval = neverApproval()
+  const userQuestions = questionService(() => { throw delegated })
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_DELEGATED/)
+})
+
+test('question channel NO_PROVIDER maps to APPROVAL_POLICY_NEVER', async () => {
+  const noProvider = Object.assign(new Error('no provider'), { code: 'NO_PROVIDER' })
+  const approval = neverApproval()
+  const userQuestions = questionService(() => { throw noProvider })
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_POLICY_NEVER/)
+  assert.doesNotMatch(decision.reason, /The user rejected/)
+})
+
+test('question channel CALLER_NOT_LIVE maps to APPROVAL_POLICY_NEVER', async () => {
+  const notLive = Object.assign(new Error('not live'), { code: 'CALLER_NOT_LIVE' })
+  const approval = neverApproval()
+  const userQuestions = questionService(() => { throw notLive })
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_POLICY_NEVER/)
+})
+
+test('an answer item with a non-matching id is never read as a grant', async () => {
+  const approval = neverApproval()
+  // A single question id is 'guardrails-confirm'; an answer for another id must not grant.
+  const userQuestions = questionService(() => ({ answers: [{ id: 'other', selected: ['Allow once'] }] }))
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_REJECTED/)
+})
+
+test('question channel ASK_ABORTED maps to APPROVAL_CANCELLED', async () => {
+  const aborted = Object.assign(new Error('aborted'), { code: 'ASK_ABORTED' })
+  const approval = neverApproval()
+  const userQuestions = questionService(() => { throw aborted })
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_CANCELLED/)
+})
+
+test('a question-channel Reject answer is a real APPROVAL_REJECTED', async () => {
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Reject'] }] }))
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_REJECTED/)
+  assert.match(decision.reason, /The user rejected/)
+})
+
+test('a question-channel wait that never answers times out as APPROVAL_TIMEOUT', async () => {
+  const approval = neverApproval()
+  const userQuestions = questionService(() => new Promise(() => {}))
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: { askTimeoutMs: 20, alwaysAsk: true } })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_TIMEOUT/)
+})
+

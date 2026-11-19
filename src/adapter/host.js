@@ -15,6 +15,7 @@ export const SETTINGS_NS = 'guardrails'
 export const Config = z.object({
   sensitiveFiles: z.array(z.string()).default([]).loose().volatile(),
   builtinSensitiveAsk: z.boolean().default(true).loose().volatile(),
+  alwaysAsk: z.boolean().default(true).loose().volatile(),
   askTimeoutMs: z.natural().max(3_600_000).default(120_000).loose().volatile(),
   rules: z.dict(z.object({ enabled: z.boolean(), allowlist: z.array(z.string()) })).default({}).loose().volatile(),
   tightenOnly: z.const(true).default(true).loose().volatile(),
