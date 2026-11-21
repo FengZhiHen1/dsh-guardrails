@@ -37,6 +37,7 @@
 
 import { DEFAULT_ASK_TIMEOUT_MS, ASK_TIMEOUT_MAX } from '../core/rules.js'
 import { CHECK_FAILED_RULE } from '../core/decision.js'
+import { confirmSummary } from './confirm-text.js'
 import { randomUUID } from 'node:crypto'
 import {
   planExecution,
@@ -369,6 +370,7 @@ export function installGate(ctx, deps) {
     const id = 'guardrails-confirm'
     const ruleIds = Array.isArray(confirmInfo?.ruleIds) ? confirmInfo.ruleIds : []
     const scopeText = typeof confirmInfo?.scopeText === 'string' ? confirmInfo.scopeText : ''
+    const summary = confirmSummary(scopeText, ruleIds)
     try {
       const result = await runBoundedAsk(async (signal) => {
         const answer = await userQuestions.ask({
@@ -383,7 +385,7 @@ export function installGate(ctx, deps) {
               reject: rejectLabel,
               display: {
                 question: { en: 'Allow this guarded operation once?', zh: '是否允许本次受保护操作？（仅本次）' },
-                detail: { en: reason, zh: chineseConfirmDetail(ruleIds, scopeText) },
+                detail: { en: summary.en, zh: summary.zh },
                 approve: { en: approveLabel, zh: '允许一次' },
               },
             },
@@ -683,23 +685,6 @@ function scopeTextFromReason(reason) {
   if (typeof reason !== 'string') return ''
   const match = /^Scope:[ \t]*(.*)$/m.exec(reason)
   return match ? match[1].trim() : ''
-}
-
-/** Chinese structured summary for the question display (adapter-only presentation). */
-function chineseConfirmDetail(ruleIds, scopeText) {
-  const ids = Array.isArray(ruleIds) ? ruleIds.map(String) : []
-  const has = (prefix) => ids.some((id) => id.startsWith(prefix))
-  const note = has('data.delete.') ? '删除的数据量或范围超过单次放行阈值，需人工确认。'
-    : has('data.git.') ? '涉及 Git 工作区或历史，需人工确认。'
-      : has('credential.') ? '涉及受保护凭据文件的内容操作，需人工确认。'
-        : '该操作被判定为需要一次确认。'
-  return [
-    '[GUARDRAILS] 需要确认',
-    `规则：${ids.join(',')}`,
-    `范围：${typeof scopeText === 'string' ? scopeText : ''}`,
-    `说明：${note}`,
-    '仅本次调用放行一次；批准不适用于后续调用。',
-  ].join('\n')
 }
 
 /** The structured user message that carries the confirmation notice to the model. */

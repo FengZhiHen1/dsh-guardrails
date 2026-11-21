@@ -994,7 +994,7 @@ test('policy never + alwaysAsk asks once through the question channel and grants
   const deps = fakeDeps({
     verdict: CONFIRM,
     policy: NEVER_POLICY,
-    renderDecision: verdict => `[GUARDRAILS] ${String(verdict.kind).toUpperCase()} ${verdict.ruleId}\nWhy:     x\nTrigger: y\nEffect:  z\nScope:   non-exempt entries: ./build\nNext:    n`,
+    renderDecision: verdict => `[GUARDRAILS] ${String(verdict.kind).toUpperCase()} ${verdict.ruleId}\nWhy:     x\nTrigger: y\nEffect:  z\nScope:   non-exempt entries: 1; entries: ./build; directories: ./build; roots: ./build\nNext:    n`,
   })
   installGate(ctx, deps)
   const listener = preExecuteOf(state)
@@ -1016,13 +1016,17 @@ test('policy never + alwaysAsk asks once through the question channel and grants
   assert.equal(question.multiSelect, undefined)
   assert.equal(request.wait, undefined)
   assert.equal(request.agent, first.agent)
-  // Bilingual display for the shared approval card.
+  // Bilingual single-paragraph display for the shared approval card.
   const display = question.intent.display
   assert.deepEqual(display.question, { en: 'Allow this guarded operation once?', zh: '是否允许本次受保护操作？（仅本次）' })
-  assert.equal(display.detail.en, question.detail, 'the English detail is the rendered CONFIRM block')
+  assert.match(display.detail.en, /^Confirmation required \(this call only\): delete 1 non-exempt entries/)
   assert.ok(typeof display.detail.zh === 'string' && display.detail.zh.length > 0)
-  assert.match(display.detail.zh, /规则：data\.delete\.bulk/)
-  assert.match(display.detail.zh, /范围：.*\.\/build/)
+  assert.ok(display.detail.zh.includes('需要确认（仅本次）'))
+  assert.ok(display.detail.zh.includes('规则 data.delete.bulk'))
+  assert.match(display.detail.zh, /目标：\.\/build/)
+  assert.ok(display.detail.zh.includes('批准只对本次调用有效'))
+  assert.doesNotMatch(display.detail.zh, /范围：/, 'no internal 范围 label anymore')
+  assert.doesNotMatch(display.detail.zh, /\n/, 'the card detail is a single paragraph')
   assert.deepEqual(display.approve, { en: 'Allow once', zh: '允许一次' })
 
   // The grant is one-time for that exact call: a new identical invocation re-asks.
@@ -1032,7 +1036,7 @@ test('policy never + alwaysAsk asks once through the question channel and grants
   assert.equal(askLog.length, 2, 'a fresh invocation asks again')
 })
 
-const SCOPED_RENDER = verdict => `[GUARDRAILS] ${String(verdict.kind).toUpperCase()} ${verdict.ruleId}\nWhy:     x\nTrigger: y\nEffect:  z\nScope:   non-exempt entries: ./build\nNext:    n`
+const SCOPED_RENDER = verdict => `[GUARDRAILS] ${String(verdict.kind).toUpperCase()} ${verdict.ruleId}\nWhy:     x\nTrigger: y\nEffect:  z\nScope:   non-exempt entries: 1; entries: ./build; directories: ./build; roots: ./build\nNext:    n`
 
 test('a confirmed question-channel allow injects one structured post-execute notice (consumed once)', async () => {
   const approval = neverApproval()
@@ -1086,7 +1090,7 @@ test('an explicit string verdict scope is used directly for the question detail'
   const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
   const deps = fakeDeps({
-    verdict: { kind: 'confirm', ruleId: 'credential.file.read', scope: 'protected files: /a/.env' },
+    verdict: { kind: 'confirm', ruleId: 'credential.file.read', scope: 'protected files: /a/.env (read-content)' },
     policy: NEVER_POLICY,
     // No Scope line in the rendered block: the explicit string scope must win.
     renderDecision: verdict => `[GUARDRAILS] CONFIRM ${verdict.ruleId}`,
@@ -1095,7 +1099,68 @@ test('an explicit string verdict scope is used directly for the question detail'
   const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'x' } }), async () => ({ kind: 'allow' }))
   assert.equal(decision.kind, 'allow')
   const display = askLog[0].questions[0].intent.display
-  assert.match(display.detail.zh, /范围：protected files: \/a\/\.env/)
+  // Non-delete family: human single paragraph, no internal field name.
+  assert.match(display.detail.en, /^Confirmation required \(this call only\)/)
+  assert.ok(display.detail.zh.includes('需要确认（仅本次）'))
+  assert.ok(display.detail.zh.includes('受保护文件：/a/.env（读取内容）'))
+  assert.ok(display.detail.zh.includes('规则 credential.file.read'))
+  assert.doesNotMatch(display.detail.zh, /entries|范围：/, 'no internal field names')
+  assert.doesNotMatch(display.detail.zh, /\n/, 'single paragraph')
+})
+
+test('more than six delete targets collapse to a count instead of dumping every path', async () => {
+  const askLog = []
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const scope = 'non-exempt entries: 9; entries: /t/1; /t/2; /t/3; /t/4; /t/5; /t/6; /t/7; /t/8'
+  const deps = fakeDeps({
+    verdict: { kind: 'confirm', ruleId: 'data.delete.bulk', scope },
+    policy: NEVER_POLICY,
+    renderDecision: verdict => `[GUARDRAILS] CONFIRM ${verdict.ruleId}`,
+  })
+  installGate(ctx, deps)
+  assert.equal((await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'x' } }), async () => ({ kind: 'allow' }))).kind, 'allow')
+  const zh = askLog[0].questions[0].intent.display.detail.zh
+  assert.match(zh, /等共 8 项/)
+  assert.ok(zh.includes('/t/1'), zh)
+  assert.ok(!zh.includes('/t/7'), 'paths beyond the first six are represented by the count')
+})
+
+test('roots that repeat directories are not shown twice', async () => {
+  const askLog = []
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const scope = 'non-exempt entries: 1; entries: /target/file.txt; directories: /dirroot; roots: /dirroot'
+  const deps = fakeDeps({
+    verdict: { kind: 'confirm', ruleId: 'data.delete.bulk', scope },
+    policy: NEVER_POLICY,
+    renderDecision: verdict => `[GUARDRAILS] CONFIRM ${verdict.ruleId}`,
+  })
+  installGate(ctx, deps)
+  assert.equal((await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'x' } }), async () => ({ kind: 'allow' }))).kind, 'allow')
+  const zh = askLog[0].questions[0].intent.display.detail.zh
+  assert.match(zh, /目标：\/target\/file\.txt/)
+  assert.equal((zh.match(/\/dirroot/g) ?? []).length, 1, `directory shown once: ${zh}`)
+})
+
+test('an unparseable scope falls back to the raw text without undefined', async () => {
+  const askLog = []
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({
+    verdict: { kind: 'confirm', ruleId: 'credential.file.read', scope: '@@not a scope@@' },
+    policy: NEVER_POLICY,
+    renderDecision: verdict => `[GUARDRAILS] CONFIRM ${verdict.ruleId}`,
+  })
+  installGate(ctx, deps)
+  assert.equal((await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'x' } }), async () => ({ kind: 'allow' }))).kind, 'allow')
+  const zh = askLog[0].questions[0].intent.display.detail.zh
+  assert.ok(typeof zh === 'string' && zh.length > 0)
+  assert.ok(!zh.includes('undefined'), zh)
+  assert.ok(zh.includes('@@not a scope@@'), zh)
 })
 
 test('a downstream block decision receives no confirmation notice', async () => {

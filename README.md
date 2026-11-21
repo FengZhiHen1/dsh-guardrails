@@ -25,7 +25,7 @@ dsh-guardrails 为 DeepSeek Harness 的受管工具提供数据破坏防护、�
 - 无客户端应答方时（headless、CI、未连接该会话）仍拒绝，fail-closed。
 - 委派子代理会话无法使用问答通道（宿主把子会话审批固定为 `never`），直接拒绝。
 - 拒绝文案区分归因：`APPROVAL_REJECTED` 表示真的有人拒绝；`APPROVAL_POLICY_NEVER` 表示策略为 `never` 且没有交互应答方接受该确认；`APPROVAL_DELEGATED` 表示发生在委派子代理会话。后两者不得表述为「用户拒绝」。
-- Web 端把确认展示为标准审批卡（标题、说明、「拒绝」「允许一次」）：中英界面按 `intent.display` 显示本地化标题/说明/允许标签；非中英界面回退英文标题/说明与英文允许标签，拒绝等固定操作按客户端语言包本地化。非 Web 客户端降级为最小卡片。人工确认放行后，插件向模型的下一步注入一条一次性确认记录（`rule`/`scope`/`channel`/`policy`/`reusable=no`）。
+- Web 端把确认展示为标准审批卡（标题、说明、「拒绝」「允许一次」）：中英界面按 `intent.display` 显示本地化标题/说明/允许标签；非中英界面回退英文标题/说明与英文允许标签，拒绝等固定操作按客户端语言包本地化。说明为单段人话摘要，长列表按数量截断。非 Web 客户端降级为最小卡片。人工确认放行后，插件向模型的下一步注入一条一次性确认记录（`rule`/`scope`/`channel`/`policy`/`reusable=no`）。
 - 问答通道与 `APPROVAL_POLICY_NEVER` 路径都不产生 `approval/asked`、`approval/decided` 审计事件。批准只放行当前调用，不落盘。
 
 ## 覆盖边界
