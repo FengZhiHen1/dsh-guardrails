@@ -1,6 +1,6 @@
 {
   "name": "dsh-guardrails",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Execution and file safeguards, sensitive-file approvals and credential masking for DSH",
   "icon": "./icon.svg",
   "license": "MIT",
@@ -49,7 +49,7 @@
     "cordis.patch.yml"
   ],
   "dsh": {
-    "client": { "platform": "web", "immediately": true, "inject": ["@deepseek-ai/dsh-client-ui-plugin-manager", "@deepseek-ai/dsh-client-locale"] },
+    "client": { "platform": "web", "immediately": true, "inject": ["@deepseek-ai/dsh-client-ui-plugin-manager", "@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-user-questions", "@deepseek-ai/dsh-client-ui-approval", "@deepseek-ai/dsh-client-ui-conversation"] },
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
