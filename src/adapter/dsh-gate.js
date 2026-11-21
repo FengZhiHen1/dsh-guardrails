@@ -337,10 +337,13 @@ export function installGate(ctx, deps) {
   }
 
   /** Existing official approval.request path (mapping unchanged). */
-  async function askViaApproval(execution, reason, waitMs, baseSignals, approval) {
+  async function askViaApproval(execution, reason, waitMs, baseSignals, approval, confirmInfo) {
     if (typeof approval.request !== 'function' || !execution.agent) {
       return { granted: false, reason: APPROVAL_DENIALS.unavailable }
     }
+    // The host card gets the same human single-paragraph copy as the question
+    // channel; `reason` stays the audit/model-facing fixed block.
+    const displayReason = displayReasonOf(confirmInfo)
     try {
       const result = await runBoundedAsk(async (signal) => {
         const outcome = await approval.request({
@@ -348,6 +351,7 @@ export function installGate(ctx, deps) {
           toolName: execution.name,
           callId: execution.callId,
           reason,
+          ...(displayReason ? { displayReason } : {}),
           signal,
         })
         if (outcome === 'allowed-once') return { granted: true }
@@ -376,15 +380,17 @@ export function installGate(ctx, deps) {
         const answer = await userQuestions.ask({
           questions: [{
             id,
-            question: 'Allow this guarded operation once?',
-            detail: reason,
+            question: 'Allow this operation once?',
+            // Top-level detail is the single-paragraph English fallback for
+            // clients that do not read intent.display.
+            detail: summary.en,
             options: [{ label: approveLabel }, { label: rejectLabel }],
             intent: {
               kind: 'approval',
               approve: approveLabel,
               reject: rejectLabel,
               display: {
-                question: { en: 'Allow this guarded operation once?', zh: '是否允许本次受保护操作？（仅本次）' },
+                question: { en: 'Allow this operation once?', zh: '是否允许本次操作？（仅本次）' },
                 detail: { en: summary.en, zh: summary.zh },
                 approve: { en: approveLabel, zh: '允许一次' },
               },
@@ -413,7 +419,7 @@ export function installGate(ctx, deps) {
     const { approval, policyName } = readApprovalState(execution)
     // The official approval seam owns the decision whenever its policy allows asking.
     if (approval && policyName !== 'never') {
-      return askViaApproval(execution, reason, waitMs, baseSignals, approval)
+      return askViaApproval(execution, reason, waitMs, baseSignals, approval, confirmInfo)
     }
     // Policy "never" (or a missing approval seam): ask through the independent
     // interactive question channel when enabled; otherwise refuse with the accurate
@@ -685,6 +691,22 @@ function scopeTextFromReason(reason) {
   if (typeof reason !== 'string') return ''
   const match = /^Scope:[ \t]*(.*)$/m.exec(reason)
   return match ? match[1].trim() : ''
+}
+
+/** Localized `displayReason` for the approval card. Returns undefined (and never
+ * throws) when the confirmation info is missing or the summary would be empty,
+ * so the caller simply omits the field and the raw `reason` remains authoritative. */
+export function displayReasonOf(confirmInfo) {
+  if (!confirmInfo || typeof confirmInfo !== 'object') return undefined
+  if (!Array.isArray(confirmInfo.ruleIds) || typeof confirmInfo.scopeText !== 'string') return undefined
+  try {
+    const summary = confirmSummary(confirmInfo.scopeText, confirmInfo.ruleIds)
+    if (!summary || typeof summary.en !== 'string' || summary.en === '' ||
+      typeof summary.zh !== 'string' || summary.zh === '') return undefined
+    return { en: summary.en, zh: summary.zh }
+  } catch {
+    return undefined
+  }
 }
 
 /** The structured user message that carries the confirmation notice to the model. */

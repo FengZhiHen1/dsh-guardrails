@@ -241,8 +241,8 @@ function deleteClauses(segments) {
 }
 
 function renderDeleteZh(segments, ruleIds, limits) {
-  const { countRaw, gitPath, includesGitMetadata, targets, dirs, flags, other } = deleteClauses(segments)
-  const head = `删除 ${countZh(countRaw)} 个条目（规则 ${ruleIds.join(',')}）`
+  const { countRaw, gitPath, includesGitMetadata, targets, dirs } = deleteClauses(segments)
+  const head = `将删除 ${countZh(countRaw)} 个条目（规则 ${ruleIds.join(',')}）`
   const clauses = []
   const shownTargets = formatZhList(targets, limits.targets)
   if (shownTargets) clauses.push(`目标：${shownTargets}`)
@@ -250,17 +250,13 @@ function renderDeleteZh(segments, ruleIds, limits) {
   if (shownDirs) clauses.push(`涉及目录：${shownDirs}`)
   if (gitPath) clauses.push(`另将销毁：.git 元数据（${gitPath}）`)
   if (includesGitMetadata) clauses.push('范围内含 Git 元数据')
-  const shownFlags = formatZhList(flags, limits.flags)
-  if (shownFlags) clauses.push(`其他标记：${shownFlags}`)
-  const shownOther = formatZhList(other, limits.other)
-  if (shownOther) clauses.push(`其他：${shownOther}`)
   const tail = clauses.length > 0 ? `${head}。${clauses.join('；')}` : head
-  return `需要确认（仅本次）：${tail}。批准只对本次调用有效。`
+  return `需要你确认（仅本次）：${tail}。批准只对本次调用有效。`
 }
 
 function renderDeleteEn(segments, ruleIds, limits) {
-  const { countRaw, gitPath, includesGitMetadata, targets, dirs, flags, other } = deleteClauses(segments)
-  const head = `delete ${countEn(countRaw)} ${entryWordEn(countRaw)} (rule ${ruleIds.join(',')})`
+  const { countRaw, gitPath, includesGitMetadata, targets, dirs } = deleteClauses(segments)
+  const head = `it will delete ${countEn(countRaw)} ${entryWordEn(countRaw)} (rule ${ruleIds.join(',')})`
   const clauses = []
   const shownTargets = formatEnList(targets, limits.targets)
   if (shownTargets) clauses.push(`Targets: ${shownTargets}`)
@@ -268,12 +264,8 @@ function renderDeleteEn(segments, ruleIds, limits) {
   if (shownDirs) clauses.push(`directories: ${shownDirs}`)
   if (gitPath) clauses.push(`also destroys: Git metadata (${gitPath})`)
   if (includesGitMetadata) clauses.push('also includes Git metadata')
-  const shownFlags = formatEnList(flags, limits.flags)
-  if (shownFlags) clauses.push(`other flags: ${shownFlags}`)
-  const shownOther = formatEnList(other, limits.other)
-  if (shownOther) clauses.push(`other: ${shownOther}`)
   const tail = clauses.length > 0 ? `${head}. ${clauses.join('; ')}` : head
-  return `Confirmation required (this call only): ${tail}. The approval applies to this call only.`
+  return `Confirmation needed (this call only): ${tail}. The approval applies to this call only.`
 }
 
 const LIMIT_START = { targets: 6, dirs: 3, flags: 6, other: 4 }
@@ -311,8 +303,8 @@ export function confirmSummary(scopeText, ruleIds) {
     const human = raw || '该操作'
     const humanEn = raw || 'this operation'
     return {
-      zh: `需要确认（仅本次）：${human}（规则 ${ids.join(',')}）。批准只对本次调用有效。`,
-      en: `Confirmation required (this call only): ${humanEn} (rule ${ids.join(',')}). The approval applies to this call only.`,
+      zh: `需要你确认（仅本次）：${human}（规则 ${ids.join(',')}）。批准只对本次调用有效。`,
+      en: `Confirmation needed (this call only): ${humanEn} (rule ${ids.join(',')}). The approval applies to this call only.`,
     }
   }
   const isDelete = ids.some((id) => DELETE_PREFIXES.some((prefix) => id.startsWith(prefix)))
@@ -324,7 +316,7 @@ export function confirmSummary(scopeText, ruleIds) {
   const zhScope = humanScopeZh(parsed.segments)
   const enScope = humanScopeEn(parsed.segments)
   return {
-    zh: `需要确认（仅本次）：${zhScope || raw || '该操作'}（规则 ${ids.join(',')}）。批准只对本次调用有效。`,
-    en: `Confirmation required (this call only): ${enScope || raw || 'this operation'} (rule ${ids.join(',')}). The approval applies to this call only.`,
+    zh: `需要你确认（仅本次）：${zhScope || raw || '该操作'}（规则 ${ids.join(',')}）。批准只对本次调用有效。`,
+    en: `Confirmation needed (this call only): ${enScope || raw || 'this operation'} (rule ${ids.join(',')}). The approval applies to this call only.`,
   }
 }

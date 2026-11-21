@@ -15,7 +15,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { installGate } from '../src/adapter/dsh-gate.js'
+import { installGate, displayReasonOf } from '../src/adapter/dsh-gate.js'
 import {
   planExecution,
   requiresAnalysis,
@@ -1018,17 +1018,20 @@ test('policy never + alwaysAsk asks once through the question channel and grants
   assert.equal(request.agent, first.agent)
   // Bilingual single-paragraph display for the shared approval card.
   const display = question.intent.display
-  assert.deepEqual(display.question, { en: 'Allow this guarded operation once?', zh: '是否允许本次受保护操作？（仅本次）' })
-  assert.match(display.detail.en, /^Confirmation required \(this call only\): delete 1 entry \(rule data\.delete\.bulk\)/)
+  assert.deepEqual(display.question, { en: 'Allow this operation once?', zh: '是否允许本次操作？（仅本次）' })
+  assert.match(display.detail.en, /^Confirmation needed \(this call only\): it will delete 1 entry \(rule data\.delete\.bulk\)/)
   assert.ok(typeof display.detail.zh === 'string' && display.detail.zh.length > 0)
-  assert.ok(display.detail.zh.includes('需要确认（仅本次）'))
-  assert.ok(display.detail.zh.includes('删除 1 个条目'))
+  assert.ok(display.detail.zh.includes('需要你确认（仅本次）'))
+  assert.ok(display.detail.zh.includes('将删除 1 个条目'))
   assert.ok(display.detail.zh.includes('规则 data.delete.bulk'))
   assert.match(display.detail.zh, /目标：\.\/build/)
   assert.ok(display.detail.zh.includes('批准只对本次调用有效'))
   assert.doesNotMatch(display.detail.zh, /非豁免/, 'no internal jargon')
   assert.doesNotMatch(display.detail.zh, /范围：/, 'no internal 范围 label anymore')
   assert.doesNotMatch(display.detail.zh, /\n/, 'the card detail is a single paragraph')
+  // The top-level fallback detail is the same single-paragraph English text.
+  assert.equal(question.detail, display.detail.en)
+  assert.doesNotMatch(question.detail, /\n/)
   assert.deepEqual(display.approve, { en: 'Allow once', zh: '允许一次' })
 
   // The grant is one-time for that exact call: a new identical invocation re-asks.
@@ -1119,8 +1122,8 @@ test('an explicit string verdict scope is used directly for the question detail'
   assert.equal(decision.kind, 'allow')
   const display = askLog[0].questions[0].intent.display
   // Non-delete family: human single paragraph, no internal field name.
-  assert.match(display.detail.en, /^Confirmation required \(this call only\)/)
-  assert.ok(display.detail.zh.includes('需要确认（仅本次）'))
+  assert.match(display.detail.en, /^Confirmation needed \(this call only\)/)
+  assert.ok(display.detail.zh.includes('需要你确认（仅本次）'))
   assert.ok(display.detail.zh.includes('受保护文件：/a/.env（读取内容）'))
   assert.ok(display.detail.zh.includes('规则 credential.file.read'))
   assert.doesNotMatch(display.detail.zh, /entries|范围：/, 'no internal field names')
@@ -1168,9 +1171,9 @@ test('the delete preview is human: no jargon, redundant Git flag omitted', async
   const scope = 'non-exempt entries: 1; entries: C:\\guardrails\\a.txt; directories: C:\\guardrails\\guardrails-live-0.6.1; roots: C:\\guardrails\\guardrails-live-0.6.1; unobserved: git metadata (.git) at C:\\guardrails\\.git would also be destroyed; git-metadata-inside-tree'
   const display = await questionDisplayFor(scope)
   assert.equal(display.detail.zh,
-    '需要确认（仅本次）：删除 1 个条目（规则 data.delete.bulk）。目标：C:\\guardrails\\a.txt；涉及目录：C:\\guardrails\\guardrails-live-0.6.1；另将销毁：.git 元数据（C:\\guardrails\\.git）。批准只对本次调用有效。')
+    '需要你确认（仅本次）：将删除 1 个条目（规则 data.delete.bulk）。目标：C:\\guardrails\\a.txt；涉及目录：C:\\guardrails\\guardrails-live-0.6.1；另将销毁：.git 元数据（C:\\guardrails\\.git）。批准只对本次调用有效。')
   assert.equal(display.detail.en,
-    'Confirmation required (this call only): delete 1 entry (rule data.delete.bulk). Targets: C:\\guardrails\\a.txt; directories: C:\\guardrails\\guardrails-live-0.6.1; also destroys: Git metadata (C:\\guardrails\\.git). The approval applies to this call only.')
+    'Confirmation needed (this call only): it will delete 1 entry (rule data.delete.bulk). Targets: C:\\guardrails\\a.txt; directories: C:\\guardrails\\guardrails-live-0.6.1; also destroys: Git metadata (C:\\guardrails\\.git). The approval applies to this call only.')
   assert.doesNotMatch(display.detail.zh, /非豁免/)
   assert.doesNotMatch(display.detail.zh, /git-metadata-inside-tree/, 'the redundant flag is omitted')
 })
@@ -1183,10 +1186,50 @@ test('the Git metadata flag is shown in human words when no destruction note exi
   assert.doesNotMatch(display.detail.zh, /另将销毁/, 'no destruction note to claim')
 })
 
-test('an unknown flag goes to the other-flags segment', async () => {
-  const display = await questionDisplayFor('non-exempt entries: 1; entries: /a; notes: custom-flag-x')
-  assert.match(display.detail.zh, /其他标记：custom-flag-x/)
-  assert.match(display.detail.en, /other flags: custom-flag-x/)
+test('an unknown internal flag stays out of the user-visible summary but stays in reason', async () => {
+  const scope = 'non-exempt entries: 1; entries: /a; notes: custom-flag-x'
+  const log = []
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval: approvalService(['allowed-once'], log) } })
+  const deps = fakeDeps({
+    verdict: { kind: 'confirm', ruleId: 'data.delete.bulk', scope },
+    renderDecision: verdict => `[GUARDRAILS] CONFIRM ${verdict.ruleId}\nScope:   ${verdict.scope}\nNext:    n`,
+  })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'x' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'allow')
+  const request = log[0]
+  assert.ok(request.displayReason, 'the card gets a localized summary')
+  assert.ok(!request.displayReason.zh.includes('custom-flag-x'))
+  assert.ok(!request.displayReason.en.includes('custom-flag-x'))
+  assert.doesNotMatch(request.displayReason.zh, /其他标记/)
+  assert.ok(request.reason.includes('custom-flag-x'), 'the audit reason keeps the raw scope')
+})
+
+test('the approval channel receives a localized single-paragraph displayReason', async () => {
+  const log = []
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval: approvalService(['allowed-once'], log) } })
+  const deps = fakeDeps({ verdict: CONFIRM, renderDecision: SCOPED_RENDER })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'allow')
+  const request = log[0]
+  assert.ok(request.displayReason)
+  assert.ok(typeof request.displayReason.en === 'string' && request.displayReason.en.length > 0)
+  assert.ok(typeof request.displayReason.zh === 'string' && request.displayReason.zh.length > 0)
+  assert.doesNotMatch(request.displayReason.en, /\n/)
+  assert.doesNotMatch(request.displayReason.zh, /\n/)
+  assert.ok(request.displayReason.zh.includes('需要你确认'))
+  assert.match(request.displayReason.en, /^Confirmation needed \(this call only\)/)
+  // reason stays the audit/model-facing multi-line fixed block.
+  assert.match(request.reason, /\[GUARDRAILS\] CONFIRM/)
+  assert.match(request.reason, /\n/)
+})
+
+test('a missing confirmInfo yields no displayReason and never throws', () => {
+  for (const value of [undefined, null, {}, { ruleIds: 'x', scopeText: '' }, { ruleIds: [], scopeText: 42 }]) {
+    assert.equal(displayReasonOf(value), undefined)
+  }
+  assert.equal(displayReasonOf({ ruleIds: [], scopeText: '' })?.en !== undefined, true)
 })
 
 test('an unparseable scope falls back to the raw text without undefined', async () => {

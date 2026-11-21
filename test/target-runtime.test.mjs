@@ -228,7 +228,10 @@ test('alwaysAsk: with the real never policy and an interactive answerer, a prote
   const question = asks[0].questions[0]
   assert.equal(question.intent.kind, 'approval')
   assert.ok(typeof question.detail === 'string' && question.detail.length > 0)
-  assert.match(question.detail, /GUARDRAILS/)
+  // The top-level fallback detail is the same single-paragraph English summary.
+  assert.match(question.detail, /^Confirmation needed \(this call only\): /)
+  assert.doesNotMatch(question.detail, /\n/)
+  assert.equal(question.detail, question.intent.display.detail.en)
   // The real approval seam stayed out of the decision: no approval audit pair was written.
   assert.ok(!session.snapshotEvents().some(event => event.type === 'approval/asked'))
 })
