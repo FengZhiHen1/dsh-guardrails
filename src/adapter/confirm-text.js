@@ -106,6 +106,15 @@ function countEn(value) {
   return leading ? leading[0] : (text || 'some')
 }
 
+/** English singular/plural for the entry noun based on the leading count. */
+function entryWordEn(value) {
+  const text = String(value ?? '').trim()
+  const atLeast = /at least\s+(\d+)/i.exec(text)
+  const leading = /^\d+/.exec(text)
+  const number = atLeast ? atLeast[1] : (leading ? leading[0] : undefined)
+  return number === '1' ? 'entry' : 'entries'
+}
+
 function formatZhList(items, max) {
   const list = unique(items)
   if (list.length === 0) return ''
@@ -179,11 +188,11 @@ function deleteClauses(segments) {
   let gitPath = ''
   const targets = []
   const dirs = []
-  const flags = []
+  const rawFlags = []
   const other = []
   for (const segment of segments) {
     if (!segment.key) {
-      if (segment.value) flags.push(segment.value)
+      if (segment.value) rawFlags.push(segment.value)
       continue
     }
     switch (segment.key) {
@@ -206,30 +215,43 @@ function deleteClauses(segments) {
         for (const item of splitList(segment.value)) {
           const path = gitDestroyPath(item)
           if (path && !gitPath) gitPath = path
-          else flags.push(unobservedZh(item))
+          else rawFlags.push(unobservedZh(item))
         }
         break
       case 'notes':
-        flags.push(...splitList(segment.value))
+        rawFlags.push(...splitList(segment.value))
         break
       default:
         other.push(`${segment.label || segment.key}: ${segment.value}`)
     }
   }
-  return { countRaw, gitPath, targets, dirs, flags, other }
+  // Known flag: `git-metadata-inside-tree` is redundant when the .git destruction
+  // note already covers it; otherwise it becomes a human "includes Git metadata".
+  let includesGitMetadata = false
+  const flags = []
+  for (const flag of rawFlags) {
+    if (flag === 'git-metadata-inside-tree') {
+      if (gitPath) continue
+      includesGitMetadata = true
+      continue
+    }
+    flags.push(flag)
+  }
+  return { countRaw, gitPath, includesGitMetadata, targets, dirs, flags, other }
 }
 
 function renderDeleteZh(segments, ruleIds, limits) {
-  const { countRaw, gitPath, targets, dirs, flags, other } = deleteClauses(segments)
-  const head = `删除 ${countZh(countRaw)} 个非豁免条目（规则 ${ruleIds.join(',')}）`
+  const { countRaw, gitPath, includesGitMetadata, targets, dirs, flags, other } = deleteClauses(segments)
+  const head = `删除 ${countZh(countRaw)} 个条目（规则 ${ruleIds.join(',')}）`
   const clauses = []
   const shownTargets = formatZhList(targets, limits.targets)
   if (shownTargets) clauses.push(`目标：${shownTargets}`)
   const shownDirs = formatZhList(dirs, limits.dirs)
   if (shownDirs) clauses.push(`涉及目录：${shownDirs}`)
   if (gitPath) clauses.push(`另将销毁：.git 元数据（${gitPath}）`)
+  if (includesGitMetadata) clauses.push('范围内含 Git 元数据')
   const shownFlags = formatZhList(flags, limits.flags)
-  if (shownFlags) clauses.push(`标记：${shownFlags}`)
+  if (shownFlags) clauses.push(`其他标记：${shownFlags}`)
   const shownOther = formatZhList(other, limits.other)
   if (shownOther) clauses.push(`其他：${shownOther}`)
   const tail = clauses.length > 0 ? `${head}。${clauses.join('；')}` : head
@@ -237,16 +259,17 @@ function renderDeleteZh(segments, ruleIds, limits) {
 }
 
 function renderDeleteEn(segments, ruleIds, limits) {
-  const { countRaw, gitPath, targets, dirs, flags, other } = deleteClauses(segments)
-  const head = `delete ${countEn(countRaw)} non-exempt entries (rule ${ruleIds.join(',')})`
+  const { countRaw, gitPath, includesGitMetadata, targets, dirs, flags, other } = deleteClauses(segments)
+  const head = `delete ${countEn(countRaw)} ${entryWordEn(countRaw)} (rule ${ruleIds.join(',')})`
   const clauses = []
   const shownTargets = formatEnList(targets, limits.targets)
   if (shownTargets) clauses.push(`Targets: ${shownTargets}`)
   const shownDirs = formatEnList(dirs, limits.dirs)
   if (shownDirs) clauses.push(`directories: ${shownDirs}`)
   if (gitPath) clauses.push(`also destroys: Git metadata (${gitPath})`)
+  if (includesGitMetadata) clauses.push('also includes Git metadata')
   const shownFlags = formatEnList(flags, limits.flags)
-  if (shownFlags) clauses.push(`flags: ${shownFlags}`)
+  if (shownFlags) clauses.push(`other flags: ${shownFlags}`)
   const shownOther = formatEnList(other, limits.other)
   if (shownOther) clauses.push(`other: ${shownOther}`)
   const tail = clauses.length > 0 ? `${head}. ${clauses.join('; ')}` : head

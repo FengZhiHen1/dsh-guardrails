@@ -1019,12 +1019,14 @@ test('policy never + alwaysAsk asks once through the question channel and grants
   // Bilingual single-paragraph display for the shared approval card.
   const display = question.intent.display
   assert.deepEqual(display.question, { en: 'Allow this guarded operation once?', zh: '是否允许本次受保护操作？（仅本次）' })
-  assert.match(display.detail.en, /^Confirmation required \(this call only\): delete 1 non-exempt entries/)
+  assert.match(display.detail.en, /^Confirmation required \(this call only\): delete 1 entry \(rule data\.delete\.bulk\)/)
   assert.ok(typeof display.detail.zh === 'string' && display.detail.zh.length > 0)
   assert.ok(display.detail.zh.includes('需要确认（仅本次）'))
+  assert.ok(display.detail.zh.includes('删除 1 个条目'))
   assert.ok(display.detail.zh.includes('规则 data.delete.bulk'))
   assert.match(display.detail.zh, /目标：\.\/build/)
   assert.ok(display.detail.zh.includes('批准只对本次调用有效'))
+  assert.doesNotMatch(display.detail.zh, /非豁免/, 'no internal jargon')
   assert.doesNotMatch(display.detail.zh, /范围：/, 'no internal 范围 label anymore')
   assert.doesNotMatch(display.detail.zh, /\n/, 'the card detail is a single paragraph')
   assert.deepEqual(display.approve, { en: 'Allow once', zh: '允许一次' })
@@ -1037,6 +1039,23 @@ test('policy never + alwaysAsk asks once through the question channel and grants
 })
 
 const SCOPED_RENDER = verdict => `[GUARDRAILS] ${String(verdict.kind).toUpperCase()} ${verdict.ruleId}\nWhy:     x\nTrigger: y\nEffect:  z\nScope:   non-exempt entries: 1; entries: ./build; directories: ./build; roots: ./build\nNext:    n`
+
+/** Run one confirmed question-channel ask and return the card display object. */
+async function questionDisplayFor(scope, ruleId = 'data.delete.bulk') {
+  const askLog = []
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({
+    verdict: { kind: 'confirm', ruleId, scope },
+    policy: NEVER_POLICY,
+    renderDecision: verdict => `[GUARDRAILS] CONFIRM ${verdict.ruleId}`,
+  })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'x' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'allow')
+  return askLog[0].questions[0].intent.display
+}
 
 test('a confirmed question-channel allow injects one structured post-execute notice (consumed once)', async () => {
   const approval = neverApproval()
@@ -1143,6 +1162,31 @@ test('roots that repeat directories are not shown twice', async () => {
   const zh = askLog[0].questions[0].intent.display.detail.zh
   assert.match(zh, /目标：\/target\/file\.txt/)
   assert.equal((zh.match(/\/dirroot/g) ?? []).length, 1, `directory shown once: ${zh}`)
+})
+
+test('the delete preview is human: no jargon, redundant Git flag omitted', async () => {
+  const scope = 'non-exempt entries: 1; entries: C:\\guardrails\\a.txt; directories: C:\\guardrails\\guardrails-live-0.6.1; roots: C:\\guardrails\\guardrails-live-0.6.1; unobserved: git metadata (.git) at C:\\guardrails\\.git would also be destroyed; git-metadata-inside-tree'
+  const display = await questionDisplayFor(scope)
+  assert.equal(display.detail.zh,
+    '需要确认（仅本次）：删除 1 个条目（规则 data.delete.bulk）。目标：C:\\guardrails\\a.txt；涉及目录：C:\\guardrails\\guardrails-live-0.6.1；另将销毁：.git 元数据（C:\\guardrails\\.git）。批准只对本次调用有效。')
+  assert.equal(display.detail.en,
+    'Confirmation required (this call only): delete 1 entry (rule data.delete.bulk). Targets: C:\\guardrails\\a.txt; directories: C:\\guardrails\\guardrails-live-0.6.1; also destroys: Git metadata (C:\\guardrails\\.git). The approval applies to this call only.')
+  assert.doesNotMatch(display.detail.zh, /非豁免/)
+  assert.doesNotMatch(display.detail.zh, /git-metadata-inside-tree/, 'the redundant flag is omitted')
+})
+
+test('the Git metadata flag is shown in human words when no destruction note exists', async () => {
+  const display = await questionDisplayFor('non-exempt entries: 2; entries: /a; /b; unobserved: git-metadata-inside-tree')
+  assert.match(display.detail.zh, /范围内含 Git 元数据/)
+  assert.match(display.detail.en, /also includes Git metadata/)
+  assert.doesNotMatch(display.detail.zh, /git-metadata-inside-tree/)
+  assert.doesNotMatch(display.detail.zh, /另将销毁/, 'no destruction note to claim')
+})
+
+test('an unknown flag goes to the other-flags segment', async () => {
+  const display = await questionDisplayFor('non-exempt entries: 1; entries: /a; notes: custom-flag-x')
+  assert.match(display.detail.zh, /其他标记：custom-flag-x/)
+  assert.match(display.detail.en, /other flags: custom-flag-x/)
 })
 
 test('an unparseable scope falls back to the raw text without undefined', async () => {
