@@ -3,7 +3,8 @@
 - 日期：2026-11-19
 - 状态：已决定
 
-> 展示层由 [DSR-035](DSR-035-确认卡外观与模型可见确认记录.md) 扩展：Web 端改为标准审批卡并按中英切换，人工确认放行后向模型注入通知。本文中「客户端按通用单问题问答卡、英文按钮」的展示描述由 DSR-035 取代；通道、审计与拒绝码不变。
+> 展示层由 [DSR-035](DSR-035-确认卡外观与模型可见确认记录.md) 扩展：Web 端改为标准审批卡并按中英切换，确认应答方放行后向模型注入通知。本文中「客户端按通用单问题问答卡、英文按钮」的展示描述由 DSR-035 取代。
+> 拒绝码语义由 [DSR-036](DSR-036-输出面契约与文案分层.md) 细化：`APPROVAL_POLICY_NEVER` 仅表示策略/开关禁止（`alwaysAsk` 关闭）；无应答方/缺通道为 `APPROVAL_UNAVAILABLE`。通道与审计结论不变。
 
 ## 背景
 
@@ -26,12 +27,13 @@ DSH 宿主的审批策略 `never` 在分发前确定性地拒绝所有审批请�
 
    有效策略的定义沿用宿主：会话 `approval/policy` 覆盖优先，否则部署默认策略，再否则 `ask`。实现读取 `approval.overrideOf(session)` 与会话配置的默认值，无需改动宿主。
 
-3. **归因修正**：新增两个拒绝码，并收紧既有码的含义。
-   - `APPROVAL_POLICY_NEVER`：有效策略为 `never` 且**没有可用应答方**（含 `alwaysAsk = false`、问答 seam 缺失、问答链路 `NO_PROVIDER`）。**没有交互应答方接受该确认**，不是用户拒绝。
+3. **归因修正**：新增两个拒绝码（`APPROVAL_POLICY_NEVER`、`APPROVAL_DELEGATED`），并收紧既有码（`APPROVAL_REJECTED`、`APPROVAL_UNAVAILABLE`）的含义。
+   - `APPROVAL_POLICY_NEVER`：会话策略为 `never` 且 `alwaysAsk` 关闭（策略/开关禁止）。**没有交互应答方接受该确认**，不是用户拒绝。
+   - `APPROVAL_UNAVAILABLE`：没有确认通道或应答方（问答 seam 缺失、`NO_PROVIDER`、`CALLER_NOT_LIVE`），不是用户拒绝。
    - `APPROVAL_DELEGATED`：操作发生在委派子代理会话。宿主把子会话审批策略固定为 `never`，且问答 seam 拒绝委派调用者（`DELEGATED_CALLER`），无法询问用户。不是用户拒绝。
    - 既有 `APPROVAL_REJECTED`：只在**真的有人拒绝**时出现（审批应答方返回 `rejected`，或用户在问答卡里选了拒绝项）。修掉「策略拒绝被说成用户拒绝」的误归因。
 
-   三个码的区别：`APPROVAL_REJECTED` 有真实人类决定；`APPROVAL_POLICY_NEVER` 与 `APPROVAL_DELEGATED` 都**没有人参与**，区别在于前者由会话策略 + 无应答方导致、后者由委派子会话的限制导致。回退到自动拒绝或无人应答时，一律不得输出「用户拒绝」。
+   这些码的区别：`APPROVAL_REJECTED` 有真实人类决定；`APPROVAL_POLICY_NEVER`（策略/开关禁止）、`APPROVAL_UNAVAILABLE`（无通道）与 `APPROVAL_DELEGATED`（委派子会话限制）都**没有人参与**。回退到自动拒绝或无人应答时，一律不得输出「用户拒绝」。
 
 4. **不变的语义**：一次性授权（只放行当前调用、不落盘、不构成删除授权）；确认后的完整重访与作用域比对；`askTimeoutMs` 等待预算；灾难身份不可确认；规则号契约不变（不新增、不改既有规则号）。
 
@@ -53,8 +55,8 @@ DSH 宿主的审批策略 `never` 在分发前确定性地拒绝所有审批请�
 
 ## 已知取舍（必须保留）
 
-- **审计影响**：问答通道路径**不产生** `approval/asked`、`approval/decided` 审计事件；且 `APPROVAL_POLICY_NEVER` 路径（策略 `never` 且无可用应答方）在改前经 `approval.request()` 会写这对审计事件，改后不再写。也就是说，`never` 下的确认可能完全没有 `approval` 审计对——这是真实取舍。其可见记录只能依赖问答 seam 的请求事件与客户端卡片/会话消息；持久审计与 ACP 应答方兼容弱于审批通道。
-- **无应答方 fail-closed**：无客户端应答方时（headless、CI、未连接该会话）仍拒绝，`userQuestions` 链路以 `NO_PROVIDER` 结束，插件按 `APPROVAL_POLICY_NEVER` 归因。安全方向不放松。
+- **审计影响**：问答通道路径**不产生** `approval/asked`、`approval/decided` 审计事件；且 `APPROVAL_POLICY_NEVER`/`APPROVAL_UNAVAILABLE` 路径（策略/开关禁止或无可用应答方）在改前经 `approval.request()` 会写这对审计事件，改后不再写。也就是说，`never` 下的确认可能完全没有 `approval` 审计对——这是真实取舍。其可见记录只能依赖问答 seam 的请求事件与客户端卡片/会话消息；持久审计与 ACP 应答方兼容弱于审批通道。
+- **无应答方 fail-closed**：无客户端应答方时（headless、CI、未连接该会话）仍拒绝，`userQuestions` 链路以 `NO_PROVIDER` 结束，插件按 `APPROVAL_UNAVAILABLE` 归因。安全方向不放松。
 - **子代理限制**：委派子代理会话无法使用该通道（宿主把子会话审批固定为 `never`，且问答 seam 对委派调用者抛 `DELEGATED_CALLER`），归因 `APPROVAL_DELEGATED`。
 - **对会话策略的有意覆盖**：该通道在 `never` 策略下仍向用户提问，属于对会话策略的有意覆盖。这是产品取舍，默认开启、可配置关闭（`alwaysAsk = false`）。
 - **等待预算**：问答通道复用 `askTimeoutMs` 预算。`ask()` 对 approval 意图要求阻塞式请求（不得带 `wait`），因此由插件自建计时与 `AbortController` 包装；到点中止按 `APPROVAL_TIMEOUT` 处理（自动拒绝，非用户拒绝）。
@@ -62,7 +64,7 @@ DSH 宿主的审批策略 `never` 在分发前确定性地拒绝所有审批请�
 ## 后果
 
 - 会话为 `never`、有客户端、`alwaysAsk = true`：需要确认的调用会弹出通用单问题问答卡（选项 `Allow once` / `Reject`）。选批准只放行当前调用，随后执行既有的完整重访与作用域比对；选拒绝输出 `APPROVAL_REJECTED`。
-- 会话为 `never`、无客户端应答方：拒绝，输出 `APPROVAL_POLICY_NEVER`，文案不再说「用户拒绝」。
+- 会话为 `never`、无客户端应答方：拒绝，输出 `APPROVAL_UNAVAILABLE`，文案不再说「用户拒绝」。
 - 委派子代理会话：拒绝，输出 `APPROVAL_DELEGATED`。
 - 会话为 `ask`：行为不变，仍走 `approval.request()`，审计事件照旧。
 - `alwaysAsk = false`：`never`/缺 seam 时自动拒绝，输出 `APPROVAL_POLICY_NEVER`。
@@ -73,7 +75,7 @@ DSH 宿主的审批策略 `never` 在分发前确定性地拒绝所有审批请�
 **已由源码/运行契约证明**（目标运行时 `0.2.2-rc.2` 安装树）：
 
 - `@deepseek-ai/dsh-user-approval` 的 `ApprovalService.decide()`：在进入应答方链路前判定有效策略，`never` 直接返回 `rejected`（`src/index.ts`）。因此既有 `approval.request()` 在 `never` 下必然 `rejected`。
-- 同一 `request()` 先 append `approval/asked`、`decide()` 之后再 append `approval/decided`，故改前经 `approval.request()` 的 `never` 路径仍会写这对审计事件（但没有交互应答方接受该确认）——这是旧行为；改后 `never` 下的问答路径与 `APPROVAL_POLICY_NEVER` 路径都不再写。
+- 同一 `request()` 先 append `approval/asked`、`decide()` 之后再 append `approval/decided`，故改前经 `approval.request()` 的 `never` 路径仍会写这对审计事件（但没有交互应答方接受该确认）——这是旧行为；改后 `never` 下的问答路径与 `APPROVAL_POLICY_NEVER`/`APPROVAL_UNAVAILABLE` 路径都不再写。
 - 有效策略可由 `approval.overrideOf(session)` 与会话默认策略读取（同包源码；同类公开读取见内置 auto-review 的 `ctx.approval.overrideOf(agent.session) === 'never'` 与权限预设的 `approval.config.policy ?? 'ask'`）。
 - `@deepseek-ai/dsh-user-questions` 的 `UserQuestionService.ask()`：approval 意图校验为「单问题、无 `wait`、非 `multiSelect`、标签互异且与选项一一对应、必须带 `detail`」，违者 `BAD_INTENT`；`assertLiveRoot()` 对 `subagent` origin 抛 `DELEGATED_CALLER`；无应答方 `NO_PROVIDER`；信号中止 `ASK_ABORTED`。这些错误码与语义均来自源码。
 - `@deepseek-ai/dsh-subagent` 的委派策略捕获：子会话 `approval/policy` 固定为 `never` 且标记 `source: 'delegation'`（`child-agent.ts`）。
@@ -87,7 +89,7 @@ DSH 宿主的审批策略 `never` 在分发前确定性地拒绝所有审批请�
 - `askTimeoutMs` 到点中止后错误映射为 `APPROVAL_TIMEOUT` 的端到端行为；
 - 真实委派子代理会话是否稳定返回 `APPROVAL_DELEGATED` 而非挂起；
 - headless / 未连接会话是否确实以 `NO_PROVIDER` fail-closed；
-- 实会话日志中确认问答通道与 `APPROVAL_POLICY_NEVER` 路径都没有 `approval/asked`、`approval/decided` 行。
+- 实会话日志中确认问答通道与 `APPROVAL_POLICY_NEVER`/`APPROVAL_UNAVAILABLE` 路径都没有 `approval/asked`、`approval/decided` 行。
 
 ## 追溯
 

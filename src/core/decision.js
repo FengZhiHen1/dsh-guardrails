@@ -217,6 +217,49 @@ const GENERIC_META = {
   next: 'Use explicit literal paths and supported commands.',
 }
 
+/** Per-stage Effect/Next overrides for gate faults. The concrete stage code stays in
+ * the fixed block's `(stage CODE)` marker; when it matches, these replace the
+ * catalog rule's generic Effect/Next so the refusal explains what actually happened.
+ * Pure string table: no I/O, no DSH objects. */
+const STAGE_META = {
+  GUARD_SCOPE_CHANGED: {
+    effect: 'The operation or its target set changed between the confirmation and dispatch (files, script or manifest contents, or the analysis itself).',
+    next: 'Nothing was executed. Re-issue the call and confirm the scope shown at that time.',
+  },
+  GUARD_RECHECK_FAILED: {
+    effect: 'The post-confirmation re-check failed, so the call was not dispatched.',
+    next: 'Nothing was executed. Retry once; report it if it repeats.',
+  },
+  GUARD_REAPPROVAL_UNRESOLVED: {
+    effect: 'The scope changed again after a second confirmation, so the call was not dispatched.',
+    next: 'Nothing was executed. Re-issue the call and confirm the current scope.',
+  },
+  ANALYSIS_UNAVAILABLE: {
+    effect: 'The safety analysis could not read this call (unsupported or unparsable command or target).',
+    next: 'Nothing was executed. Retry with a literal command; report it if it persists.',
+  },
+  GUARD_PATCH_PARSE_FAILED: {
+    effect: 'The patch or target could not be parsed, so the call was not dispatched.',
+    next: 'Nothing was executed. Provide a parseable patch or an absolute base path.',
+  },
+  GUARD_TARGET_BASE_UNKNOWN: {
+    effect: 'The patch or target could not be parsed, so the call was not dispatched.',
+    next: 'Nothing was executed. Provide a parseable patch or an absolute base path.',
+  },
+  ANALYSIS_CANCELLED: {
+    effect: 'The call was cancelled before it could be dispatched.',
+    next: 'Nothing was executed. Re-issue the call when it is still needed.',
+  },
+  ANALYSIS_DISPOSED: {
+    effect: 'Guardrails was unloaded while this call was being checked.',
+    next: 'Nothing was executed. Retry after the plugin is reloaded; report it if it repeats.',
+  },
+  ANALYSIS_MISSING: {
+    effect: 'No completed safety check existed for this exact call, so it was not dispatched.',
+    next: 'Nothing was executed. Re-issue the call; report it if it repeats.',
+  },
+}
+
 // ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
@@ -721,12 +764,16 @@ function mergeScopes(scopes) {
 function checkFailedDeny(stages, issues, gaps) {
   const scope = emptyScope()
   scope.issues = issues ?? []
+  const gapCodes = [...new Set((Array.isArray(gaps) ? gaps : [])
+    .map((gap) => gap?.code)
+    .filter((value) => typeof value === 'string' && value !== ''))]
+  const base = stages.length ? stages.join('; ') : 'check failure'
   return {
     kind: 'deny',
     ruleId: CHECK_FAILED_RULE,
     ruleIds: [CHECK_FAILED_RULE],
     reason: 'A required check did not finish, so the call cannot be proven safe; deny without an allow fallback.',
-    trigger: stages.length ? `check failure: ${stages.join('; ')}` : 'check failure',
+    trigger: `${base}${gapCodes.length > 0 ? `; codes: ${gapCodes.join(',')}` : ''}`,
     scope,
     gaps: gaps ?? [],
     issues: issues ?? [],
@@ -1199,15 +1246,23 @@ export function renderDecision(decision) {
   if (decision.kind === 'allow') return null
   if (decision.kind !== 'deny' && decision.kind !== 'confirm') return null
   const ruleId = typeof decision.ruleId === 'string' && decision.ruleId ? decision.ruleId : CHECK_FAILED_RULE
-  const meta = RULE_META[ruleId] ?? GENERIC_META
+  // A gate stage marker `(stage CODE)` in the reason overrides the catalog effect/next.
+  const stageMatch = typeof decision.reason === 'string' ? /\(stage ([A-Z0-9_]+)\)/.exec(decision.reason) : null
+  const stage = stageMatch && STAGE_META[stageMatch[1]] ? stageMatch[1] : undefined
+  const meta = stage ? STAGE_META[stage] : (RULE_META[ruleId] ?? GENERIC_META)
   const header = `[GUARDRAILS] ${decision.kind === 'deny' ? 'DENY' : 'CONFIRM'} ${ruleId} (${categoryOf(ruleId)})`
-  const lines = [
-    header,
-    `Why:     ${clamp(redact(decision.reason) || 'The invocation requires a guard decision.', 320)}`,
-    `Trigger: ${clamp(redact(decision.trigger) || 'not captured', 240)}`,
-    `Effect:  ${meta.effect}`,
-    `Scope:   ${clamp(redact(scopeText(decision.scope)), 720)}`,
-    `Next:    ${meta.next}`,
-  ]
+  const why = clamp(redact(decision.reason) || 'The invocation requires a guard decision.', 320)
+  const trigger = clamp(redact(decision.trigger), 240)
+  const scope = clamp(redact(scopeText(decision.scope)), 720)
+  const lines = [header, `Why:     ${why}`]
+  // Empty coverage lines are dropped instead of claiming "not captured".
+  if (trigger && trigger !== 'not captured') lines.push(`Trigger: ${trigger}`)
+  lines.push(`Effect:  ${meta.effect}`)
+  if (scope && scope !== 'not captured') lines.push(`Scope:   ${scope}`)
+  // Every denial states plainly that nothing ran; confirmations follow their own copy.
+  const next = decision.kind === 'deny' && !meta.next.startsWith('Nothing was executed.')
+    ? `Nothing was executed. ${meta.next}`
+    : meta.next
+  lines.push(`Next:    ${next}`)
   return lines.join('\n')
 }

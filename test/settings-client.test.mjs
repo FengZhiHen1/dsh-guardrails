@@ -71,6 +71,20 @@ test('settings round-trips alwaysAsk so the toggle saves and reads back', () => 
   assert.equal(plain(plugin.parseDraft({ files: '', builtin: true, seconds: '120' }).value).alwaysAsk, true)
 })
 
+test('settings explains subagent refusals and non-enumerable approvals in both languages', () => {
+  const copy = [
+    '没有客户端应答的无人值守会话，以及委派给子代理的会话，仍会拒绝（子代理无法询问用户，请回到父会话执行）',
+    'Headless sessions without a client, and delegated subagent sessions, still refuse (a child cannot ask you; run it from the parent session)',
+    '此外，无法准确枚举的删除、移动来源、Git 清理/恢复/工作树移除，以及无法静态解析的执行，也会请求一次确认',
+    'Deletions that cannot be enumerated, move sources, Git clean/restore, worktree removal, and executions that cannot be statically resolved also request one-time approval',
+    '必须是绝对路径（不支持相对路径）',
+    'Paths must be absolute; relative paths are not supported.',
+    '（仅查看元数据不触发）',
+    '(metadata-only inspection does not prompt)',
+  ]
+  for (const text of copy) assert.ok(source.includes(text), text)
+})
+
 test('settings owns bilingual dictionary and row slot resources for unload', () => {
   const disposers = []
   const registrations = []

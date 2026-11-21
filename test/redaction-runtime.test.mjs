@@ -61,33 +61,58 @@ const execute = async (ctx, name, extra = {}) => {
   return settled.results[0].result
 }
 
-test('real ToolRuntime Native validates string replacement; object/meta/error remain bounded residuals', { skip: !runtime && 'Install runtime dependencies or set DSH_RUNTIME_PATH' }, async t => {
+test('real ToolRuntime Native masks plain strings and withholds values it cannot mask', { skip: !runtime && 'Install runtime dependencies or set DSH_RUNTIME_PATH' }, async t => {
   const ctx = await setup(t)
   register(ctx, 'string_result', secret)
   const clean = await execute(ctx, 'string_result')
   assert.equal(clean.isError, false)
-  assert.equal(clean.value, '[REDACTED]')
-  assert.equal(clean.content[0].text, '[REDACTED]')
+  assert.equal(clean.value, '[REDACTED:provider]')
+  assert.equal(clean.content[0].text, '[REDACTED:provider]')
   register(ctx, 'object_result', { token: secret }, { type: 'object', properties: { token: { type: 'string' } }, required: ['token'], additionalProperties: false })
   const object = await execute(ctx, 'object_result')
-  assert.equal(object.isError, false)
-  assert.equal(object.value.token, secret)
-  assert.ok(!JSON.stringify(object.content).includes(secret))
+  assert.equal(object.isError, true)
+  assert.ok(!Object.hasOwn(object, 'value'))
+  assert.match(object.content[0].text, /withheld/)
+  assert.ok(!JSON.stringify(object).includes(secret))
   register(ctx, 'enum_result', secret, { type: 'string', enum: [secret] })
   const constrained = await execute(ctx, 'enum_result')
-  assert.equal(constrained.isError, false)
-  assert.equal(constrained.value, secret)
-  assert.equal(constrained.content[0].text, '[REDACTED]')
+  assert.equal(constrained.isError, true)
+  assert.match(constrained.content[0].text, /withheld/)
+  assert.doesNotMatch(constrained.error.message, /invalid output/)
+  assert.ok(!JSON.stringify(constrained).includes(secret))
   register(ctx, 'meta_result', { token: secret }, { type: 'object' }, { output: { schema: { type: 'object' }, render: () => [{ type: 'text', text: secret }], presentationMeta: () => ({ token: secret }) } })
   const meta = await execute(ctx, 'meta_result')
-  assert.equal(meta.meta.token, secret)
-  assert.equal(meta.content[0].text, '[REDACTED]')
+  assert.equal(meta.isError, true)
+  assert.match(meta.content[0].text, /withheld/)
+  assert.ok(!JSON.stringify(meta).includes(secret))
   register(ctx, 'failure', null, { type: 'null' }, { execute: async () => { throw new Error(secret) } })
   const failed = await execute(ctx, 'failure')
   assert.equal(failed.isError, true)
   assert.equal(failed.error.message, secret)
   assert.ok(!JSON.stringify(failed.content).includes(secret))
   assert.ok(!Object.hasOwn(failed, 'value'))
+})
+
+test('real ToolRuntime composition withholds replacement values it cannot mask', { skip: !runtime && 'Install runtime dependencies or set DSH_RUNTIME_PATH' }, async t => {
+  const ctx = await setup(t)
+  // Redaction wraps later handlers, so an inner hook supplies the replacement under test.
+  ctx.on('tools/post-execute', async (exec, _result, next) => {
+    const decision = await next()
+    return { ...decision, value: exec.name === 'enum_result' ? secret : { token: secret, kept: 'unchanged' } }
+  })
+  register(ctx, 'object_result', { token: secret }, { type: 'object' })
+  const object = await execute(ctx, 'object_result')
+  assert.equal(object.isError, true)
+  assert.match(object.content[0].text, /withheld/)
+  assert.ok(!JSON.stringify(object).includes(secret))
+  // A constrained string replacement is withheld before the runtime can echo an
+  // invalid-output validation error containing the raw value.
+  register(ctx, 'enum_result', secret, { type: 'string', enum: [secret] })
+  const constrained = await execute(ctx, 'enum_result')
+  assert.equal(constrained.isError, true)
+  assert.match(constrained.content[0].text, /withheld/)
+  assert.doesNotMatch(constrained.error.message, /invalid output/)
+  assert.ok(!JSON.stringify(constrained).includes(secret))
 })
 
 test('real ToolRuntime PTC bridge separates program values from durable content; log hook runs independently', { skip: !runtime && 'Install runtime dependencies or set DSH_RUNTIME_PATH' }, async t => {
@@ -101,8 +126,8 @@ test('real ToolRuntime PTC bridge separates program values from durable content;
     resolve(request) { return { ...request, cwd: process.cwd(), timeoutMs: 1000 } }
     async run(request) {
       const functions = request.bindings[0].functions
-      assert.equal(await functions.string_result({}), '[REDACTED]')
-      assert.equal((await functions.object_result({})).token, secret)
+      assert.equal(await functions.string_result({}), '[REDACTED:provider]')
+      await assert.rejects(functions.object_result({}), error => /withheld/.test(error.message) && !error.message.includes(secret))
       await assert.rejects(functions.failure({}), error => error.message.includes(secret))
       assert.equal(await functions.finalized({}), 'safe canonical value')
       return { logs: [], value: 'completed' }

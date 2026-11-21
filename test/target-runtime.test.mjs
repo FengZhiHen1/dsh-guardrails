@@ -174,7 +174,7 @@ test('GT-08: a protected file changed during approval is refused before dispatch
   assert.match(result.error?.message ?? '', /GUARD_SCOPE_CHANGED/)
 })
 
-test('GT-13: the real ApprovalService never policy makes the gate refuse with APPROVAL_POLICY_NEVER and no UI', { skip: gateSkip }, async t => {
+test('GT-13: the real ApprovalService never policy refuses with APPROVAL_UNAVAILABLE when no question UI exists', { skip: gateSkip }, async t => {
   const root = await harness.fixtureRoot(t, 'approval-never')
   const marked = join(root, 'id_rsa')
   const ordinary = join(root, 'ordinary.txt')
@@ -192,10 +192,10 @@ test('GT-13: the real ApprovalService never policy makes the gate refuse with AP
   const protectedResult = await harness.runTool(ctx, agent, 'read', { file_path: marked })
   assert.equal(protectedResult.isError, true, 'the never policy refuses without reaching any answerer')
   assert.equal(counter.calls, 1, 'only the ordinary read dispatched')
-  // With alwaysAsk on but no mounted interactive answerer, the gate reports the accurate
-  // "no answerer accepted" code — never the "user rejected" text.
+  // With alwaysAsk on but no mounted interactive answerer, the gate reports that no
+  // confirmation UI exists — never a "user rejected" text.
   const message = protectedResult.error?.message ?? ''
-  assert.match(message, /APPROVAL_POLICY_NEVER/)
+  assert.match(message, /APPROVAL_UNAVAILABLE: No confirmation UI is available/)
   assert.doesNotMatch(message, /The user rejected/)
   // The never policy is now resolved by the gate before the approval seam, so the
   // official approval audit pair is intentionally not written on this path.
@@ -274,11 +274,13 @@ test('alwaysAsk: a session approval-policy override to never asks through the qu
   const notice = (firstResponse.additionalContexts ?? []).find(message => message?.source?.kind === 'dsh-guardrails')
   assert.ok(notice, 'the confirmation notice must ride on the batch additionalContexts')
   const noticeText = notice.content[0].text
-  for (const marker of ['rule=', 'channel=question', 'policy=never', 'reusable=no']) {
+  assert.match(noticeText, /^\[Guardrails\] Approved once for this call; this approval is not reusable\./)
+  for (const marker of ['rule=credential.file.read', 'confirmed_by=answerer', 'channel=question-card', 'this_call_only=yes']) {
     assert.ok(noticeText.includes(marker), `notice must contain ${marker}: ${noticeText}`)
   }
-  assert.match(noticeText, /scope=protected files/, `notice must carry the protected-file scope: ${noticeText}`)
-  assert.match(noticeText, /^\[Guardrails\] Approval granted ONCE for this call\./, 'neutral first line')
+  assert.match(noticeText, /scope=Confirmation needed \(this call only\)/, `notice scope must be human: ${noticeText}`)
+  assert.doesNotMatch(noticeText, /non-exempt entries:/, noticeText)
+  assert.match(notice.source.summary, /credential\.file\.read/, notice.source.summary)
 
   // One-time authorization: a second identical invocation asks again and grants again.
   const secondResponse = await runRead('read-2')

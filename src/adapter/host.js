@@ -27,9 +27,29 @@ function snapshotConfig(config) {
     value && typeof value.get === 'function' ? value.get() : value]))
 }
 
+/**
+ * Deduplicated config-issue warning: one line per distinct set of issue codes, so a
+ * volatile config read on every call does not repeat the same warning. A changed
+ * configuration (a new signature) warns again; only codes are printed, never values.
+ */
+export function createConfigIssueWarner(logger) {
+  let lastSignature
+  return function warnConfigIssues(policy) {
+    const codes = [...new Set((policy?.configIssues ?? [])
+      .map((issue) => issue?.code)
+      .filter((code) => typeof code === 'string' && code !== ''))]
+      .sort()
+    const signature = codes.join(',')
+    if (signature === lastSignature) return
+    lastSignature = signature
+    if (signature) logger?.warn?.(`dsh-guardrails config issue(s): ${codes.join(', ')}`)
+  }
+}
+
 export function apply(ctx, config = {}) {
   const logger = ctx.logger?.('guardrails')
   const analyzer = createExecutionAnalyzer()
+  const warnConfigIssues = createConfigIssueWarner(logger)
   installGate(ctx, {
     analyzer,
     collectEvidence,
@@ -42,7 +62,9 @@ export function apply(ctx, config = {}) {
       // An invocation grant comes from ApprovalService. Reading one from a persistent
       // profile on every call would make that grant reusable.
       if (policy && typeof policy === 'object') delete policy.allowOnce
-      return normalizePolicy(policy)
+      const normalized = normalizePolicy(policy)
+      warnConfigIssues(normalized)
+      return normalized
     },
     diagnose(gaps) {
       // Logs identify the missing capability without repeating submitted source or paths.

@@ -683,10 +683,41 @@ test('partial and fault analyses surface their gaps through diagnose', async () 
 
 test('invalid shell input is a bounded fault at the gate boundary', async () => {
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL })
-  installGate(ctx, fakeDeps())
+  const { renderDecision } = await import('../src/core/decision.js')
+  const deps = fakeDeps()
+  deps.renderDecision = renderDecision
+  installGate(ctx, deps)
   const decision = await preExecuteOf(state)(execution({ name: 'pwsh', args: {} }), async () => ({ kind: 'allow' }))
   assert.equal(decision.kind, 'deny')
   assert.match(decision.reason, /GUARD_INVALID_SHELL_INPUT/)
+  // The rendered block now names the real stage code in its Trigger line.
+  assert.match(decision.reason, /Trigger: check failure: GUARD_INVALID_SHELL_INPUT/)
+  assert.match(decision.reason, /codes: GUARD_INVALID_SHELL_INPUT/)
+})
+
+test('a patch-parse fault carries the real gap code in its trigger', async () => {
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL })
+  const { decide, renderDecision } = await import('../src/core/decision.js')
+  const deps = fakeDeps()
+  deps.collectEvidence = (analysis) => ({
+    analysisStatus: analysis.status,
+    operations: analysis.operations ?? [],
+    candidates: analysis.candidates ?? [],
+    gaps: analysis.gaps ?? [],
+    identities: [],
+    inventory: null,
+    protectedHits: [],
+    exemptions: [],
+    issues: [],
+  })
+  deps.decide = decide
+  deps.renderDecision = renderDecision
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'apply_patch', args: { input: '*** Begin Patch' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /GUARD_PATCH_PARSE_FAILED/)
+  assert.match(decision.reason, /Trigger: analysis fault/)
+  assert.match(decision.reason, /codes: GUARD_PATCH_PARSE_FAILED/)
 })
 
 test('confirm with an unscoped decision is refused without asking the user', async () => {
@@ -744,7 +775,7 @@ test('confirm asks once; only allowed-once grants; every other outcome denies', 
   }
 })
 
-test('ask timeout is an automatic refusal, not a cancellation', async () => {
+test('ask timeout for removable targets says nothing was executed and asks for literal targets', async () => {
   const { ctx, state } = fakeCtx({
     definitions: ALL_OFFICIAL,
     services: { approval: approvalService([() => new Promise(() => {})]) },
@@ -756,8 +787,24 @@ test('ask timeout is an automatic refusal, not a cancellation', async () => {
   installGate(ctx, deps)
   const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
   assert.equal(decision.kind, 'deny')
-  assert.match(decision.reason, /APPROVAL_TIMEOUT/)
-  assert.match(decision.reason, /automatic refusal/)
+  assert.match(decision.reason, /APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed\./)
+  assert.match(decision.reason, /fewer, literal targets/)
+})
+
+test('ask timeout for other targets points at a manual or later run', async () => {
+  const { ctx, state } = fakeCtx({
+    definitions: ALL_OFFICIAL,
+    services: { approval: approvalService([() => new Promise(() => {})]) },
+  })
+  const deps = fakeDeps({
+    policy: { askTimeoutMs: 20 },
+    verdict: { kind: 'confirm', ruleId: 'credential.file.read', scope: { files: ['secrets.env'] } },
+  })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'cat secrets.env' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed\./)
+  assert.match(decision.reason, /when the user can respond/)
 })
 
 test('caller cancellation during analysis denies and never grants', async () => {
@@ -777,19 +824,48 @@ test('caller cancellation during analysis denies and never grants', async () => 
 
 test('missing completed analysis at the final guard is a bounded fault; skips never need one', async () => {
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL })
-  installGate(ctx, fakeDeps())
+  const { renderDecision } = await import('../src/core/decision.js')
+  const deps = fakeDeps()
+  deps.renderDecision = renderDecision
+  installGate(ctx, deps)
   const guard = guardOf(state)
   const required = execution({ name: 'bash', args: { command: 'x' } })
-  assert.match(guard(required).reason, /ANALYSIS_MISSING/)
+  const reason = guard(required).reason
+  assert.match(reason, /ANALYSIS_MISSING/)
+  assert.match(reason, /Trigger: check failure: ANALYSIS_MISSING/)
+  assert.match(reason, /Effect:  /)
+  assert.match(reason, /Next:    Nothing was executed\./)
   assert.equal(guard(execution({ name: 'todo_write', args: {} })), undefined)
 })
 
 test('plugin unload aborts the lifetime; the guard refuses afterwards', async () => {
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL })
-  installGate(ctx, fakeDeps())
+  const { renderDecision } = await import('../src/core/decision.js')
+  const deps = fakeDeps()
+  deps.renderDecision = renderDecision
+  installGate(ctx, deps)
   const guard = guardOf(state)
   state.effects.forEach((disposer) => disposer())
-  assert.match(guard(execution({ name: 'bash', args: { command: 'x' } })).reason, /ANALYSIS_DISPOSED/)
+  const reason = guard(execution({ name: 'bash', args: { command: 'x' } })).reason
+  assert.match(reason, /ANALYSIS_DISPOSED/)
+  assert.match(reason, /Trigger: check failure: ANALYSIS_DISPOSED/)
+  assert.match(reason, /Next:    Nothing was executed\./)
+})
+
+test('a cancelled guard refusal is a rendered fault block, not a single line', async () => {
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL })
+  const { renderDecision } = await import('../src/core/decision.js')
+  const deps = fakeDeps()
+  deps.renderDecision = renderDecision
+  installGate(ctx, deps)
+  const controller = new AbortController()
+  controller.abort()
+  const exec = execution({ name: 'bash', args: { command: 'x' }, signal: controller.signal })
+  const reason = guardOf(state)(exec).reason
+  assert.match(reason, /ANALYSIS_CANCELLED/)
+  assert.match(reason, /Trigger: check failure: ANALYSIS_CANCELLED/)
+  assert.match(reason, /Effect:  /)
+  assert.match(reason, /Next:    Nothing was executed\./)
 })
 
 // ---------------------------------------------------------------------------
@@ -1078,22 +1154,29 @@ test('a confirmed question-channel allow injects one structured post-execute not
   assert.equal(notice.role, 'user')
   assert.equal(notice.source.kind, 'dsh-guardrails')
   assert.equal(notice.source.form, 'notice')
-  assert.equal(notice.source.summary, 'Guardrails confirmation')
+  assert.equal(notice.source.summary, 'Guardrails confirmation (data.delete.bulk)')
   assert.equal(typeof notice.id, 'string')
   const text = notice.content[0].text
-  assert.match(text, /^\[Guardrails\] Approval granted ONCE for this call\./, 'neutral first line (no "Human" claim)')
-  for (const marker of ['rule=data.delete.bulk', 'channel=question', 'policy=never', 'reusable=no']) {
+  assert.match(text, /^\[Guardrails\] Approved once for this call; this approval is not reusable\./)
+  for (const marker of [
+    'rule=data.delete.bulk',
+    'confirmed_by=answerer',
+    'channel=question-card',
+    'this_call_only=yes',
+  ]) {
     assert.ok(text.includes(marker), `notice must contain ${marker}: ${text}`)
   }
-  // The scope is non-empty and carries the expected block scope.
-  assert.match(text, /scope=non-exempt entries/, `notice must carry the block scope: ${text}`)
+  // The scope is the human single-paragraph summary, never the internal scope string.
+  assert.match(text, /scope=Confirmation needed \(this call only\)/, `notice scope must be human: ${text}`)
+  assert.match(text, /Targets:/, text)
+  assert.doesNotMatch(text, /non-exempt entries:/, 'internal scope fields must not leak')
   assert.doesNotMatch(text, /scope=\s*(\n|$)/, 'scope must not be empty')
   // The record is consumed: a second post-execute for the same exec injects nothing.
   const againPost = await post(exec, { isError: false, content: [] }, async () => ({ kind: 'accept' }))
   assert.equal(againPost.additionalContexts, undefined)
 })
 
-test('a confirmed approval-channel allow records channel=approval and policy=ask in the notice', async () => {
+test('a confirmed approval-channel allow records channel=approval-card in the notice', async () => {
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval: approvalService(['allowed-once']) } })
   const deps = fakeDeps({ verdict: CONFIRM, renderDecision: SCOPED_RENDER })
   installGate(ctx, deps)
@@ -1102,8 +1185,13 @@ test('a confirmed approval-channel allow records channel=approval and policy=ask
   assert.equal(decision.kind, 'allow')
   const merged = await postExecuteOf(state)(exec, { isError: false, content: [] }, async () => ({ kind: 'accept' }))
   const text = merged.additionalContexts?.[0]?.content?.[0]?.text ?? ''
-  assert.ok(text.includes('channel=approval'), text)
-  assert.ok(text.includes('policy=ask'), text)
+  assert.match(text, /^\[Guardrails\] Approved once for this call; this approval is not reusable\./)
+  assert.ok(text.includes('confirmed_by=answerer'), text)
+  assert.ok(text.includes('channel=approval-card'), text)
+  assert.ok(text.includes('this_call_only=yes'), text)
+  assert.match(text, /scope=Confirmation needed \(this call only\)/, text)
+  assert.doesNotMatch(text, /non-exempt entries:/, text)
+  assert.doesNotMatch(text, /policy=/, text)
 })
 
 test('an explicit string verdict scope is used directly for the question detail', async () => {
@@ -1126,6 +1214,7 @@ test('an explicit string verdict scope is used directly for the question detail'
   assert.ok(display.detail.zh.includes('需要你确认（仅本次）'))
   assert.ok(display.detail.zh.includes('受保护文件：/a/.env（读取内容）'))
   assert.ok(display.detail.zh.includes('规则 credential.file.read'))
+  assert.ok(display.detail.en.includes('protected files: /a/.env (read)'), 'ACTION_EN maps the action token')
   assert.doesNotMatch(display.detail.zh, /entries|范围：/, 'no internal field names')
   assert.doesNotMatch(display.detail.zh, /\n/, 'single paragraph')
 })
@@ -1144,7 +1233,7 @@ test('more than six delete targets collapse to a count instead of dumping every 
   installGate(ctx, deps)
   assert.equal((await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'x' } }), async () => ({ kind: 'allow' }))).kind, 'allow')
   const zh = askLog[0].questions[0].intent.display.detail.zh
-  assert.match(zh, /等共 8 项/)
+  assert.match(zh, /等共 9 项/)
   assert.ok(zh.includes('/t/1'), zh)
   assert.ok(!zh.includes('/t/7'), 'paths beyond the first six are represented by the count')
 })
@@ -1178,6 +1267,98 @@ test('the delete preview is human: no jargon, redundant Git flag omitted', async
   assert.doesNotMatch(display.detail.zh, /git-metadata-inside-tree/, 'the redundant flag is omitted')
 })
 
+test('a Git worktree card explains the reason and never says "delete N entries"', async () => {
+  const display = await questionDisplayFor('known scope: C:\\git\\wt; notes: merge state / uncommitted changes', 'data.git.worktree')
+  assert.ok(display.detail.zh.includes('将移除 Git 工作树（合并状态 / 未提交改动）'), display.detail.zh)
+  assert.doesNotMatch(display.detail.zh, /删除/)
+  assert.ok(display.detail.en.includes('it will remove a Git worktree (merge state / uncommitted changes)'), display.detail.en)
+  assert.doesNotMatch(display.detail.en, /delete \d+ entries/)
+})
+
+test('a move card says the original locations will not remain and lists targets', async () => {
+  const display = await questionDisplayFor('entries: /src/a; /src/b', 'data.move.source')
+  assert.ok(display.detail.zh.includes('将移动这些来源（原位置不再保留）'), display.detail.zh)
+  assert.match(display.detail.zh, /目标：\/src\/a、\/src\/b/)
+  assert.ok(display.detail.en.includes('it will move these sources (the original locations will not remain).'), display.detail.en)
+  assert.ok(display.detail.en.includes('Targets: /src/a, /src/b.'), display.detail.en)
+})
+
+test('delete heads avoid stray spaces and handle 若干 / 至少 N', async () => {
+  const unknownCount = await questionDisplayFor('entries: /a')
+  assert.ok(unknownCount.detail.zh.includes('将删除若干条目'), unknownCount.detail.zh)
+  assert.doesNotMatch(unknownCount.detail.zh, /将删除\s+若干/)
+  assert.ok(unknownCount.detail.en.includes('delete some entries'), unknownCount.detail.en)
+  const atLeast = await questionDisplayFor('non-exempt entries: at least 21 (threshold exceeded); entries: /a')
+  assert.ok(atLeast.detail.zh.includes('将删除至少 21 个条目'), atLeast.detail.zh)
+  assert.ok(atLeast.detail.en.includes('delete at least 21 entries'), atLeast.detail.en)
+})
+
+test('scope notes are rendered: known notes translated, unknown notes marked as original', async () => {
+  const display = await questionDisplayFor('non-exempt entries: 1; entries: /a; notes: stdin stream; merge state / uncommitted changes; custom-note-x')
+  assert.ok(display.detail.zh.includes('说明：标准输入流；合并状态 / 未提交改动'), display.detail.zh)
+  assert.ok(display.detail.zh.includes('说明（原文）：custom-note-x'), display.detail.zh)
+  assert.ok(display.detail.en.includes('Note: stdin stream; merge state / uncommitted changes; custom-note-x'), display.detail.en)
+})
+
+test('a known multi-clause note is not split into two English fragments', async () => {
+  const display = await questionDisplayFor('non-exempt entries: 1; entries: /a; notes: unresolved dynamic operand; credential name referenced in text')
+  assert.ok(display.detail.zh.includes('说明：动态操作数无法解析；文本中出现凭据名'), display.detail.zh)
+  assert.doesNotMatch(display.detail.zh, /unresolved dynamic operand/)
+})
+
+test('a compound note followed by another note is matched greedily, not shredded', async () => {
+  const display = await questionDisplayFor('non-exempt entries: 1; entries: /a; notes: unresolved dynamic operand; credential name referenced in text; stdin stream')
+  assert.ok(display.detail.zh.includes('说明：动态操作数无法解析；文本中出现凭据名；标准输入流'), display.detail.zh)
+  assert.doesNotMatch(display.detail.zh, /unresolved dynamic operand|credential name referenced/, display.detail.zh)
+})
+
+test('the renderList ellipsis is not counted as an item; the real count is used', async () => {
+  const display = await questionDisplayFor('non-exempt entries: 21; entries: a; b; …')
+  assert.ok(display.detail.zh.includes('等共 21 项'), display.detail.zh)
+  assert.ok(display.detail.zh.includes('将删除 21 个条目'), display.detail.zh)
+  assert.ok(!display.detail.zh.includes('…'), display.detail.zh)
+  assert.doesNotMatch(display.detail.zh, /9/, display.detail.zh)
+  assert.ok(display.detail.en.includes('and 21 total'), display.detail.en)
+  assert.ok(!display.detail.en.includes('…'), display.detail.en)
+})
+
+test('Windows drive paths stay in the list and are never read as keys (H1)', async () => {
+  const deleteCard = await questionDisplayFor('non-exempt entries: 3; entries: C:\\ws\\a.txt; C:\\ws\\b.txt; C:\\ws\\c.txt')
+  assert.ok(deleteCard.detail.zh.includes('将删除 3 个条目'), deleteCard.detail.zh)
+  for (const path of ['C:\\ws\\a.txt', 'C:\\ws\\b.txt', 'C:\\ws\\c.txt']) {
+    assert.ok(deleteCard.detail.zh.includes(path), `missing ${path}: ${deleteCard.detail.zh}`)
+  }
+
+  const moveCard = await questionDisplayFor('known scope: E:/s/a; E:/s/b; E:/s/c', 'data.move.source')
+  for (const path of ['E:/s/a', 'E:/s/b', 'E:/s/c']) {
+    assert.ok(moveCard.detail.zh.includes(path), `missing ${path}: ${moveCard.detail.zh}`)
+  }
+
+  const protectedCard = await questionDisplayFor('protected files: C:\\ws\\.env; C:\\ws\\id_rsa', 'credential.file.read')
+  assert.ok(protectedCard.detail.zh.includes('受保护文件：'), protectedCard.detail.zh)
+  for (const path of ['C:\\ws\\.env', 'C:\\ws\\id_rsa']) {
+    assert.ok(protectedCard.detail.zh.includes(path), `missing ${path}: ${protectedCard.detail.zh}`)
+  }
+  assert.doesNotMatch(protectedCard.detail.zh, /C：/, 'a drive letter must not become a pseudo label')
+
+  const mixed = await questionDisplayFor('entries: /posix/a; C:\\ws\\b; /posix/c')
+  for (const path of ['/posix/a', 'C:\\ws\\b', '/posix/c']) {
+    assert.ok(mixed.detail.zh.includes(path), `missing ${path}: ${mixed.detail.zh}`)
+  }
+})
+
+test('move and worktree cards disclose the entry count and directory scope', async () => {
+  const worktree = await questionDisplayFor('non-exempt entries: 5; known scope: /wt; directories: /dirroot; roots: /dirroot; notes: merge state / uncommitted changes', 'data.git.worktree')
+  assert.ok(worktree.detail.zh.includes('涉及 5 个条目'), worktree.detail.zh)
+  assert.equal((worktree.detail.zh.match(/\/dirroot/g) ?? []).length, 1, worktree.detail.zh)
+  assert.ok(worktree.detail.en.includes('affecting 5 entries'), worktree.detail.en)
+  assert.ok(worktree.detail.en.includes('directories: /dirroot'), worktree.detail.en)
+
+  const move = await questionDisplayFor('non-exempt entries: at least 21; entries: /s/a; /s/b', 'data.move.source')
+  assert.ok(move.detail.zh.includes('涉及 至少 21 个条目'), move.detail.zh)
+  assert.ok(move.detail.en.includes('affecting at least 21 entries'), move.detail.en)
+})
+
 test('the Git metadata flag is shown in human words when no destruction note exists', async () => {
   const display = await questionDisplayFor('non-exempt entries: 2; entries: /a; /b; unobserved: git-metadata-inside-tree')
   assert.match(display.detail.zh, /范围内含 Git 元数据/)
@@ -1187,7 +1368,7 @@ test('the Git metadata flag is shown in human words when no destruction note exi
 })
 
 test('an unknown internal flag stays out of the user-visible summary but stays in reason', async () => {
-  const scope = 'non-exempt entries: 1; entries: /a; notes: custom-flag-x'
+  const scope = 'non-exempt entries: 1; entries: /a; unobserved: custom-flag-x'
   const log = []
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval: approvalService(['allowed-once'], log) } })
   const deps = fakeDeps({
@@ -1288,14 +1469,15 @@ test('a denied confirmation never leaves a post-execute notice behind', async ()
   assert.equal(merged.additionalContexts, undefined)
 })
 
-test('policy never + alwaysAsk without a question provider refuses with APPROVAL_POLICY_NEVER', async () => {
+test('policy never + alwaysAsk:true without a question provider refuses with APPROVAL_UNAVAILABLE', async () => {
   const approval = neverApproval()
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval } })
   const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
   installGate(ctx, deps)
   const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
   assert.equal(decision.kind, 'deny')
-  assert.match(decision.reason, /APPROVAL_POLICY_NEVER/)
+  assert.match(decision.reason, /APPROVAL_UNAVAILABLE: No confirmation UI is available/)
+  assert.doesNotMatch(decision.reason, /APPROVAL_POLICY_NEVER/)
   assert.doesNotMatch(decision.reason, /The user rejected/, 'a silent refusal must never be reported as a user rejection')
   assert.equal(approval.calls, 0)
 })
@@ -1341,7 +1523,7 @@ test('question channel DELEGATED_CALLER maps to APPROVAL_DELEGATED', async () =>
   assert.match(decision.reason, /APPROVAL_DELEGATED/)
 })
 
-test('question channel NO_PROVIDER maps to APPROVAL_POLICY_NEVER', async () => {
+test('question channel NO_PROVIDER maps to APPROVAL_UNAVAILABLE', async () => {
   const noProvider = Object.assign(new Error('no provider'), { code: 'NO_PROVIDER' })
   const approval = neverApproval()
   const userQuestions = questionService(() => { throw noProvider })
@@ -1350,11 +1532,11 @@ test('question channel NO_PROVIDER maps to APPROVAL_POLICY_NEVER', async () => {
   installGate(ctx, deps)
   const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
   assert.equal(decision.kind, 'deny')
-  assert.match(decision.reason, /APPROVAL_POLICY_NEVER/)
+  assert.match(decision.reason, /APPROVAL_UNAVAILABLE: No confirmation UI is available/)
   assert.doesNotMatch(decision.reason, /The user rejected/)
 })
 
-test('question channel CALLER_NOT_LIVE maps to APPROVAL_POLICY_NEVER', async () => {
+test('question channel CALLER_NOT_LIVE maps to APPROVAL_UNAVAILABLE', async () => {
   const notLive = Object.assign(new Error('not live'), { code: 'CALLER_NOT_LIVE' })
   const approval = neverApproval()
   const userQuestions = questionService(() => { throw notLive })
@@ -1363,7 +1545,7 @@ test('question channel CALLER_NOT_LIVE maps to APPROVAL_POLICY_NEVER', async () 
   installGate(ctx, deps)
   const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
   assert.equal(decision.kind, 'deny')
-  assert.match(decision.reason, /APPROVAL_POLICY_NEVER/)
+  assert.match(decision.reason, /APPROVAL_UNAVAILABLE: No confirmation UI is available/)
 })
 
 test('an answer item with a non-matching id is never read as a grant', async () => {

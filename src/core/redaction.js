@@ -1,7 +1,7 @@
 // Local credential recognition and corrective inline-use decisions.
 // Only recognizable credential formats are masked; opaque entropy is not evidence.
 
-const MARKER = '[REDACTED]'
+const redactionMarker = kind => `[REDACTED:${kind}]`
 const PLACEHOLDER = /^(?:your[-_]?|example|sample|placeholder|dummy|test[-_]?|replace|insert|redacted|x{6,}|0{6,})/i
 const PROVIDER = /\b(?:sk-(?:(?:proj|ant-api\d+)-)?[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{24,}|AIza[A-Za-z0-9_-]{35}|npm_[A-Za-z0-9]{36,})\b/g
 const BEARER = /\bBearer[ \t]+([A-Za-z0-9._~+/-]{20,}={0,2})(?![A-Za-z0-9._~+/-])/gi
@@ -20,7 +20,7 @@ function maskPem(text, kinds) {
     if (!start || start[2] !== marker[2]) continue
     const body = text.slice(start.index + start[0].length, marker.index).replace(/\s/g, '')
     if (body.length >= 32 && /^[A-Za-z0-9+/=]+$/.test(body)) {
-      parts.push(text.slice(cursor, start.index), MARKER)
+      parts.push(text.slice(cursor, start.index), redactionMarker('pem'))
       cursor = marker.index + marker[0].length
       kinds.add('pem')
     }
@@ -48,6 +48,7 @@ function jwtCredential(value) {
 }
 
 /** Mask recognized credential spans, retaining no prefix or suffix.
+ * Each marker names the recognized kind so reports can distinguish the source.
  * @throws {TypeError} If input is not text.
  */
 export function redactText(text) {
@@ -61,14 +62,14 @@ export function redactText(text) {
   const replace = (kind, accepted = () => true) => value => {
     if (placeholder(value) || !accepted(value)) return value
     kinds.add(kind)
-    return MARKER
+    return redactionMarker(kind)
   }
   // Each recognizer scans the finite input once; no truncation can expose a tail.
   let output = maskPem(text, kinds)
   output = output.replace(BEARER, (whole, token) => {
     if (placeholder(token)) return whole
     kinds.add('bearer')
-    return `Bearer ${MARKER}`
+    return `Bearer ${redactionMarker('bearer')}`
   })
   output = output.replace(/[A-Za-z0-9_.-]+/g, value => JWT.test(value) ? replace('jwt', jwtCredential)(value) : value)
   output = output.replace(PROVIDER, replace('provider', value => {
@@ -107,8 +108,8 @@ export function inlineCredentialDecision(commands) {
     for (const value of args) {
       if (typeof value !== 'string' || !redactText(value).changed) continue
       return {
-        kind: 'deny', ruleId: 'R-M2',
-        reason: '[guardrails:R-M2] Inline credential would spread through command arguments and persisted tool input. Use a credential reference, environment variable, stdin, or the tool’s authenticated configuration instead; retry without the literal credential.',
+        kind: 'deny', ruleId: 'credential.inline',
+        reason: '[guardrails:credential.inline] Inline credential would spread through command arguments and persisted tool input. Use a credential reference, environment variable, stdin, or the tool’s authenticated configuration instead; retry without the literal credential.',
       }
     }
   }

@@ -751,17 +751,67 @@ test('decide: read-only operations and allow-graded evidence allow without rule 
 // renderDecision — fixed block + redaction
 // ---------------------------------------------------------------------------
 
-test('renderDecision: deny block follows the fixed five-line shape', () => {
+test('renderDecision: deny block drops an empty scope line instead of "not captured"', () => {
   const decision = decide({ ...CLEAN, inlineCredential: true }, {})
   const text = renderDecision(decision)
   const lines = text.split('\n')
-  assert.equal(lines.length, 6)
+  assert.equal(lines.length, 5)
   assert.match(lines[0], /^\[GUARDRAILS\] DENY credential\.inline \(credential\)$/)
   assert.match(lines[1], /^Why:     /)
   assert.match(lines[2], /^Trigger: /)
   assert.match(lines[3], /^Effect:  /)
-  assert.match(lines[4], /^Scope:   /)
-  assert.match(lines[5], /^Next:    /)
+  assert.match(lines[4], /^Next:    /)
+  assert.doesNotMatch(text, /not captured/)
+  assert.doesNotMatch(text, /^Scope:/m)
+})
+
+test('renderDecision: check-failed carries the real gap code in Trigger and omits an empty Scope', () => {
+  const decision = decide({
+    ...CLEAN,
+    analysisStatus: 'fault',
+    gaps: [{ code: 'GUARD_PATCH_PARSE_FAILED' }],
+  }, {})
+  assert.equal(decision.kind, 'deny')
+  assert.equal(decision.ruleId, CHECK_FAILED_RULE)
+  assert.match(decision.trigger, /codes: GUARD_PATCH_PARSE_FAILED/)
+  const text = renderDecision(decision)
+  assert.match(text, /Trigger: .*GUARD_PATCH_PARSE_FAILED/)
+  assert.doesNotMatch(text, /not captured/)
+  assert.doesNotMatch(text, /^Scope:/m)
+})
+
+test('every deny block declares "Nothing was executed" exactly once', () => {
+  const catastrophic = decide({ ...CLEAN, identities: [{ ruleId: 'catastrophic.device', path: '\\\\.\\PHYSICALDRIVE0', action: 'delete' }] }, {})
+  const catText = renderDecision(catastrophic)
+  assert.match(catText, /Next:    Nothing was executed\. /)
+  assert.equal((catText.match(/Nothing was executed\./g) ?? []).length, 1)
+
+  const unknownStage = renderDecision({
+    kind: 'deny',
+    ruleId: CHECK_FAILED_RULE,
+    reason: 'execution.check-failed (stage SOME_UNKNOWN_STAGE): x',
+    trigger: 'check failure: SOME_UNKNOWN_STAGE',
+  })
+  assert.match(unknownStage, /Next:    Nothing was executed\. /)
+  assert.equal((unknownStage.match(/Nothing was executed\./g) ?? []).length, 1)
+
+  const checkFailed = decide({ ...CLEAN, analysisStatus: 'fault' }, {})
+  const checkText = renderDecision(checkFailed)
+  assert.match(checkText, /Next:    Nothing was executed\. Retry with a clearer/)
+  assert.equal((checkText.match(/Nothing was executed\./g) ?? []).length, 1)
+})
+
+test('renderDecision: a GUARD_SCOPE_CHANGED stage replaces the generic effect and next', () => {
+  const text = renderDecision({
+    kind: 'deny',
+    ruleId: CHECK_FAILED_RULE,
+    reason: 'execution.check-failed (stage GUARD_SCOPE_CHANGED): the confirmed scope changed',
+    trigger: 'check failure: GUARD_SCOPE_CHANGED; codes: GUARD_SCOPE_CHANGED',
+    scope: { knownScope: ['E:/build'] },
+  })
+  assert.match(text, /Effect:  The operation or its target set changed between the confirmation and dispatch/)
+  assert.match(text, /Next:    Nothing was executed\. Re-issue the call and confirm the scope shown at that time\./)
+  assert.doesNotMatch(text, /A required check did not finish/)
 })
 
 test('renderDecision: confirm block names the rule and lists scope', () => {
@@ -790,7 +840,7 @@ test('renderDecision: redacts credential-like strings in Trigger and Scope, allo
     candidates: [{ kind: 'unverified-effect', reason: 'token sk-abcdefghijklmnopqrstuvwxyz012345 passed around', knownScope: ['/tmp'] }],
   }, {})
   const text = renderDecision(decision)
-  assert.match(text, /\[REDACTED\]/)
+  assert.match(text, /\[REDACTED(?::[a-z]+)?\]/)
   assert.doesNotMatch(text, /sk-abcdefghijklmnopqrstuvwxyz012345/)
 
   assert.equal(renderDecision({ kind: 'allow', ruleId: 'data.delete.ordinary' }), null)

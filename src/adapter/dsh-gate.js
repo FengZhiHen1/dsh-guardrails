@@ -111,18 +111,22 @@ export function installGate(ctx, deps) {
    * gap list and may refine the reason.
    */
   function fault(code, detail, gaps = [{ code }]) {
+    const list = Array.isArray(gaps) ? gaps : [{ code }]
     const builtin = `execution.check-failed (stage ${code}): ${detail}`
     let rendered
     try {
-      rendered = diagnose?.(Array.isArray(gaps) ? gaps : [{ code }])
+      rendered = diagnose?.(list)
     } catch {
       rendered = undefined
     }
     const body = typeof rendered === 'string' && rendered.length > 0 ? rendered : detail
+    const gapCodes = [...new Set(list.map((gap) => gap?.code).filter((value) => typeof value === 'string' && value !== ''))]
     return {
       kind: 'deny',
       ruleId: CHECK_FAILED_RULE,
       reason: `execution.check-failed (stage ${code}): ${body}`,
+      trigger: `check failure: ${code}${gapCodes.length > 0 ? `; codes: ${gapCodes.join(',')}` : ''}`,
+      fault: true,
     }
   }
 
@@ -155,7 +159,14 @@ export function installGate(ctx, deps) {
     if (typeof reason !== 'string' || reason.length === 0) {
       return fault('GUARD_RENDER_FAILED', 'the decision renderer failed; invocation refused.')
     }
-    return { ...verdict, reason }
+    // `fault: false` marks a decision that is already a rendered fixed block.
+    return { ...verdict, reason, fault: false }
+  }
+
+  /** Render a raw gate fault once so Trigger/Effect/Next (including STAGE_META)
+   * reach the caller; already-rendered decisions pass through unchanged. */
+  function renderFaultIfNeeded(denial) {
+    return denial?.fault === true ? renderVerdict(denial) : denial
   }
 
   /** Deterministic key for comparisons; unserializable values compare unequal. */
@@ -239,16 +250,25 @@ export function installGate(ctx, deps) {
   }
 
   /** Stable, sanitized denial texts for the closed approval-outcome union. The
-   * outcome code stays in the reason text; it is not a catalog rule id. */
+   * outcome code stays in the reason text; it is not a catalog rule id. Every
+   * text states plainly that nothing was executed. */
   const APPROVAL_DENIALS = {
-    timeout: 'APPROVAL_TIMEOUT: No grant within the configured wait; this is an automatic refusal, not a user rejection. Do not retry with the same parameters; re-issue with a narrower, enumerable scope if the operation is still needed.',
-    rejected: 'APPROVAL_REJECTED: The user rejected this invocation. Do not retry with the same parameters.',
-    cancelled: 'APPROVAL_CANCELLED: The confirmation was cancelled before a decision; invocation refused.',
-    unavailable: 'APPROVAL_UNAVAILABLE: No approval channel or requesting agent is available for this confirmation; invocation refused.',
-    failed: 'APPROVAL_FAILED: The approval request could not be recorded; invocation refused.',
-    budget: 'APPROVAL_TIMEOUT: The bounded wait budget was already spent on the first confirmation; invocation refused. Re-issue the call to start a new bounded confirmation.',
-    policyNever: 'APPROVAL_POLICY_NEVER: The session approval policy is "never" and no interactive answerer accepted this confirmation; the operation was refused without a user decision.',
-    delegated: 'APPROVAL_DELEGATED: This operation runs in a delegated subagent session, which cannot ask the user; invocation refused. Re-run it from the parent session.',
+    timeoutTargets: 'APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed. Re-issue the call with fewer, literal targets if the operation is still needed.',
+    timeoutOther: 'APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed. Re-run it when the user can respond, or handle it manually.',
+    rejected: 'APPROVAL_REJECTED: The user rejected this confirmation; nothing was executed. Do not retry the same call.',
+    cancelled: 'APPROVAL_CANCELLED: The call was cancelled before any decision; nothing was executed.',
+    unavailable: 'APPROVAL_UNAVAILABLE: No confirmation UI is available in this environment; nothing was executed. Retry from a desktop or Web session, or run the operation manually.',
+    failed: 'APPROVAL_FAILED: The confirmation could not be completed (internal error); nothing was executed. Retry once; report it if it repeats.',
+    budget: 'APPROVAL_TIMEOUT: The first prompt used up the confirmation time limit, so the changed scope could not be re-confirmed; nothing was executed. Re-issue the call to start a fresh confirmation.',
+    policyNever: 'APPROVAL_POLICY_NEVER: Approval prompts are disabled for this session and the plugin setting alwaysAsk is off; nothing was executed. Ask the user to enable prompts or run the operation manually.',
+    delegated: 'APPROVAL_DELEGATED: This operation runs in a delegated subagent session, which cannot ask the user; nothing was executed. Re-run it from the parent session.',
+  }
+
+  /** Timeout copy depends on the confirmed target family. */
+  function timeoutReasonFor(ruleIds) {
+    const ids = Array.isArray(ruleIds) ? ruleIds.map(String) : []
+    const removable = ids.some((id) => id.startsWith('data.delete.') || id.startsWith('data.move.'))
+    return removable ? APPROVAL_DENIALS.timeoutTargets : APPROVAL_DENIALS.timeoutOther
   }
 
   /** Sentinel distinguishing "the wait was cancelled" from a channel result. */
@@ -297,7 +317,7 @@ export function installGate(ctx, deps) {
   function questionFailureReason(error) {
     const code = error && typeof error === 'object' ? error.code : undefined
     if (code === 'DELEGATED_CALLER') return APPROVAL_DENIALS.delegated
-    if (code === 'NO_PROVIDER' || code === 'CALLER_NOT_LIVE') return APPROVAL_DENIALS.policyNever
+    if (code === 'NO_PROVIDER' || code === 'CALLER_NOT_LIVE') return APPROVAL_DENIALS.unavailable
     if (code === 'ASK_ABORTED') return APPROVAL_DENIALS.cancelled
     return APPROVAL_DENIALS.failed
   }
@@ -305,10 +325,12 @@ export function installGate(ctx, deps) {
   /**
    * Shared bounded wait: links `baseSignals`, a self-owned timer and a cancel
    * sentinel; `run(signal)` performs the channel call. The timer wins over a
-   * concurrent abort so a budget expiry is reported as a timeout. Channel
-   * exceptions are rethrown to the caller, which owns the code mapping.
+   * concurrent abort so a budget expiry is reported as a timeout, with the copy
+   * chosen for the confirmed target family. Channel exceptions are rethrown to
+   * the caller, which owns the code mapping.
    */
-  async function runBoundedAsk(run, waitMs, baseSignals) {
+  async function runBoundedAsk(run, waitMs, baseSignals, timeoutReason) {
+    const timeoutText = timeoutReason ?? APPROVAL_DENIALS.timeoutOther
     const controller = new AbortController()
     const signal = AbortSignal.any([controller.signal, ...baseSignals.filter(Boolean)])
     let timedOut = false
@@ -324,11 +346,11 @@ export function installGate(ctx, deps) {
     })
     try {
       const result = await Promise.race([run(signal), cancelled])
-      if (timedOut) return { granted: false, reason: APPROVAL_DENIALS.timeout }
+      if (timedOut) return { granted: false, reason: timeoutText }
       if (result === CANCELLED) return { granted: false, reason: APPROVAL_DENIALS.cancelled }
       return result
     } catch (error) {
-      if (timedOut) return { granted: false, reason: APPROVAL_DENIALS.timeout }
+      if (timedOut) return { granted: false, reason: timeoutText }
       throw error
     } finally {
       clearTimeout(timer)
@@ -344,6 +366,7 @@ export function installGate(ctx, deps) {
     // The host card gets the same human single-paragraph copy as the question
     // channel; `reason` stays the audit/model-facing fixed block.
     const displayReason = displayReasonOf(confirmInfo)
+    const timeoutReason = timeoutReasonFor(confirmInfo?.ruleIds)
     try {
       const result = await runBoundedAsk(async (signal) => {
         const outcome = await approval.request({
@@ -360,7 +383,7 @@ export function installGate(ctx, deps) {
         if (outcome === 'unavailable') return { granted: false, reason: APPROVAL_DENIALS.unavailable }
         // Closed word list: an unknown outcome never reads as a grant.
         return { granted: false, reason: APPROVAL_DENIALS.failed }
-      }, waitMs, baseSignals)
+      }, waitMs, baseSignals, timeoutReason)
       return result.granted ? { ...result, channel: 'approval', policy: 'ask' } : result
     } catch {
       return { granted: false, reason: APPROVAL_DENIALS.failed }
@@ -375,6 +398,7 @@ export function installGate(ctx, deps) {
     const ruleIds = Array.isArray(confirmInfo?.ruleIds) ? confirmInfo.ruleIds : []
     const scopeText = typeof confirmInfo?.scopeText === 'string' ? confirmInfo.scopeText : ''
     const summary = confirmSummary(scopeText, ruleIds)
+    const timeoutReason = timeoutReasonFor(ruleIds)
     try {
       const result = await runBoundedAsk(async (signal) => {
         const answer = await userQuestions.ask({
@@ -402,7 +426,7 @@ export function installGate(ctx, deps) {
         if (selectedLabels(answer, id).includes(approveLabel)) return { granted: true }
         // Reject, empty or malformed answers are all a real refusal, never a grant.
         return { granted: false, reason: APPROVAL_DENIALS.rejected }
-      }, waitMs, baseSignals)
+      }, waitMs, baseSignals, timeoutReason)
       return result.granted ? { ...result, channel: 'question', policy: policyName } : result
     } catch (error) {
       return { granted: false, reason: questionFailureReason(error) }
@@ -422,13 +446,16 @@ export function installGate(ctx, deps) {
       return askViaApproval(execution, reason, waitMs, baseSignals, approval, confirmInfo)
     }
     // Policy "never" (or a missing approval seam): ask through the independent
-    // interactive question channel when enabled; otherwise refuse with the accurate
-    // "no answerer accepted" code (never the "user rejected" text).
+    // interactive question channel when enabled. The refusal code distinguishes
+    // an explicit setting from a missing answerer/agent.
     const userQuestions = optionalService('userQuestions')
     if (policy?.alwaysAsk === true && userQuestions && typeof userQuestions.ask === 'function' && execution.agent) {
       return askViaQuestions(execution, reason, waitMs, baseSignals, userQuestions, confirmInfo, policyName)
     }
-    return { granted: false, reason: APPROVAL_DENIALS.policyNever }
+    // An explicit/default-off setting is a configuration refusal; a missing answerer
+    // while asking is enabled is an environment limitation (no confirmation UI).
+    if (policy?.alwaysAsk !== true) return { granted: false, reason: APPROVAL_DENIALS.policyNever }
+    return { granted: false, reason: APPROVAL_DENIALS.unavailable }
   }
 
   /**
@@ -594,17 +621,17 @@ export function installGate(ctx, deps) {
       decision = { kind: 'deny', decision: fault('ANALYSIS_UNAVAILABLE', 'official syntax or target analysis failed; invocation refused. Check parser availability and valid syntax.') }
     }
     if (decision.kind !== 'allow') {
-      const denial = decision.decision ?? fault('ANALYSIS_UNAVAILABLE', 'analysis failed; invocation refused.')
+      const denial = renderFaultIfNeeded(decision.decision ?? fault('ANALYSIS_UNAVAILABLE', 'analysis failed; invocation refused.'))
       completed.set(execution, { kind: 'deny', reason: denial.reason })
       return { kind: 'deny', reason: denial.reason }
     }
     if (lifetime.signal.aborted) {
-      const denial = fault('ANALYSIS_DISPOSED', 'guardrails was unloaded during analysis.')
+      const denial = renderFaultIfNeeded(fault('ANALYSIS_DISPOSED', 'guardrails was unloaded during analysis.'))
       completed.set(execution, { kind: 'deny', reason: denial.reason })
       return { kind: 'deny', reason: denial.reason }
     }
     if (execution.signal?.aborted) {
-      const denial = fault('ANALYSIS_CANCELLED', 'invocation cancelled before dispatch.')
+      const denial = renderFaultIfNeeded(fault('ANALYSIS_CANCELLED', 'invocation cancelled before dispatch.'))
       completed.set(execution, { kind: 'deny', reason: denial.reason })
       return { kind: 'deny', reason: denial.reason }
     }
@@ -637,17 +664,17 @@ export function installGate(ctx, deps) {
     try {
       required = requiresAnalysis(ctx, execution)
     } catch {
-      return { reason: fault('ANALYSIS_UNAVAILABLE', 'front-door classification failed at the final guard; invocation refused.').reason }
+      return { reason: renderFaultIfNeeded(fault('ANALYSIS_UNAVAILABLE', 'front-door classification failed at the final guard; invocation refused.')).reason }
     }
     // Design skips carry no analyzed capability and pass untouched; a required
     // execution without a completed analysis is a bounded fault (an early skip
     // of a required analysis can never grant dispatch).
     if (!required) return undefined
     if (lifetime.signal.aborted) {
-      return { reason: fault('ANALYSIS_DISPOSED', 'guardrails was unloaded during analysis.').reason }
+      return { reason: renderFaultIfNeeded(fault('ANALYSIS_DISPOSED', 'guardrails was unloaded during analysis.')).reason }
     }
     if (execution.signal?.aborted) {
-      return { reason: fault('ANALYSIS_CANCELLED', 'invocation cancelled.').reason }
+      return { reason: renderFaultIfNeeded(fault('ANALYSIS_CANCELLED', 'invocation cancelled.')).reason }
     }
     // A completed decision is consumed exactly once: reading removes the
     // entry, so the same execution can never reuse an earlier verdict on a
@@ -655,10 +682,10 @@ export function installGate(ctx, deps) {
     const result = completed.get(execution)
     completed.delete(execution)
     if (!result) {
-      return { reason: fault('ANALYSIS_MISSING', 'guardrails has no completed analysis for this exact invocation; dispatch refused.').reason }
+      return { reason: renderFaultIfNeeded(fault('ANALYSIS_MISSING', 'guardrails has no completed analysis for this exact invocation; dispatch refused.')).reason }
     }
     if (result.kind === 'allow') return undefined
-    return { reason: result.reason ?? fault('APPROVAL_CANCELLED', 'no one-time authorization.').reason }
+    return { reason: result.reason ?? renderFaultIfNeeded(fault('APPROVAL_CANCELLED', 'no one-time authorization.')).reason }
   }))
 
   return { completed, lifetime }
@@ -709,22 +736,51 @@ export function displayReasonOf(confirmInfo) {
   }
 }
 
+const NOTICE_SCOPE_MAX = 240
+
+/** `approval`/`question` → the card that showed the prompt; anything else verbatim. */
+function noticeChannelLabel(channel) {
+  if (channel === 'approval') return 'approval-card'
+  if (channel === 'question') return 'question-card'
+  return typeof channel === 'string' && channel !== '' ? channel : 'unknown'
+}
+
+/** Human single-paragraph scope for the notice; omitted when empty or uncaptured. */
+function noticeScopeText(record, ruleIds) {
+  const raw = typeof record?.scope === 'string' ? record.scope : ''
+  if (raw === '' || raw === 'not captured') return ''
+  let summary = ''
+  try {
+    summary = confirmSummary(raw, ruleIds).en
+  } catch {
+    summary = ''
+  }
+  const text = typeof summary === 'string' ? summary.replace(/\s+/g, ' ').trim() : ''
+  if (text === '' || text === 'not captured') return ''
+  return text.length > NOTICE_SCOPE_MAX ? `${text.slice(0, NOTICE_SCOPE_MAX)}…` : text
+}
+
 /** The structured user message that carries the confirmation notice to the model. */
 function confirmationNotice(record) {
   const ruleIds = Array.isArray(record?.ruleIds) ? record.ruleIds : []
-  const text = [
-    '[Guardrails] Approval granted ONCE for this call.',
+  const lines = [
+    '[Guardrails] Approved once for this call; this approval is not reusable.',
     `rule=${ruleIds.join(',')}`,
-    `scope=${typeof record?.scope === 'string' ? record.scope : ''}`,
-    `channel=${record?.channel ?? 'unknown'}`,
-    `policy=${record?.policy ?? 'unknown'}`,
-    'reusable=no',
-  ].join('\n')
+    'confirmed_by=answerer',
+    `channel=${noticeChannelLabel(record?.channel)}`,
+  ]
+  const scope = noticeScopeText(record, ruleIds)
+  if (scope) lines.push(`scope=${scope}`)
+  lines.push('this_call_only=yes')
+  const text = lines.join('\n')
+  const summary = ruleIds.length > 0
+    ? `Guardrails confirmation (${ruleIds.join(',')})`
+    : 'Guardrails confirmation'
   return {
     id: randomUUID(),
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'dsh-guardrails', form: 'notice', summary: 'Guardrails confirmation' },
+    source: { kind: 'dsh-guardrails', form: 'notice', summary },
   }
 }
 
