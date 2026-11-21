@@ -2,6 +2,14 @@
 
 本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
+## 0.7.0
+
+- **拒绝/故障文案准确性**：`execution.check-failed` 的 `Trigger` 使用真实 stage/gap 码、不再输出 `not captured` 空行；`APPROVAL_POLICY_NEVER` 拆为「策略/开关禁止」与「无确认通道」；所有拒绝统一声明「未执行任何操作」；`APPROVAL_TIMEOUT` 按规则类别给下一步。
+- **确认卡**：`data.git.worktree`/`data.move.source` 专用句式；`notes` 必须渲染（未知项标「原文」）；中文卡不混未标注英文。
+- **通知**：人话首行 + `rule`/`confirmed_by`/`channel`/`scope`/`this_call_only` 中性字段，`scope` 为人话摘要并截断。
+- **遮罩**：标记带类别 `[REDACTED:<kind>]`（pem/bearer/jwt/provider）；纯字符串且无约束 schema 原位替换，其它类型/受约束 schema 含可遮罩内容时整体 withhold（安全优先，避免 `invalid output` 回显原文）。
+- **配置问题写日志告警**：`configIssues` 去重后写 `logger.warn`，消除静默降级。
+
 ## 0.6.4
 
 - **`ask` 通道审批卡补充 `displayReason` 中英摘要，与 `never` 通道统一**：两条通道都调用同一份 `confirmSummary` 生成用户可见文案，`reason` 保留英文原文供审计与模型。
