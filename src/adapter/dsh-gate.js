@@ -37,6 +37,7 @@
 
 import { DEFAULT_ASK_TIMEOUT_MS, ASK_TIMEOUT_MAX } from '../core/rules.js'
 import { CHECK_FAILED_RULE } from '../core/decision.js'
+import { randomUUID } from 'node:crypto'
 import {
   planExecution,
   requiresAnalysis,
@@ -84,6 +85,12 @@ export function installGate(ctx, deps) {
 
   /** Completed decisions for exactly this invocation; the final guard's only source. */
   const completed = new WeakMap()
+  /**
+   * Confirmed-grant records for the post-execute notice, keyed by the same
+   * execution object. `completed` cannot hold this because the final guard
+   * consumes and removes its entry before dispatch.
+   */
+  const confirmationRecords = new WeakMap()
   const lifetime = new AbortController()
   ctx.effect(() => () => {
     lifetime.abort(new Error('guardrails: plugin unloaded'))
@@ -265,6 +272,8 @@ export function installGate(ctx, deps) {
     } catch {
       policyName = 'never'
     }
+    // A missing seam has no approval channel at all; record it as "never".
+    if (!approval) policyName = 'never'
     return { approval, policyName }
   }
 
@@ -332,7 +341,7 @@ export function installGate(ctx, deps) {
       return { granted: false, reason: APPROVAL_DENIALS.unavailable }
     }
     try {
-      return await runBoundedAsk(async (signal) => {
+      const result = await runBoundedAsk(async (signal) => {
         const outcome = await approval.request({
           agent: execution.agent,
           toolName: execution.name,
@@ -347,25 +356,37 @@ export function installGate(ctx, deps) {
         // Closed word list: an unknown outcome never reads as a grant.
         return { granted: false, reason: APPROVAL_DENIALS.failed }
       }, waitMs, baseSignals)
+      return result.granted ? { ...result, channel: 'approval', policy: 'ask' } : result
     } catch {
       return { granted: false, reason: APPROVAL_DENIALS.failed }
     }
   }
 
   /** Independent interactive question channel: one approval-shaped question. */
-  async function askViaQuestions(execution, reason, waitMs, baseSignals, userQuestions) {
+  async function askViaQuestions(execution, reason, waitMs, baseSignals, userQuestions, confirmInfo, policyName) {
     const approveLabel = 'Allow once'
     const rejectLabel = 'Reject'
     const id = 'guardrails-confirm'
+    const ruleIds = Array.isArray(confirmInfo?.ruleIds) ? confirmInfo.ruleIds : []
+    const scopeText = typeof confirmInfo?.scopeText === 'string' ? confirmInfo.scopeText : ''
     try {
-      return await runBoundedAsk(async (signal) => {
+      const result = await runBoundedAsk(async (signal) => {
         const answer = await userQuestions.ask({
           questions: [{
             id,
             question: 'Allow this guarded operation once?',
             detail: reason,
             options: [{ label: approveLabel }, { label: rejectLabel }],
-            intent: { kind: 'approval', approve: approveLabel, reject: rejectLabel },
+            intent: {
+              kind: 'approval',
+              approve: approveLabel,
+              reject: rejectLabel,
+              display: {
+                question: { en: 'Allow this guarded operation once?', zh: '是否允许本次受保护操作？（仅本次）' },
+                detail: { en: reason, zh: chineseConfirmDetail(ruleIds, scopeText) },
+                approve: { en: approveLabel, zh: '允许一次' },
+              },
+            },
           }],
           agent: execution.agent,
           signal,
@@ -374,6 +395,7 @@ export function installGate(ctx, deps) {
         // Reject, empty or malformed answers are all a real refusal, never a grant.
         return { granted: false, reason: APPROVAL_DENIALS.rejected }
       }, waitMs, baseSignals)
+      return result.granted ? { ...result, channel: 'question', policy: policyName } : result
     } catch (error) {
       return { granted: false, reason: questionFailureReason(error) }
     }
@@ -385,7 +407,7 @@ export function installGate(ctx, deps) {
    * budget, closed "never grant on unknown" mapping and one-time semantics are
    * identical on both channels.
    */
-  async function askOnce(execution, reason, waitMs, baseSignals, policy) {
+  async function askOnce(execution, reason, waitMs, baseSignals, policy, confirmInfo) {
     const { approval, policyName } = readApprovalState(execution)
     // The official approval seam owns the decision whenever its policy allows asking.
     if (approval && policyName !== 'never') {
@@ -393,10 +415,10 @@ export function installGate(ctx, deps) {
     }
     // Policy "never" (or a missing approval seam): ask through the independent
     // interactive question channel when enabled; otherwise refuse with the accurate
-    // "nothing was shown" code (never the "user rejected" text).
+    // "no answerer accepted" code (never the "user rejected" text).
     const userQuestions = optionalService('userQuestions')
     if (policy?.alwaysAsk === true && userQuestions && typeof userQuestions.ask === 'function' && execution.agent) {
-      return askViaQuestions(execution, reason, waitMs, baseSignals, userQuestions)
+      return askViaQuestions(execution, reason, waitMs, baseSignals, userQuestions, confirmInfo, policyName)
     }
     return { granted: false, reason: APPROVAL_DENIALS.policyNever }
   }
@@ -460,10 +482,19 @@ export function installGate(ctx, deps) {
     // Confirmation: plugin-owned bounded ask, then the mandatory full revisit.
     const askReason = renderVerdict(verdict)
     if (askReason.kind === 'deny') return { kind: 'deny', decision: askReason }
+    const firstConfirm = { ruleIds: ruleIdsOf(verdict), scopeText: scopeTextOf(verdict, askReason.reason) }
     const budget = askBudget(policy)
     const startedAt = Date.now()
-    const grant = await askOnce(execution, askReason.reason, budget, [lifetime.signal, execution.signal], policy)
+    // Set when a grant is granted; only a final allow turns it into a post-execute
+    // confirmation record (a later deny must never leave a stale record behind).
+    let confirmedGrant = null
+    const finishAllow = () => {
+      if (confirmedGrant) confirmationRecords.set(execution, confirmedGrant)
+      return { kind: 'allow' }
+    }
+    const grant = await askOnce(execution, askReason.reason, budget, [lifetime.signal, execution.signal], policy, firstConfirm)
     if (!grant.granted) return { kind: 'deny', decision: renderVerdict({ ...verdict, kind: 'deny', reason: grant.reason }) }
+    confirmedGrant = { ruleIds: firstConfirm.ruleIds, scope: firstConfirm.scopeText, channel: grant.channel, policy: grant.policy }
     if (signal.aborted || lifetime.signal.aborted) {
       return { kind: 'deny', decision: fault('ANALYSIS_CANCELLED', 'invocation cancelled before dispatch.') }
     }
@@ -508,12 +539,12 @@ export function installGate(ctx, deps) {
       if (revisit.verdict.kind === 'deny') return { kind: 'deny', decision: renderVerdict(revisit.verdict) }
       if (analysisSemantics(previous.analysis) !== analysisSemantics(revisit.analysis)) return denyScopeChanged()
       if (scopeChanged(previous.verdict, revisit.verdict, previous.evidence, revisit.evidence)) return denyScopeChanged()
-      if (revisit.verdict.kind === 'allow') return { kind: 'allow' }
+      if (revisit.verdict.kind === 'allow') return finishAllow()
       // Still a confirmation: an already-granted identical scope proceeds; a
       // NEW requirement is re-asked strictly inside the remaining total wait,
       // and after that second grant the check runs once more above (round 2).
       if (ruleSignature(previous.verdict) === ruleSignature(revisit.verdict)) {
-        return { kind: 'allow' }
+        return finishAllow()
       }
       if (round === 2) {
         return { kind: 'deny', decision: fault('GUARD_REAPPROVAL_UNRESOLVED', 'a further changed confirmation appeared after the bounded re-approval; invocation refused. Re-issue a fresh invocation to confirm the current scope.') }
@@ -524,12 +555,14 @@ export function installGate(ctx, deps) {
       }
       const reAsk = renderVerdict(revisit.verdict)
       if (reAsk.kind === 'deny') return { kind: 'deny', decision: reAsk }
-      const reGrant = await askOnce(execution, reAsk.reason, remaining, [lifetime.signal, execution.signal], policy)
+      const reConfirm = { ruleIds: ruleIdsOf(revisit.verdict), scopeText: scopeTextOf(revisit.verdict, reAsk.reason) }
+      const reGrant = await askOnce(execution, reAsk.reason, remaining, [lifetime.signal, execution.signal], policy, reConfirm)
       if (!reGrant.granted) return { kind: 'deny', decision: renderVerdict({ ...revisit.verdict, kind: 'deny', reason: reGrant.reason }) }
+      confirmedGrant = { ruleIds: reConfirm.ruleIds, scope: reConfirm.scopeText, channel: reGrant.channel, policy: reGrant.policy }
       if (lifetime.signal.aborted || execution.signal?.aborted) return denyCancel()
       previous = revisit
     }
-    return { kind: 'allow' }
+    return finishAllow()
   }
 
   ctx.effect(() => ctx.on('tools/pre-execute', async (execution, next) => {
@@ -571,6 +604,26 @@ export function installGate(ctx, deps) {
     return next()
   }))
 
+  /**
+   * Post-execute structured notice: one human confirmation of a guarded call is
+   * surfaced to the model as an additional user message. Only an accepted result
+   * for an execution that actually carried a recorded confirmation gets the
+   * notice; an ordinary allow never does. A read removes the record so the same
+   * execution cannot inject the notice twice.
+   */
+  ctx.effect(() => ctx.on('tools/post-execute', async (execution, result, next) => {
+    const downstream = await next()
+    const record = confirmationRecords.get(execution)
+    if (!record) return downstream
+    confirmationRecords.delete(execution)
+    // Only a real, accepted dispatch gets the notice: a downstream block or an
+    // error result (for example a later policy denial) must not claim "allowed ONCE".
+    if (!downstream || downstream.kind !== 'accept' || result?.isError === true) return downstream
+    const notice = confirmationNotice(record)
+    const contexts = Array.isArray(downstream.additionalContexts) ? downstream.additionalContexts : []
+    return { ...downstream, additionalContexts: [notice, ...contexts] }
+  }))
+
   ctx.effect(() => ctx.tools.guard((execution) => {
     let required
     try {
@@ -607,6 +660,65 @@ export function installGate(ctx, deps) {
 function plainFaultDetail(code, reason) {
   const prefix = `${code}: `
   return typeof reason === 'string' && reason.startsWith(prefix) ? reason.slice(prefix.length) : reason
+}
+
+/** Confirmed rule ids of one verdict, primary first, de-duplicated. */
+function ruleIdsOf(verdict) {
+  const ids = Array.isArray(verdict?.ruleIds) ? verdict.ruleIds.map(String) : []
+  if (ids.length === 0 && typeof verdict?.ruleId === 'string' && verdict.ruleId) ids.push(verdict.ruleId)
+  return [...new Set(ids)]
+}
+
+/** Scope text for the question/notice: prefer an explicit non-empty string scope,
+ * falling back to the Scope line of the already-rendered fixed block. */
+function scopeTextOf(verdict, renderedReason) {
+  const scope = verdict?.scope
+  if (typeof scope === 'string' && scope.trim() !== '') return scope
+  return scopeTextFromReason(renderedReason)
+}
+
+/** The Scope line of an already-rendered fixed block, so the question shows the
+ * exact same scope text as the English CONFIRM block (fallback only). */
+function scopeTextFromReason(reason) {
+  if (typeof reason !== 'string') return ''
+  const match = /^Scope:[ \t]*(.*)$/m.exec(reason)
+  return match ? match[1].trim() : ''
+}
+
+/** Chinese structured summary for the question display (adapter-only presentation). */
+function chineseConfirmDetail(ruleIds, scopeText) {
+  const ids = Array.isArray(ruleIds) ? ruleIds.map(String) : []
+  const has = (prefix) => ids.some((id) => id.startsWith(prefix))
+  const note = has('data.delete.') ? '删除的数据量或范围超过单次放行阈值，需人工确认。'
+    : has('data.git.') ? '涉及 Git 工作区或历史，需人工确认。'
+      : has('credential.') ? '涉及受保护凭据文件的内容操作，需人工确认。'
+        : '该操作被判定为需要一次确认。'
+  return [
+    '[GUARDRAILS] 需要确认',
+    `规则：${ids.join(',')}`,
+    `范围：${typeof scopeText === 'string' ? scopeText : ''}`,
+    `说明：${note}`,
+    '仅本次调用放行一次；批准不适用于后续调用。',
+  ].join('\n')
+}
+
+/** The structured user message that carries the confirmation notice to the model. */
+function confirmationNotice(record) {
+  const ruleIds = Array.isArray(record?.ruleIds) ? record.ruleIds : []
+  const text = [
+    '[Guardrails] Approval granted ONCE for this call.',
+    `rule=${ruleIds.join(',')}`,
+    `scope=${typeof record?.scope === 'string' ? record.scope : ''}`,
+    `channel=${record?.channel ?? 'unknown'}`,
+    `policy=${record?.policy ?? 'unknown'}`,
+    'reusable=no',
+  ].join('\n')
+  return {
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'dsh-guardrails', form: 'notice', summary: 'Guardrails confirmation' },
+  }
 }
 
 /** Bounded, non-throwing message extraction for teardown logging. */

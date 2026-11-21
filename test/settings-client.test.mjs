@@ -79,12 +79,23 @@ test('settings owns bilingual dictionary and row slot resources for unload', () 
   const ctx = {
     effect(callback) { disposers.push(callback()) },
     locale: { register(ns, language, dictionary) { keys.push(Object.keys(dictionary).sort()); registrations.push(language); return () => registrations.pop() } },
-    slots: { inject(name, callback) { assert.equal(name, 'plugins.row.config'); disposers.push(callback()) }, register(options, render) {
-      assert.equal(options.key, 'dsh-guardrails#guardrails')
-      assert.equal(options.locale, 'guardrails-settings')
-      assert.equal(render({ view: 'page', form, t: String }).props.form, form)
-      return () => registrations.push('slot-disposed')
-    } },
+    slots: {
+      inject(name, callback) {
+        assert.ok(name === 'plugins.row.config' || name === 'conversation.composer', name)
+        disposers.push(callback())
+      },
+      register(options, render) {
+        assert.equal(options.locale, 'guardrails-settings')
+        if (options.name === 'plugins.row.config') {
+          assert.equal(options.key, 'dsh-guardrails#guardrails')
+          assert.equal(render({ view: 'page', form, t: String }).props.form, form)
+        } else {
+          assert.equal(options.name, 'conversation.composer')
+          assert.equal(options.priority, -1)
+        }
+        return () => registrations.push('slot-disposed')
+      },
+    },
   }
   plugin.apply(ctx)
   assert.deepEqual(keys[0], keys[1])

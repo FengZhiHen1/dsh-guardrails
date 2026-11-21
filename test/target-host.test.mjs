@@ -129,6 +129,13 @@ function guardOf(state) {
   return state.guards[0]
 }
 
+/** Post-execute listener extracted from the installed gate. */
+function postExecuteOf(state) {
+  const entry = state.listeners.find((listener) => listener.event === 'tools/post-execute')
+  assert.ok(entry, 'gate must register tools/post-execute')
+  return entry.listener
+}
+
 /** Default fake pipeline members; each test overrides what it observes.
  * All members are `this`-free closures: the gate destructures and calls them
  * unbound, exactly like the lead's entry wires the real injected functions. */
@@ -570,13 +577,13 @@ test('installGate validates every dependency and the analyzer object members', (
   assert.throws(() => installGate(fakeCtx().ctx, missingAnalyze), /analyzer\.analyze/)
 })
 
-test('gate registers pre-execute and guard as disposable effects and disposes the analyzer on unload', () => {
+test('gate registers pre-execute, post-execute and guard as disposable effects and disposes the analyzer on unload', () => {
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL })
   const deps = fakeDeps()
   installGate(ctx, deps)
-  assert.equal(state.listeners.length, 1)
+  assert.equal(state.listeners.length, 2)
   assert.equal(state.guards.length, 1)
-  assert.equal(state.effects.length, 3)
+  assert.equal(state.effects.length, 4)
   state.effects.forEach((disposer) => disposer())
   assert.equal(deps.analyzer.disposed, true)
 })
@@ -983,7 +990,12 @@ test('policy never + alwaysAsk asks once through the question channel and grants
   const approval = neverApproval()
   const userQuestions = questionService(id => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
-  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY })
+  // A realistic block: the adapter lifts the same Scope line into the Chinese summary.
+  const deps = fakeDeps({
+    verdict: CONFIRM,
+    policy: NEVER_POLICY,
+    renderDecision: verdict => `[GUARDRAILS] ${String(verdict.kind).toUpperCase()} ${verdict.ruleId}\nWhy:     x\nTrigger: y\nEffect:  z\nScope:   non-exempt entries: ./build\nNext:    n`,
+  })
   installGate(ctx, deps)
   const listener = preExecuteOf(state)
 
@@ -1004,12 +1016,124 @@ test('policy never + alwaysAsk asks once through the question channel and grants
   assert.equal(question.multiSelect, undefined)
   assert.equal(request.wait, undefined)
   assert.equal(request.agent, first.agent)
+  // Bilingual display for the shared approval card.
+  const display = question.intent.display
+  assert.deepEqual(display.question, { en: 'Allow this guarded operation once?', zh: '是否允许本次受保护操作？（仅本次）' })
+  assert.equal(display.detail.en, question.detail, 'the English detail is the rendered CONFIRM block')
+  assert.ok(typeof display.detail.zh === 'string' && display.detail.zh.length > 0)
+  assert.match(display.detail.zh, /规则：data\.delete\.bulk/)
+  assert.match(display.detail.zh, /范围：.*\.\/build/)
+  assert.deepEqual(display.approve, { en: 'Allow once', zh: '允许一次' })
 
   // The grant is one-time for that exact call: a new identical invocation re-asks.
   const second = execution({ name: 'bash', args: { command: 'rm -rf ./build' } })
   const again = await listener(second, async () => ({ kind: 'allow' }))
   assert.equal(again.kind, 'allow')
   assert.equal(askLog.length, 2, 'a fresh invocation asks again')
+})
+
+const SCOPED_RENDER = verdict => `[GUARDRAILS] ${String(verdict.kind).toUpperCase()} ${verdict.ruleId}\nWhy:     x\nTrigger: y\nEffect:  z\nScope:   non-exempt entries: ./build\nNext:    n`
+
+test('a confirmed question-channel allow injects one structured post-execute notice (consumed once)', async () => {
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }))
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY, renderDecision: SCOPED_RENDER })
+  installGate(ctx, deps)
+  const exec = execution({ name: 'bash', args: { command: 'rm -rf ./build' } })
+  const decision = await preExecuteOf(state)(exec, async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'allow')
+  const post = postExecuteOf(state)
+  let nextCalls = 0
+  const merged = await post(exec, { isError: false, content: [] }, async () => { nextCalls += 1; return { kind: 'accept' } })
+  assert.equal(nextCalls, 1, 'the downstream decision must be awaited first')
+  assert.ok(Array.isArray(merged.additionalContexts) && merged.additionalContexts.length === 1)
+  const notice = merged.additionalContexts[0]
+  assert.equal(notice.role, 'user')
+  assert.equal(notice.source.kind, 'dsh-guardrails')
+  assert.equal(notice.source.form, 'notice')
+  assert.equal(notice.source.summary, 'Guardrails confirmation')
+  assert.equal(typeof notice.id, 'string')
+  const text = notice.content[0].text
+  assert.match(text, /^\[Guardrails\] Approval granted ONCE for this call\./, 'neutral first line (no "Human" claim)')
+  for (const marker of ['rule=data.delete.bulk', 'channel=question', 'policy=never', 'reusable=no']) {
+    assert.ok(text.includes(marker), `notice must contain ${marker}: ${text}`)
+  }
+  // The scope is non-empty and carries the expected block scope.
+  assert.match(text, /scope=non-exempt entries/, `notice must carry the block scope: ${text}`)
+  assert.doesNotMatch(text, /scope=\s*(\n|$)/, 'scope must not be empty')
+  // The record is consumed: a second post-execute for the same exec injects nothing.
+  const againPost = await post(exec, { isError: false, content: [] }, async () => ({ kind: 'accept' }))
+  assert.equal(againPost.additionalContexts, undefined)
+})
+
+test('a confirmed approval-channel allow records channel=approval and policy=ask in the notice', async () => {
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval: approvalService(['allowed-once']) } })
+  const deps = fakeDeps({ verdict: CONFIRM, renderDecision: SCOPED_RENDER })
+  installGate(ctx, deps)
+  const exec = execution({ name: 'bash', args: { command: 'rm -rf ./build' } })
+  const decision = await preExecuteOf(state)(exec, async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'allow')
+  const merged = await postExecuteOf(state)(exec, { isError: false, content: [] }, async () => ({ kind: 'accept' }))
+  const text = merged.additionalContexts?.[0]?.content?.[0]?.text ?? ''
+  assert.ok(text.includes('channel=approval'), text)
+  assert.ok(text.includes('policy=ask'), text)
+})
+
+test('an explicit string verdict scope is used directly for the question detail', async () => {
+  const askLog = []
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }), askLog)
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({
+    verdict: { kind: 'confirm', ruleId: 'credential.file.read', scope: 'protected files: /a/.env' },
+    policy: NEVER_POLICY,
+    // No Scope line in the rendered block: the explicit string scope must win.
+    renderDecision: verdict => `[GUARDRAILS] CONFIRM ${verdict.ruleId}`,
+  })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'x' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'allow')
+  const display = askLog[0].questions[0].intent.display
+  assert.match(display.detail.zh, /范围：protected files: \/a\/\.env/)
+})
+
+test('a downstream block decision receives no confirmation notice', async () => {
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Allow once'] }] }))
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY, renderDecision: SCOPED_RENDER })
+  installGate(ctx, deps)
+  const exec = execution({ name: 'bash', args: { command: 'rm -rf ./build' } })
+  assert.equal((await preExecuteOf(state)(exec, async () => ({ kind: 'allow' }))).kind, 'allow')
+  const blocked = { kind: 'block', feedback: [{ type: 'text', text: 'blocked downstream' }] }
+  const merged = await postExecuteOf(state)(exec, { isError: false, content: [] }, async () => blocked)
+  assert.equal(merged, blocked, 'the block decision passes through unchanged')
+  assert.equal(merged.additionalContexts, undefined)
+})
+
+test('an ordinary allow without a confirmation injects no post-execute notice', async () => {
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL })
+  const deps = fakeDeps({ verdict: { kind: 'allow' } })
+  installGate(ctx, deps)
+  const exec = execution({ name: 'bash', args: { command: 'Get-Location' } })
+  const decision = await preExecuteOf(state)(exec, async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'allow')
+  const merged = await postExecuteOf(state)(exec, { isError: false, content: [] }, async () => ({ kind: 'accept' }))
+  assert.equal(merged.additionalContexts, undefined)
+})
+
+test('a denied confirmation never leaves a post-execute notice behind', async () => {
+  const approval = neverApproval()
+  const userQuestions = questionService(() => ({ answers: [{ id: 'guardrails-confirm', selected: ['Reject'] }] }))
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval, userQuestions } })
+  const deps = fakeDeps({ verdict: CONFIRM, policy: NEVER_POLICY, renderDecision: SCOPED_RENDER })
+  installGate(ctx, deps)
+  const exec = execution({ name: 'bash', args: { command: 'rm -rf ./build' } })
+  const decision = await preExecuteOf(state)(exec, async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  const merged = await postExecuteOf(state)(exec, { isError: true, content: [] }, async () => ({ kind: 'accept' }))
+  assert.equal(merged.additionalContexts, undefined)
 })
 
 test('policy never + alwaysAsk without a question provider refuses with APPROVAL_POLICY_NEVER', async () => {

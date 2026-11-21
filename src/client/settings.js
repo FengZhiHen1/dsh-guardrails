@@ -32,6 +32,7 @@ window.__ModuleLoader__.load({
         timeoutHint: '超时或取消后拒绝本次操作，迟到的批准不再生效。',
         loading: '正在读取配置…', unavailable: '当前无法读取此插件配置。请确认插件已启用并重新打开此页。',
         readOnly: '当前连接只允许查看配置。', save: '保存', saving: '保存中…',
+        approvalAllow: '允许一次', approvalReject: '拒绝',
         failed: '保存未成功，输入已保留。配置可能已在别处修改，请重新打开此页后核对并重试。',
         pathError: '请填写最多 1024 个绝对文件路径；不支持通配符，每个路径最长 32768 个字符。',
         timeoutError: '请输入大于 0 且不超过 3600 的秒数，精度最多为毫秒。',
@@ -52,6 +53,7 @@ window.__ModuleLoader__.load({
         timeoutHint: 'Timeout or cancellation refuses the operation; late approval cannot authorize it.',
         loading: 'Loading settings…', unavailable: 'Settings are unavailable. Confirm the plugin is enabled and reopen this page.',
         readOnly: 'This connection can only view settings.', save: 'Save', saving: 'Saving…',
+        approvalAllow: 'Allow once', approvalReject: 'Reject',
         failed: 'Save failed; your input is retained. Settings may have changed elsewhere. Reopen this page, review the values and retry.',
         pathError: 'Enter up to 1024 absolute file paths without wildcards, each at most 32768 characters.',
         timeoutError: 'Enter seconds greater than 0 and at most 3600, with at most millisecond precision.',
@@ -213,13 +215,92 @@ window.__ModuleLoader__.load({
           outcome === 'failed' ? h('p', { role: 'status', className: 'gr-failed' }, t('failed')) : null,
           h(SaveButton, { type: 'submit', disabled: locked || !dirty || Boolean(parsed.error) }, t(outcome === 'saving' ? 'saving' : 'save'))))
     }
+    // Guardrails asks its own one-shot question; only that approval-shaped request
+    // becomes the shared decision card, and every other interaction keeps its renderer.
+    function selectGuardrailsApproval(pendingInteraction) {
+      if (pendingInteraction?.kind !== 'question' || pendingInteraction.questions?.length !== 1) return null
+      const item = pendingInteraction.questions[0]
+      if (item?.id !== 'guardrails-confirm' || item.intent?.kind !== 'approval') return null
+      return { pending: pendingInteraction, item, intent: item.intent }
+    }
+    // Native-looking fallback only for a client without the shared factory; it copies the
+    // card geometry from tokens and never leaves the pending question unrendered.
+    const approvalCss = `
+.gr-approval{box-sizing:border-box;width:100%;min-width:0;font:inherit;color:var(--dsw-alias-label-primary)}
+.gr-approval-card{display:flex;flex-direction:column;gap:8px;padding:12px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3)}
+.gr-approval-title{margin:0;font-size:14px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
+.gr-approval-description{margin:0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.gr-approval-actions{display:flex;justify-content:flex-end;gap:8px}
+.gr-approval-actions button{appearance:none;font:inherit;font-size:13px;line-height:1.5;padding:5px 14px;border-radius:var(--dsw-radius-md);cursor:pointer}
+.gr-approval-reject{border:.5px solid var(--dsw-alias-border-l4);background:transparent;color:var(--dsw-alias-label-primary)}
+.gr-approval-allow{border:1px solid transparent;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}
+.gr-approval-actions button:disabled{opacity:.4;cursor:default}
+.gr-approval-actions button:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+`
+    function GuardrailsApproval(props) {
+      const { matched, resolveText, renderFactorySlot, t } = props
+      // The selector guarantees the shape; the values stay defensive because a stale
+      // served question may omit display copy or the answer channel.
+      const { pending, item, intent } = matched
+      // A closed channel rejects the answer; the card is already settled then, so the
+      // expected refusal must not surface as an unhandled rejection.
+      const answer = label => {
+        try {
+          const settled = pending.answer({ answers: [{ id: item.id, selected: [label] }] })
+          if (settled && typeof settled.catch === 'function') settled.catch(() => {})
+        } catch (error) {
+          // The pending question left the registry before this click; nothing to answer.
+        }
+      }
+      const copy = (text, fallback) => typeof resolveText === 'function' ? resolveText(text) : fallback
+      const title = intent.display ? copy(intent.display.question, item.question) : item.question
+      const description = item.detail === undefined ? undefined : (intent.display?.detail ? copy(intent.display.detail, item.detail) : item.detail)
+      const allowLabel = intent.display?.approve ? copy(intent.display.approve, intent.approve) : intent.approve
+      const canAnswer = () => {
+        if (typeof pending.snapshot !== 'function') return false
+        const snapshot = pending.snapshot()
+        return snapshot?.channel !== 'none' && !snapshot?.closed
+      }
+      const label = (key, fallback) => {
+        const text = typeof t === 'function' ? t(key) : undefined
+        return text ?? fallback
+      }
+      const disabled = !canAnswer()
+      // The framework always injects the factory, so its own miss renders this card as a
+      // fallback; a client without the factory renders it directly. Never a blank slot.
+      const renderMinimalCard = () => h('div', { className: 'gr-approval', 'data-approval-key': pending.key },
+        h('style', null, approvalCss),
+        h('div', { className: 'gr-approval-card' },
+          h('p', { className: 'gr-approval-title' }, title),
+          description === undefined ? null : h('p', { className: 'gr-approval-description' }, description),
+          h('div', { className: 'gr-approval-actions' },
+            h('button', { type: 'button', className: 'gr-approval-reject', disabled, onClick: () => answer(intent.reject) }, label('approvalReject', intent.reject)),
+            h('button', { type: 'button', className: 'gr-approval-allow', disabled, onClick: () => answer(intent.approve) }, label('approvalAllow', allowLabel)))))
+      if (typeof renderFactorySlot === 'function') {
+        return renderFactorySlot('conversation.approval.card', {
+          requestKey: pending.key,
+          title,
+          ...(description === undefined ? {} : { description }),
+          allowLabel,
+          canAnswer,
+          onAllow: () => answer(intent.approve),
+          onReject: () => answer(intent.reject),
+        }, { fallback: renderMinimalCard() })
+      }
+      return renderMinimalCard()
+    }
     return {
-      inject: ['slots', 'locale'], toDraft, parseDraft,
+      inject: ['slots', 'locale'], toDraft, parseDraft, selectGuardrailsApproval,
       apply(ctx) {
         for (const [language, dictionary] of Object.entries(dictionaries)) ctx.effect(() => ctx.locale.register('guardrails-settings', language, dictionary))
         ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
           name: 'plugins.row.config', key: 'dsh-guardrails#guardrails', locale: 'guardrails-settings',
         }, props => props.view === 'summary' ? props.t('summary') : h(Editor, { form: props.form, t: props.t })))
+        ctx.slots.inject('conversation.composer', () => ctx.slots.register({
+          name: 'conversation.composer', priority: -1, locale: 'guardrails-settings',
+          select: ({ pendingInteraction }) => selectGuardrailsApproval(pendingInteraction),
+          inject: () => ({ resolveText: text => ctx.locale.resolveText(text) }),
+        }, GuardrailsApproval))
       },
     }
   },

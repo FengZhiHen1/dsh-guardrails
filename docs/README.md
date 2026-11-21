@@ -37,7 +37,7 @@
 
 ## 需求 ID 含义变更说明
 
-- 现行需求 ID 是 `R-01…R-21`，含义以[需求](需求.md)「功能需求」节为准。
+- 现行需求 ID 是 `R-01…R-22`，含义以[需求](需求.md)「功能需求」节为准。
 - 历史 DSR 中的同名 ID 是**当时旧义**：DSR-006 与 DSR-009 的 `R-03` 指配置 schema、`R-07` 指破坏性子族；DSR-012 的 `R-15` 指命令文本分析的词法语义。
 - 现行同名 ID 的含义不同：`R-03` 是灾难身份，`R-07` 是删除分档，`R-15` 是 git 分级。
 - 读历史决策时按上下文理解旧义，不得据旧引用推断现行需求；冲突时以需求、规则模型与「历史决策前向指针」节为准。历史 DSR 原文不改。
@@ -67,5 +67,6 @@
 | [DSR-032](decisions/DSR-032-过度防御修正与隧道控制流长尾的灾难防御.md) | 过度防御修正与隧道、控制流、云长尾的灾难防御 | `git restore --staged` 与含 `.git` 目录删除的误伤修正、`nc`/`socat`/`ssh -R`/`sftp -b`、`parted` 交互、`zip -d`/`tar --delete`/`7z d`、`cmd for/if/%VAR%`、云与数据仓库长尾 |
 | [DSR-033](decisions/DSR-033-完整Git仓库删除改为审批.md) | 完整 Git 仓库删除改为审批（ask） | `.git` 主体、bare 仓库、含 `.git` 的树改为确认；worktree（`.git` 文件指针）不触发；`catastrophic.git-metadata` 保留但不再产生 |
 | [DSR-034](decisions/DSR-034-插件自有确认通道与never策略回退.md) | 插件自有确认通道与 `never` 策略回退 | 新增 `alwaysAsk`；`never`/缺审批 seam 时经问答 seam 弹问答卡；新增 `APPROVAL_POLICY_NEVER`、`APPROVAL_DELEGATED`，`APPROVAL_REJECTED` 仅表示真实拒绝 |
+| [DSR-035](decisions/DSR-035-确认卡外观与模型可见确认记录.md) | 确认卡外观与模型可见确认记录 | 客户端半区复用 `conversation.approval.card` 渲染标准审批卡；`intent.display` 中英；`additionalContexts` 注入一次性确认记录（`rule`/`scope`/`channel`/`policy`/`reusable=no`） |
 
 其余历史 DSR 按当时语境阅读。DSR-010 与 DSR-012 引用的历史 Shell 章节可通过本页「历史章节索引」定位现行语法角色与数据位置。

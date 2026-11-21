@@ -253,19 +253,38 @@ test('alwaysAsk: a session approval-policy override to never asks through the qu
   session.append('approval/policy', { policy: 'never' })
   const agent = { session, ctx }
 
-  const first = await harness.runTool(ctx, agent, 'read', { file_path: marked })
+  const runRead = id => ctx.tools.execute({
+    signal: new AbortController().signal,
+    agent,
+    calls: [harness.toolCall('read', { file_path: marked }, id)],
+  })
+
+  const firstResponse = await runRead('read-1')
+  const first = firstResponse.results[0].result
   assert.equal(first.isError, false, first.error?.message)
   assert.equal(counter.calls, 1, 'the granted protected read dispatched its body once')
   assert.equal(asks.length, 1, 'exactly one interactive question was asked')
   assert.equal(asks[0].questions[0].intent.kind, 'approval')
   assert.ok(!session.snapshotEvents().some(event => event.type === 'approval/asked'),
     'the overridden never policy bypasses the approval audit seam')
+  // The real post-execute pipeline carries the structured confirmation notice.
+  const notice = (firstResponse.additionalContexts ?? []).find(message => message?.source?.kind === 'dsh-guardrails')
+  assert.ok(notice, 'the confirmation notice must ride on the batch additionalContexts')
+  const noticeText = notice.content[0].text
+  for (const marker of ['rule=', 'channel=question', 'policy=never', 'reusable=no']) {
+    assert.ok(noticeText.includes(marker), `notice must contain ${marker}: ${noticeText}`)
+  }
+  assert.match(noticeText, /scope=protected files/, `notice must carry the protected-file scope: ${noticeText}`)
+  assert.match(noticeText, /^\[Guardrails\] Approval granted ONCE for this call\./, 'neutral first line')
 
   // One-time authorization: a second identical invocation asks again and grants again.
-  const second = await harness.runTool(ctx, agent, 'read', { file_path: marked })
+  const secondResponse = await runRead('read-2')
+  const second = secondResponse.results[0].result
   assert.equal(second.isError, false, second.error?.message)
   assert.equal(counter.calls, 2, 'the second granted read dispatched its body')
   assert.equal(asks.length, 2, 'a fresh invocation asks again')
+  assert.ok((secondResponse.additionalContexts ?? []).some(message => message?.source?.kind === 'dsh-guardrails'),
+    'the second confirmation also produced a notice')
 })
 
 test('GT-12: a registered tool outside the deletion analysis keeps the DSH permission flow', { skip: gateSkip }, async t => {
