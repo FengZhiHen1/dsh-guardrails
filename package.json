@@ -1,6 +1,6 @@
 {
   "name": "dsh-guardrails",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Execution and file safeguards, sensitive-file approvals and credential masking for DSH",
   "icon": "./icon.svg",
   "license": "MIT",
