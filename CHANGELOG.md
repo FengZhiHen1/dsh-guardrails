@@ -2,15 +2,20 @@
 
 本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
+## 0.6.2
+
+- **确认卡说明改为单段人话摘要，长列表截断计数**：共享卡说明区不渲染换行/Markdown，说明改为分号分隔的单段摘要（目标/涉及目录/另将销毁/标记），长列表截断为「等共 N 项」；解析失败回退原始范围文本。
+
+## 0.6.1
+
+- **确认卡改为标准审批卡外观并按中英切换**：Web 端复用平台共享审批卡工厂（标题、说明、「拒绝」「允许一次」），问题请求带 `intent.display` 中英文案，非中英界面回退英文标题/说明与英文允许标签、拒绝等固定操作按客户端语言包本地化；共享卡工厂缺失时经 `renderFactorySlot` 的 `fallback` 渲染最小卡片。见 [DSR-035](docs/decisions/DSR-035-确认卡外观与模型可见确认记录.md)。
+- **人工确认放行后向模型注入结构化确认记录**：经 `tools/post-execute` 的 `additionalContexts` 附一条 `dsh-guardrails` notice（`rule`/`scope`/`channel`/`policy`/`reusable=no`）；规则直接放行与下游 block 不注入，拒绝侧不变。
+
 ## 0.6.0
 
 - **新增配置项 `alwaysAsk`**（默认 `true`，可热改）：会话审批策略为 `never` 或审批 seam 缺失时，插件经官方问答通道弹出一次通用单问题问答确认；设为 `false` 时退回自动拒绝。
 - **确认通道回退与两个新拒绝码**：通道优先级为「审批 seam 存在且有效策略 `ask` → 官方审批」「策略为 `never` 或审批 seam 缺失，且 `alwaysAsk` 开启 → 问答通道」「其余拒绝；审批 seam 存在但无应答方直接 `APPROVAL_UNAVAILABLE`，不回退问答」；新增 `APPROVAL_POLICY_NEVER`（策略为 `never` 且没有交互应答方接受该确认）与 `APPROVAL_DELEGATED`（委派子代理会话无法询问用户）。见 [DSR-034](docs/decisions/DSR-034-插件自有确认通道与never策略回退.md)。
 - **误归因修正**：`APPROVAL_REJECTED` 现在只在真的有人拒绝时出现；策略拒绝与「无法询问用户」不再被表述为用户拒绝。
-## 0.6.1
-
-- **确认卡改为标准审批卡外观并按中英切换**：Web 端复用平台共享审批卡工厂（标题、说明、「拒绝」「允许一次」），问题请求带 `intent.display` 中英文案，非中英界面回退英文标题/说明与英文允许标签、拒绝等固定操作按客户端语言包本地化；共享卡工厂缺失时经 `renderFactorySlot` 的 `fallback` 渲染最小卡片。见 [DSR-035](docs/decisions/DSR-035-确认卡外观与模型可见确认记录.md)。
-- **人工确认放行后向模型注入结构化确认记录**：经 `tools/post-execute` 的 `additionalContexts` 附一条 `dsh-guardrails` notice（`rule`/`scope`/`channel`/`policy`/`reusable=no`）；规则直接放行与下游 block 不注入，拒绝侧不变。
 
 ## 0.5.1
 
