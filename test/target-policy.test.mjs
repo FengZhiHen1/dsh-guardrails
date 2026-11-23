@@ -765,6 +765,35 @@ test('renderDecision: deny block drops an empty scope line instead of "not captu
   assert.doesNotMatch(text, /^Scope:/m)
 })
 
+test('an unknown internal fault points only at reporting it to the user', () => {
+  const fallback = decide({ ...CLEAN, analysisStatus: 'fault', gaps: [{ kind: 'no-analyzer' }] }, {})
+  assert.match(renderDecision(fallback),
+    /Next:    Nothing was executed\. This is an internal guard failure with no action available to you; report it to the user with this rule id\./)
+})
+
+test('the recheck/disposed/missing stages each carry their specific alternative', () => {
+  const cases = [
+    ['GUARD_RECHECK_FAILED', /split the operation into explicit literal targets so the re-check can enumerate them\./],
+    ['ANALYSIS_DISPOSED', /Retry in a new turn \(the guard reloads automatically\); report it if it keeps happening\./],
+    ['ANALYSIS_MISSING', /Re-issue the call unchanged; if it repeats, report it with this rule id \(the guard lost its check state\)\./],
+  ]
+  for (const [stage, pattern] of cases) {
+    const text = renderDecision({
+      kind: 'deny',
+      ruleId: CHECK_FAILED_RULE,
+      reason: `execution.check-failed (stage ${stage}): x`,
+      trigger: `check failure: ${stage}`,
+    })
+    assert.match(text, pattern, stage)
+  }
+})
+
+test('credential.file.read next says the approval only applies if confirmed', () => {
+  const decision = decide({ ...CLEAN, protectedHits: [{ path: '/a/.env', action: 'read-content' }] }, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.match(renderDecision(decision), /if confirmed, approval applies only to this call\./)
+})
+
 test('a fault names the real gap code instead of a crash/protocol guess (N4/R8)', () => {
   const named = decide({ ...CLEAN, analysisStatus: 'fault', gaps: [{ code: 'GUARD_PATCH_PARSE_FAILED' }] }, {})
   const namedText = renderDecision(named)
@@ -798,6 +827,7 @@ test('catastrophic.git-history offers concrete tag/branch alternatives', () => {
     operations: [{ action: 'git-history-destroy', target: { kind: 'unknown', reason: 'x', knownScope: [] }, preview: false }],
   }, {})
   const text = renderDecision(decision)
+  assert.match(text, /git restore <path> or git checkout -- <path>/)
   assert.match(text, /git tag -d <name>/)
   assert.match(text, /refs\/tags\//)
   assert.match(text, /Deleting a branch is also refused here; do not attempt it\./)
@@ -827,7 +857,7 @@ test('every deny block declares "Nothing was executed" exactly once', () => {
 
   const checkFailed = decide({ ...CLEAN, analysisStatus: 'fault' }, {})
   const checkText = renderDecision(checkFailed)
-  assert.match(checkText, /Next:    Nothing was executed\. Retry with a clearer/)
+  assert.match(checkText, /Next:    Nothing was executed\. This is an internal guard failure with no action available to you/)
   assert.equal((checkText.match(/Nothing was executed\./g) ?? []).length, 1)
 })
 

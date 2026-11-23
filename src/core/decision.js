@@ -157,7 +157,7 @@ const RULE_META = {
   },
   'catastrophic.git-history': {
     effect: 'Stops Git history destruction.',
-    next: 'Do not rewrite or destroy Git history. To remove a tag: `git tag -d <name>` locally, or `git push origin --delete refs/tags/<name>` remotely. Deleting a branch is also refused here; do not attempt it.',
+    next: 'Do not rewrite or destroy Git history. To discard local changes, restore explicit paths (git restore <path> or git checkout -- <path>) instead of reset --hard or filter-branch. To remove a tag: git tag -d <name> locally, or git push origin --delete refs/tags/<name> remotely. Deleting a branch is also refused here; do not attempt it.',
   },
   'data.delete.ordinary': {
     effect: 'Verified the non-exempt deletion set is enumerable and within the 20-entry allow threshold.',
@@ -189,7 +189,7 @@ const RULE_META = {
   },
   'credential.file.read': {
     effect: 'Requires a one-time, time-limited confirmation before protected file content is read, exported or copied.',
-    next: 'Use runtime credential injection or a check that reports only non-secret status; approval applies only to this call.',
+    next: 'Use runtime credential injection or a check that reports only non-secret status; if confirmed, approval applies only to this call.',
   },
   'credential.file.mutate': {
     effect: 'Requires a one-time, time-limited confirmation before a protected file is written, cleared, deleted or moved.',
@@ -209,7 +209,7 @@ const RULE_META = {
   },
   'execution.check-failed': {
     effect: 'A required check did not finish, so the call cannot be proven safe.',
-    next: 'Retry with a clearer, fully literal command; report the failure if it persists.',
+    next: 'This is an internal guard failure with no action available to you; report it to the user with this rule id.',
   },
 }
 const GENERIC_META = {
@@ -228,7 +228,7 @@ const STAGE_META = {
   },
   GUARD_RECHECK_FAILED: {
     effect: 'The post-confirmation re-check failed, so the call was not dispatched.',
-    next: 'Nothing was executed. Retry once; report it if it repeats.',
+    next: 'Nothing was executed. Retry once; if it repeats, split the operation into explicit literal targets so the re-check can enumerate them.',
   },
   GUARD_REAPPROVAL_UNRESOLVED: {
     effect: 'The scope changed again after a second confirmation, so the call was not dispatched.',
@@ -236,7 +236,7 @@ const STAGE_META = {
   },
   ANALYSIS_UNAVAILABLE: {
     effect: 'The safety analysis could not read this call (unsupported or unparsable command or target).',
-    next: 'Nothing was executed. Retry with a literal command; report it if it persists.',
+    next: 'Nothing was executed. Retry with a fully literal, supported form for this tool (a parseable patch, or an explicit absolute target); report it if it persists.',
   },
   GUARD_INVALID_SHELL_INPUT: {
     effect: 'The tool argument carrying command text was missing or not a string, so the call was not dispatched.',
@@ -260,11 +260,23 @@ const STAGE_META = {
   },
   ANALYSIS_DISPOSED: {
     effect: 'Guardrails was unloaded while this call was being checked.',
-    next: 'Nothing was executed. Retry after the plugin is reloaded; report it if it repeats.',
+    next: 'Nothing was executed. Retry in a new turn (the guard reloads automatically); report it if it keeps happening.',
   },
   ANALYSIS_MISSING: {
     effect: 'No completed safety check existed for this exact call, so it was not dispatched.',
-    next: 'Nothing was executed. Re-issue the call; report it if it repeats.',
+    next: 'Nothing was executed. Re-issue the call unchanged; if it repeats, report it with this rule id (the guard lost its check state).',
+  },
+  GUARD_DECISION_INVALID: {
+    effect: 'An internal guard invariant failed (the policy decision was not a valid verdict), so the call was not dispatched.',
+    next: 'Nothing was executed. This is an internal guard failure with no action available to you; report it to the user with this rule id.',
+  },
+  GUARD_RENDER_FAILED: {
+    effect: 'An internal guard invariant failed (the decision could not be rendered), so the call was not dispatched.',
+    next: 'Nothing was executed. This is an internal guard failure with no action available to you; report it to the user with this rule id.',
+  },
+  GUARD_CONFIRM_UNSCOPED: {
+    effect: 'An internal guard invariant failed (a confirmation arrived without a concrete scope), so the call was not dispatched.',
+    next: 'Nothing was executed. This is an internal guard failure with no action available to you; report it to the user with this rule id.',
   },
 }
 
@@ -1265,9 +1277,21 @@ export function renderDecision(decision) {
   if (decision.kind === 'allow') return null
   if (decision.kind !== 'deny' && decision.kind !== 'confirm') return null
   const ruleId = typeof decision.ruleId === 'string' && decision.ruleId ? decision.ruleId : CHECK_FAILED_RULE
-  // A gate stage marker `(stage CODE)` in the reason overrides the catalog effect/next.
+  // A gate stage marker `(stage CODE)` in the reason overrides the catalog effect/next;
+  // a check-failed decision carries its code only in `trigger: …; codes: X,Y`, so the
+  // first known stage code there also selects STAGE_META.
+  let stage
   const stageMatch = typeof decision.reason === 'string' ? /\(stage ([A-Z0-9_]+)\)/.exec(decision.reason) : null
-  const stage = stageMatch && STAGE_META[stageMatch[1]] ? stageMatch[1] : undefined
+  if (stageMatch && STAGE_META[stageMatch[1]]) {
+    stage = stageMatch[1]
+  } else if (typeof decision.trigger === 'string') {
+    const codesMatch = /codes:\s*([A-Za-z0-9_]+(?:\s*,\s*[A-Za-z0-9_]+)*)/.exec(decision.trigger)
+    if (codesMatch) {
+      for (const code of codesMatch[1].split(',').map((value) => value.trim())) {
+        if (STAGE_META[code]) { stage = code; break }
+      }
+    }
+  }
   const meta = stage ? STAGE_META[stage] : (RULE_META[ruleId] ?? GENERIC_META)
   const header = `[GUARDRAILS] ${decision.kind === 'deny' ? 'DENY' : 'CONFIRM'} ${ruleId} (${categoryOf(ruleId)})`
   const why = clamp(redact(decision.reason) || 'The invocation requires a guard decision.', 320)

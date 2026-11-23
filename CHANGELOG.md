@@ -9,6 +9,7 @@
 ### 输出面与文案
 
 - **保守拒绝补替代路径**：`catastrophic.git-history`/`git push --delete` 指向 `git tag -d`/`refs/tags/*`；`GUARD_INVALID_SHELL_INPUT` 改单字符串输入或文件原文；`GUARD_WORKDIR_UNRESOLVED` 改绝对路径；`APPROVAL_TIMEOUT`（credential）改用户粘贴脱敏片段或凭据注入；`credential.file.mutate` 请用户手工修改；`APPROVAL_POLICY_NEVER`/`UNAVAILABLE`/`DELEGATED` 启用提示/换会话/回父会话；`data.delete.dynamic` 改字面可枚举路径。
+- **内部故障与审批类拒绝补归因/替代**：`execution.check-failed`/`GUARD_DECISION_INVALID`/`GUARD_RENDER_FAILED`/`GUARD_CONFIRM_UNSCOPED` 说明内部守卫失败、无可执行动作并要求报告 rule id；`GUARD_PATCH_PARSE_FAILED`/`GUARD_TARGET_BASE_UNKNOWN` 提供可解析补丁或绝对基准路径（trigger `codes:` 命中 STAGE 文案）；`ANALYSIS_UNAVAILABLE`/`GUARD_RECHECK_FAILED`/`ANALYSIS_DISPOSED`/`ANALYSIS_MISSING` 给出各自重试或字面化路径；`APPROVAL_REJECTED`/`APPROVAL_CANCELLED`/`APPROVAL_FAILED` 给出重试或替代路径。
 
 ### 遮罩与安全
 

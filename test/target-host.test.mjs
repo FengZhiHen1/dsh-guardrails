@@ -735,6 +735,25 @@ test('a patch-parse fault carries the real gap code in its trigger', async () =>
   assert.match(decision.reason, /Trigger: check failure: GUARD_PATCH_PARSE_FAILED/)
   assert.match(decision.reason, /codes: GUARD_PATCH_PARSE_FAILED/)
   assert.doesNotMatch(decision.reason, /crash, protocol damage/)
+  // The trigger code now selects STAGE_META, so the concrete patch alternative is shown.
+  assert.match(decision.reason, /Next:    Nothing was executed\. Provide a parseable patch or an absolute base path\./)
+  assert.doesNotMatch(decision.reason, /Retry with a clearer, fully literal command/)
+})
+
+test('internal invariant faults all tell the user to report the rule id', async () => {
+  const { renderDecision } = await import('../src/core/decision.js')
+  for (const stage of ['GUARD_DECISION_INVALID', 'GUARD_RENDER_FAILED', 'GUARD_CONFIRM_UNSCOPED']) {
+    const text = renderDecision({
+      kind: 'deny',
+      ruleId: 'execution.check-failed',
+      reason: `execution.check-failed (stage ${stage}): x`,
+      trigger: `check failure: ${stage}`,
+    })
+    assert.match(text, /^\[GUARDRAILS\] DENY execution\.check-failed/, stage)
+    assert.match(text,
+      /Next:    Nothing was executed\. This is an internal guard failure with no action available to you; report it to the user with this rule id\./,
+      stage)
+  }
 })
 
 test('confirm with an unscoped decision is refused without asking the user', async () => {
@@ -1568,8 +1587,22 @@ test('policy ask + approval seam rejected stays APPROVAL_REJECTED and never asks
   assert.equal(decision.kind, 'deny')
   assert.match(decision.reason, /APPROVAL_REJECTED/)
   assert.match(decision.reason, /The user rejected/)
+  assert.match(decision.reason, /ask the user which alternative they prefer \(a narrower scope, or a manual run\)/)
   assert.equal(approval.calls, 1)
   assert.equal(askLog.length, 0)
+})
+
+test('cancelled and failed denials each carry an actionable alternative', async () => {
+  for (const [outcome, pattern] of [
+    ['cancelled', /Re-issue it when it is still needed/],
+    ['mysterious', /run the operation manually or ask the user to confirm from another session/],
+  ]) {
+    const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval: approvalService([outcome]) } })
+    installGate(ctx, fakeDeps({ verdict: CONFIRM }))
+    const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm -rf ./build' } }), async () => ({ kind: 'allow' }))
+    assert.equal(decision.kind, 'deny', outcome)
+    assert.match(decision.reason, pattern, outcome)
+  }
 })
 
 test('question channel DELEGATED_CALLER maps to APPROVAL_DELEGATED', async () => {
