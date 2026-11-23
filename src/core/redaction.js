@@ -79,25 +79,64 @@ export function redactText(text) {
   return { text: output, changed: output !== text, kinds: [...kinds] }
 }
 
-/** Replace text blocks while preserving other blocks and fields.
+/** Replace recognized credentials in content blocks while preserving other fields.
+ * Every block with a string `text` (text, reasoning, merge-extensible kinds) is
+ * masked, as are tool names, call `arguments`, and attachment names. Other fields
+ * are never rewritten; the adapter withholds a projection it cannot prove clean.
  * @throws {TypeError} If input is not an array of content blocks.
  */
 export function redactContent(content) {
   if (!Array.isArray(content)) throw new TypeError('redactContent requires content blocks')
   let changed = false
   const blocks = content.map(block => {
-    if (block?.type !== 'text' || typeof block.text !== 'string') return block
-    const redacted = redactText(block.text)
-    if (!redacted.changed) return block
-    changed = true
-    return { ...block, text: redacted.text }
+    if (!block || typeof block !== 'object') return block
+    let next = block
+    if (typeof block.text === 'string') {
+      const redacted = redactText(block.text)
+      if (redacted.changed) {
+        next = { ...next, text: redacted.text }
+        changed = true
+      }
+    }
+    if (typeof block.arguments === 'string') {
+      const redacted = redactText(block.arguments)
+      if (redacted.changed) {
+        next = { ...next, arguments: redacted.text }
+        changed = true
+      }
+    }
+    if (typeof block.name === 'string') {
+      const redacted = redactText(block.name)
+      if (redacted.changed) {
+        next = { ...next, name: redacted.text }
+        changed = true
+      }
+    }
+    if (typeof block.toolName === 'string') {
+      const redacted = redactText(block.toolName)
+      if (redacted.changed) {
+        next = { ...next, toolName: redacted.text }
+        changed = true
+      }
+    }
+    if (typeof block.attachment?.name === 'string') {
+      const redacted = redactText(block.attachment.name)
+      if (redacted.changed) {
+        next = { ...next, attachment: { ...next.attachment, name: redacted.text } }
+        changed = true
+      }
+    }
+    return next
   })
   return changed ? blocks : content
 }
 
-/** Deny credential literals used in an execution or transmission command AST. */
+/** Internal predicate: whether an execution command inlines a recognizable credential.
+ * Callers only test its truthiness; no rule id or reason is emitted here (the deny
+ * decision is built by the policy layer from the inline-credential fact).
+ */
 export function inlineCredentialDecision(commands) {
-  if (!Array.isArray(commands)) return undefined
+  if (!Array.isArray(commands)) return false
   for (const command of commands) {
     const name = String(command?.name ?? '').replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase()
     if (!/^(?:curl|wget|invoke-restmethod|invoke-webrequest|irm|iwr|ssh|scp|docker|npm|pnpm|gh|git)$/.test(name)) continue
@@ -107,11 +146,8 @@ export function inlineCredentialDecision(commands) {
     if (/^(?:docker|npm|pnpm|gh)$/.test(name) && !args.some(value => typeof value === 'string' && /^(?:login|auth|token|publish|api|--password|--password=|--auth-token)(?:.*)?$/.test(value))) continue
     for (const value of args) {
       if (typeof value !== 'string' || !redactText(value).changed) continue
-      return {
-        kind: 'deny', ruleId: 'credential.inline',
-        reason: '[guardrails:credential.inline] Inline credential would spread through command arguments and persisted tool input. Use a credential reference, environment variable, stdin, or the tool’s authenticated configuration instead; retry without the literal credential.',
-      }
+      return true
     }
   }
-  return undefined
+  return false
 }
