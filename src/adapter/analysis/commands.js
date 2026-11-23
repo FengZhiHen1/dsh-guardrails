@@ -2277,10 +2277,51 @@ function gitCommand(args, options, env) {
   const flags = terminator < 0 ? rest : rest.slice(0, terminator)
   const has = (name) => flags.includes(name)
   const isReset = cmd === 'reset' && has('--hard') && (terminator < 0 || terminator === rest.length - 1)
-  const rewritesRefs = cmd === 'push' && flags.some((value) => typeof value === 'string' && (
-    /^(?:-[a-zA-Z]*[df][a-zA-Z]*|--force|--force-with-lease(?:=.*)?|--delete|--mirror)$/u.test(value) ||
-    /^(?:\+[^:]+:[^:]+|:[^:]+)$/u.test(value)
-  ))
+  // `git push --delete <remote> <ref>` (and its short alias `-d`, including combined
+  // short clusters such as `-fd`/`-df`) deletes remote references. Removing a reference
+  // destroys no commit and touches no working tree. An explicit `refs/tags/<name>` names
+  // a tag ref unambiguously, so deleting only tag refs is ordinary reference cleanup and
+  // must not enter the history-destroy tier. Bare names stay conservative (a bare name can
+  // resolve to a branch) and `refs/heads/*` is a branch ref, so both, and any mixture, keep
+  // the existing catastrophic behavior.
+  const pushDeleteFlag = cmd === 'push' && (
+    has('--delete') ||
+    flags.some((value) => typeof value === 'string' && /^-[A-Za-z]+$/u.test(value) && value.includes('d'))
+  )
+  const pushDeleteOnlyTags = pushDeleteFlag && (() => {
+    const positional = []
+    for (const value of rest) {
+      if (typeof value !== 'string') return false
+      if (value === '--') break
+      if (!value.startsWith('-')) positional.push(value)
+    }
+    // The first positional is the remote; the remaining positionals are the refs to delete.
+    const refs = positional.slice(1)
+    return refs.length > 0 && refs.every((ref) => /^refs\/tags\/[^:]+$/u.test(ref))
+  })()
+  // `--mirror` mirrors and deletes every ref, so it is always dangerous. A force push is
+  // dangerous unless it is part of a tag-only reference deletion: deleting tag refs is
+  // reference cleanup regardless of `-f`/`--force`/`--force-with-lease` (the force only
+  // skips the remote's compare check, it does not destroy any commit or worktree). Short
+  // clusters are read letter by letter (`f` force, `d` delete); the same tag-only exemption
+  // applies. A delete that is not tag-only, and a bare force push, stay dangerous.
+  const rewritesRefs = cmd === 'push' && (
+    flags.some((value) => {
+      if (typeof value !== 'string') return false
+      if (/^--mirror$/u.test(value)) return true
+      if (/^(?:--force|--force-with-lease(?:=.*)?)$/u.test(value)) return !pushDeleteOnlyTags
+      if (/^(?:\+[^:]+:[^:]+|:[^:]+)$/u.test(value)) return true
+      if (/^-[A-Za-z]+$/u.test(value)) {
+        const letters = value.slice(1)
+        const force = letters.includes('f')
+        const deleteShort = letters.includes('d')
+        if (pushDeleteOnlyTags && (force || deleteShort)) return false
+        return force || deleteShort
+      }
+      return false
+    }) ||
+    (pushDeleteFlag && !pushDeleteOnlyTags)
+  )
   const dangerous = (cmd === 'stash' && ['drop', 'clear'].includes(rest[0])) ||
     (cmd === 'gc' && (has('--prune=now') || has('--prune=all'))) ||
     ['filter-branch', 'filter-repo'].includes(cmd) || rewritesRefs || isReset ||
@@ -2369,12 +2410,17 @@ function gitRmCommand(index, rest, options, env) {
   emitTargets('delete', operands, { ...options, recursive, details: { command: 'rm', args: rest } }, env)
 }
 
-/** `git branch -D` / `git tag -d` (F-13/F-14): forced deletion of a ref. Merged
- * (`branch -d`), creation and lookup forms produce no operation (D6). */
+/** `git branch -D` forced deletion of a branch ref stays a `git-restore` confirmation
+ * (F-13). `git tag -d`/`--delete` only removes a tag reference: it destroys no commit and
+ * does not change the working tree, so it produces no operation and is allowed (F-14 fix).
+ * Merged (`branch -d`), creation and lookup forms produce no operation (D6). */
 function gitRefDeletion(command, prefix, rest, global, options, env) {
-  const forced = command === 'tag'
-    ? (rest.includes('-d') || rest.includes('--delete'))
-    : (rest.includes('-D') || (rest.includes('--delete') && (rest.includes('--force') || rest.includes('-f'))))
+  // Reference deletion is not history destruction: removing a tag ref leaves every
+  // commit and the working tree intact, so a plain local tag deletion is放行.
+  if (command === 'tag') return
+  // Only `branch -D` reaches here: a `--delete` needs an accompanying `--force`/`-f`.
+  const forced = rest.includes('-D') ||
+    (rest.includes('--delete') && (rest.includes('--force') || rest.includes('-f')))
   if (!forced) return
   const names = []
   for (const value of rest) {

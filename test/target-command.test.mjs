@@ -340,18 +340,52 @@ test('git rm without --cached deletes worktree paths', () => {
   assert.equal(command('git', ['rm']).operations.length, 0)
 })
 
-test('git branch -D and tag -d report the ref scope', () => {
+test('git branch -D reports the ref scope while tag -d is a reference-only deletion', () => {
   const branch = command('git', ['branch', '-D', 'feature'])
   assert.equal(branch.operations[0].action, 'git-restore')
   assert.deepEqual(branch.operations[0].target, { kind: 'unknown', reason: 'git-ref-scope', knownScope: ['refs/heads/feature'] })
   assert.equal(branch.operations[0].details.command, 'branch')
-  const tag = command('git', ['tag', '--delete', 'v1'])
-  assert.deepEqual(tag.operations[0].target, { kind: 'unknown', reason: 'git-ref-scope', knownScope: ['refs/tags/v1'] })
-  assert.equal(tag.operations[0].details.command, 'tag')
+  // Deleting a tag removes only a reference; no commit or working-tree state is lost.
+  assert.deepEqual(command('git', ['tag', '-d', 'v1.0.0']).operations, [])
+  assert.deepEqual(command('git', ['tag', '--delete', 'v1.0.0']).operations, [])
   for (const args of [['branch', '-d', 'merged-branch'], ['branch', 'newfeat'], ['branch'], ['branch', '-a'],
     ['tag', 'v1.2.0'], ['tag'], ['tag', '-l']]) {
     assert.deepEqual(command('git', args).operations, [], JSON.stringify(args))
   }
+})
+
+test('git push --delete of tag refs is reference cleanup, not history destruction', () => {
+  // Explicit tag refs only remove references; no commit or worktree is destroyed.
+  assert.deepEqual(command('git', ['push', 'origin', '--delete', 'refs/tags/v1.0.0']).operations, [])
+  assert.deepEqual(command('git', ['push', '--delete', 'origin', 'refs/tags/v1.0.0', 'refs/tags/v2.0.0']).operations, [])
+  // A bare name is ambiguous (it can resolve to a branch) and refs/heads/* is a branch
+  // ref, so both stay in the catastrophic history-destroy tier; a mixture stays too.
+  assert.equal(command('git', ['push', 'origin', '--delete', 'v1.0.0']).operations[0].action, 'git-history-destroy')
+  assert.equal(command('git', ['push', 'origin', '--delete', 'refs/heads/main']).operations[0].action, 'git-history-destroy')
+  assert.equal(command('git', ['push', 'origin', '--delete', 'refs/tags/v1', 'refs/heads/main']).operations[0].action, 'git-history-destroy')
+  // The short alias `-d` (and combined short clusters such as `-fd`) follow the same
+  // ref-type rule: explicit tag refs are reference cleanup, anything else stays dangerous.
+  assert.deepEqual(command('git', ['push', '-d', 'origin', 'refs/tags/v1']).operations, [])
+  assert.equal(command('git', ['push', '-d', 'origin', 'main']).operations[0].action, 'git-history-destroy')
+  assert.equal(command('git', ['push', '-d', 'origin', 'refs/heads/main']).operations[0].action, 'git-history-destroy')
+  assert.deepEqual(command('git', ['push', '-fd', 'origin', 'refs/tags/v1']).operations, [])
+  assert.equal(command('git', ['push', '-fd', 'origin', 'main']).operations[0].action, 'git-history-destroy')
+  assert.equal(command('git', ['push', '-df', 'origin', 'refs/heads/main']).operations[0].action, 'git-history-destroy')
+  // A force attached to a tag-only deletion is still reference cleanup (deleting a tag ref
+  // destroys no commit); --mirror remains dangerous because it mirrors and deletes all refs.
+  assert.deepEqual(command('git', ['push', '--force', '--delete', 'origin', 'refs/tags/v1']).operations, [])
+  assert.deepEqual(command('git', ['push', '--force-with-lease', '--delete', 'origin', 'refs/tags/v1']).operations, [])
+  assert.deepEqual(command('git', ['push', '-f', '--delete', 'origin', 'refs/tags/v1']).operations, [])
+  assert.equal(command('git', ['push', '--force', '--delete', 'origin', 'refs/heads/main']).operations[0].action, 'git-history-destroy')
+  assert.equal(command('git', ['push', '--mirror', 'origin']).operations[0].action, 'git-history-destroy')
+  // Other dangerous push forms are unchanged.
+  assert.equal(command('git', ['push', 'origin', '--force']).operations[0].action, 'git-history-destroy')
+  assert.equal(command('git', ['push', 'origin', '--mirror']).operations[0].action, 'git-history-destroy')
+  assert.equal(command('git', ['push', '--force-with-lease', 'origin', 'main']).operations[0].action, 'git-history-destroy')
+  // --dry-run keeps its preview semantics.
+  const preview = command('git', ['push', '--dry-run', 'origin', '--force'])
+  assert.equal(preview.operations[0].preview, true)
+  assert.equal(preview.operations[0].action, 'git-history-destroy')
 })
 
 test('git checkout discards are scoped by pathspec or state', () => {

@@ -59,6 +59,8 @@ const ORDINARY = [
   ['git branch newfeat', 'bash'],
   ['git tag v1.2.0', 'bash'],
   ['git tag -l', 'bash'],
+  // Deleting a local tag removes only a reference; no commit or worktree is destroyed.
+  ['git tag -d v1', 'bash'],
   ['git reflog', 'bash'],
   ['git rm -r --cached .', 'bash'],
   ['git reset', 'bash'],
@@ -203,7 +205,6 @@ const NEW_COVERAGE = [
   ['parallel rm -rf ::: a b', 'bash', 'data.delete.dynamic'],
   ['rsync -a --delete src/ dst/', 'bash', 'data.delete.bulk', { ...EMPTY_INVENTORY, count: 25, directories: ['dst/'] }],
   ['git branch -D feature', 'bash', 'data.git.restore'],
-  ['git tag -d v1', 'bash', 'data.git.restore'],
   ['aws s3 rm s3://bucket --recursive', 'bash', 'data.delete.dynamic'],
   ['gcloud compute instances delete my-inst --quiet', 'bash', 'data.delete.dynamic'],
   ['az group delete -n rg --yes', 'bash', 'data.delete.dynamic'],
