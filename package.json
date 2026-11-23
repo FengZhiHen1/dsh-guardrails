@@ -1,6 +1,6 @@
 {
   "name": "dsh-guardrails",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Catastrophic-operation blocking, sensitive-file and high-risk execution confirmation, and credential masking for DSH tools.",
   "icon": "./icon.svg",
   "license": "MIT",
