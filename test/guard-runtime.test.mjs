@@ -5,8 +5,9 @@ import { createRequire } from 'node:module'
 import { realpathSync } from 'node:fs'
 import { resolve, extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { requestApproval } from '../src/adapter/approval.js'
 import { apply } from '../src/adapter/host.js'
+import { installGate } from '../src/adapter/dsh-gate.js'
+import { normalizePolicy, renderDecision } from '../src/core/decision.js'
 
 const anchor = process.env.DSH_RUNTIME_PATH
 const resolver = anchor ? createRequire(realpathSync(extname(anchor) ? resolve(anchor) : resolve(anchor, 'package.json'))) : createRequire(import.meta.url)
@@ -30,38 +31,17 @@ async function setup(t, policy = 'never') {
   return ctx
 }
 
-/** A minimal real Session with one open turn (approval requests must be turn-enclosed). */
-function openSession(id = 'guardrails-runtime') {
-  const session = runtime.session.Session.create(id)
-  session.append('turn/start', { turn: 1 })
-  return session
-}
-function session() {
-  const events = [{ type: 'turn/start', data: { turn: 1 } }]
-  return { get seq() { return events.length }, eventAt: index => events[index],
-    append: (type, data) => events.push({ type, data }), events }
-}
-
-test('real ApprovalService never cannot be overridden by a prepended answerer', { skip: !runtime && 'Set DSH_RUNTIME_PATH' }, async t => {
-  const ctx = await setup(t)
-  let asked = 0
-  ctx.on('approval/request', async () => { asked++; return 'allowed-once' }, { prepend: true })
-  const log = openSession()
-  const execution = { name: 'read', callId: 'synthetic', agent: { session: log }, signal: new AbortController().signal }
-  const result = await requestApproval(ctx, execution, 'Synthetic fixture', 1000, new AbortController().signal)
-  assert.equal(result.kind, 'deny')
-  assert.equal(asked, 0, 'the never policy resolves before any answerer runs')
-  const types = log.snapshotEvents().map(event => event.type)
-  assert.ok(types.includes('approval/asked'), 'the ask was audited')
-  assert.ok(types.includes('approval/decided'), 'the decision was audited')
-  const decided = log.snapshotEvents().find(event => event.type === 'approval/decided')
-  assert.equal(decided.data.outcome, 'rejected')
-})
-
 const call = (ctx, name, id, args, signal) => ctx.tools.execute({
   signal,
   calls: [{ type: 'tool-call', id, name, arguments: JSON.stringify(args) }],
 })
+
+/** Real session with one open turn, for the never-policy audit assertion. */
+function realSession(id) {
+  const session = runtime.session.Session.create(id)
+  session.append('turn/start', { turn: 1 })
+  return session
+}
 
 test('real ToolRuntime final guard rejects short-circuited pre-analysis', { skip: !runtime && 'Set DSH_RUNTIME_PATH' }, async t => {
   const ctx = await setup(t)
@@ -83,4 +63,41 @@ test('real ToolRuntime final guard rejects short-circuited pre-analysis', { skip
   assert.match(denied.error.message, /ANALYSIS_MISSING/)
   assert.equal(calls, 1)
   dispose()
+})
+
+test('never policy without a question provider says UNAVAILABLE and writes no approval audit', { skip: !runtime && 'Set DSH_RUNTIME_PATH' }, async t => {
+  const ctx = await setup(t, 'never')
+  await ctx.plugin({
+    name: 'guardrails-never-audit-mount',
+    inject: ['tools'],
+    apply(inner) {
+      installGate(inner, {
+        analyzer: { async analyze() { return { status: 'complete', operations: [] } }, dispose() {} },
+        collectEvidence: (analysis) => ({ analysis, inventory: { fingerprint: 'cov-1' } }),
+        decide: () => ({ kind: 'confirm', ruleId: 'data.delete.bulk', scope: { entries: ['./x'] } }),
+        renderDecision,
+        readPolicy: () => normalizePolicy({ askTimeoutMs: 500 }),
+        isProtectedPath: () => false,
+      })
+    },
+  })
+  ctx.tools.register({
+    name: 'bash',
+    description: 'Synthetic never-audit fixture.',
+    parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    execute: async () => 'noop',
+  })
+  const session = realSession('guardrails-never-audit')
+  const response = await ctx.tools.execute({
+    signal: new AbortController().signal,
+    agent: { session, ctx },
+    calls: [{ type: 'tool-call', id: 'never-1', name: 'bash', arguments: JSON.stringify({ command: 'rm -rf ./x' }) }],
+  })
+  const result = response.results[0].result
+  assert.equal(result.isError, true)
+  assert.match(result.error.message, /APPROVAL_UNAVAILABLE: No confirmation UI is available/)
+  const types = session.snapshotEvents().map(event => event.type)
+  assert.ok(!types.includes('approval/asked'), 'the never policy bypasses the approval seam (no ask)')
+  assert.ok(!types.includes('approval/decided'), 'the never policy bypasses the approval seam (no decision)')
 })

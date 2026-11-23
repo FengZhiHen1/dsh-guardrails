@@ -772,7 +772,7 @@ function checkFailedDeny(stages, issues, gaps) {
     kind: 'deny',
     ruleId: CHECK_FAILED_RULE,
     ruleIds: [CHECK_FAILED_RULE],
-    reason: 'A required check did not finish, so the call cannot be proven safe; deny without an allow fallback.',
+    reason: 'A required check did not finish, so the call cannot be proven safe.',
     trigger: `${base}${gapCodes.length > 0 ? `; codes: ${gapCodes.join(',')}` : ''}`,
     scope,
     gaps: gaps ?? [],
@@ -823,9 +823,20 @@ function catastrophicDecision(hits, gaps) {
 /** Closed operational failures deny unconditionally (规则模型 failure table + lead
  * ruling): analyzer crash / protocol damage / deadline miss, any forensic issue, an
  * unreliable inventory, or deletion operations without any inventory. */
-function collectCheckFailures(status, issues, inventory, operations) {
+function collectCheckFailures(status, issues, inventory, operations, gaps) {
   const stages = []
-  if (status === 'fault') stages.push('analysis fault (crash, protocol damage, or deadline miss)')
+  if (status === 'fault') {
+    // Name the real cause, not a hard-coded crash/protocol/deadline guess (N4).
+    const gapCode = (Array.isArray(gaps) ? gaps : [])
+      .map((gap) => gap?.code)
+      .find((code) => typeof code === 'string' && code !== '')
+    const issueKind = issues.length > 0 && typeof issues[0].kind === 'string' && issues[0].kind !== ''
+      ? issues[0].kind
+      : undefined
+    if (gapCode) stages.push(`check failure: ${gapCode}`)
+    else if (issueKind) stages.push(`check failure: ${issueKind}`)
+    else stages.push('analysis fault (crash, protocol damage, or deadline miss)')
+  }
   for (const issue of issues) stages.push(issue.kind ? `check failed at ${issue.kind}` : 'check failed')
   if (inventory && inventory.kind === 'unreliable') {
     stages.push('inventory unreliable (count or scope could not be established)')
@@ -1096,7 +1107,7 @@ export function decide(evidence, effectivePolicy) {
     if (catastrophic) return catastrophicDecision(catastrophic, gaps)
 
     // 2. Closed operational failures deny under the stable non-configurable id.
-    const failures = collectCheckFailures(status, issues, inventory, operations)
+    const failures = collectCheckFailures(status, issues, inventory, operations, gaps)
     if (failures) return checkFailedDeny(failures.stages, issues, gaps)
 
     // 3..6. Collect hits.

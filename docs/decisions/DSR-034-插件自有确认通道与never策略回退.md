@@ -81,11 +81,11 @@ DSH 宿主的审批策略 `never` 在分发前确定性地拒绝所有审批请�
 - `@deepseek-ai/dsh-subagent` 的委派策略捕获：子会话 `approval/policy` 固定为 `never` 且标记 `source: 'delegation'`（`child-agent.ts`）。
 - `@deepseek-ai/dsh-user-questions` 的会话投影只折叠 `ask_user_question` 工具调用（`projection.ts`），插件直接调用的阻塞式 ask 不进入该投影；这印证问答通道没有持久审计行。
 
-插件侧实现点（本仓库）：`src/adapter/dsh-gate.js` 的 `askOnce()` 负责通道选择，`askViaQuestions()` 发出通用单问题问答卡，`questionFailureReason()` 把问答异常映射为拒绝码，等待预算统一由 `runBoundedAsk()` 施加；配置 schema 在 `src/adapter/host.js` 的 `Config`，字段校验在 `src/core/rules.js`。
+插件侧实现点（本仓库）：`src/adapter/dsh-gate.js` 的 `askOnce()` 负责通道选择，`askViaApproval()` 发官方审批请求（带 `displayReason`），`askViaQuestions()` 发 approval 意图请求（`intent.kind = 'approval'`），`questionFailureReason()` 把问答异常映射为拒绝码，等待预算统一由 `runBoundedAsk()` 施加；配置 schema 在 `src/adapter/host.js` 的 `Config`，字段校验在 `src/core/rules.js`，摘要生成在 `src/adapter/confirm-text.js` 的 `confirmSummary()`。
 
 **待实测（本轮没有实测证据，不得写成已验证）**：
 
-- GUI 是否把 approval 意图按通用单问题问答卡渲染，并以英文 `Allow once` / `Reject` 的所选标签返回（中文界面下按钮仍为英文）；
+- 已由 DSR-035 取代，保留作历史：GUI 是否把 approval 意图按通用单问题问答卡渲染，并以英文 `Allow once` / `Reject` 的所选标签返回（中文界面下按钮仍为英文）；
 - `askTimeoutMs` 到点中止后错误映射为 `APPROVAL_TIMEOUT` 的端到端行为；
 - 真实委派子代理会话是否稳定返回 `APPROVAL_DELEGATED` 而非挂起；
 - headless / 未连接会话是否确实以 `NO_PROVIDER` fail-closed；

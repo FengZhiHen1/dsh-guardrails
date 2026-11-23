@@ -2,58 +2,54 @@
 
 本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
-## 0.7.0
+未发布改动统一记在 Unreleased；只有通过稳定门禁、真正发布的版本才有版本段。
 
-- **拒绝/故障文案准确性**：`execution.check-failed` 的 `Trigger` 使用真实 stage/gap 码、不再输出 `not captured` 空行；`APPROVAL_POLICY_NEVER` 拆为「策略/开关禁止」与「无确认通道」；所有拒绝统一声明「未执行任何操作」；`APPROVAL_TIMEOUT` 按规则类别给下一步。
-- **确认卡**：`data.git.worktree`/`data.move.source` 专用句式；`notes` 必须渲染（未知项标「原文」）；中文卡不混未标注英文。
-- **通知**：人话首行 + `rule`/`confirmed_by`/`channel`/`scope`/`this_call_only` 中性字段，`scope` 为人话摘要并截断。
-- **遮罩**：标记带类别 `[REDACTED:<kind>]`（pem/bearer/jwt/provider）；纯字符串且无约束 schema 原位替换，其它类型/受约束 schema 含可遮罩内容时整体 withhold（安全优先，避免 `invalid output` 回显原文）。
-- **配置问题写日志告警**：`configIssues` 去重后写 `logger.warn`，消除静默降级。
+## Unreleased
 
-## 0.6.4
+### 判定模型与规则
 
-- **`ask` 通道审批卡补充 `displayReason` 中英摘要，与 `never` 通道统一**：两条通道都调用同一份 `confirmSummary` 生成用户可见文案，`reason` 保留英文原文供审计与模型。
-- **用户可见文案说人话**：去掉内部字段名与标记 token（`non-exempt`、`entries`/`directories`/`roots` 等），未知内部标记仅在审计原文 `reason` 中保留。
+- **完整 Git 仓库删除改为审批**：删除 `.git` 主体、其子目录（`objects`/`refs`）、bare 仓库目录，或包含 `.git` 目录的目录树时产出**确认**（`data.delete.bulk`/`data.delete.dynamic`，范围说明「complete Git repository metadata (.git) … would be destroyed」），不再 `catastrophic.git-metadata` 绝对拒绝；Git worktree / Linked Worktree（`.git` 是文件指针）按普通删除分档；销毁历史的 Git 子命令仍绝对拒绝。见 [DSR-033](docs/decisions/DSR-033-完整Git仓库删除改为审批.md)。
+- **过度防御修正**：`git restore --staged <paths>` 只还原索引，恢复为放行；删除含 `.git` 的目录从拒绝改为**确认**，范围注明「`.git` 元数据将一并销毁」；`scp`/`sftp -i` 身份文件不再触发凭据读确认（正常认证用途）。
+- **不变**：不新增规则号；普通只读用法与既有回归（`git status`/`checkout -b`/`find` 无 `-delete`/`rsync` 无 `--delete`/`kubectl get`/`aws s3 ls`/`docker ps`/`ssh host ls`/`nc -l`/`parted -l`/`cmd /c dir` 等）保持放行且零候选。
 
-## 0.6.3
+### 命令/证据覆盖
 
-- **确认卡说明措辞精炼**：去掉「非豁免」等行话与内部标记 token（如 `git-metadata-inside-tree` 已由「另将销毁：.git 元数据」覆盖时省略），英文按数量使用 `entry`/`entries`；仅保留无法归类的「其他标记」。
-
-## 0.6.2
-
-- **确认卡说明改为单段人话摘要，长列表截断计数**：共享卡说明区不渲染换行/Markdown，说明改为分号分隔的单段摘要（目标/涉及目录/另将销毁/标记），长列表截断为「等共 N 项」；解析失败回退原始范围文本。
-
-## 0.6.1
-
-- **确认卡改为标准审批卡外观并按中英切换**：Web 端复用平台共享审批卡工厂（标题、说明、「拒绝」「允许一次」），问题请求带 `intent.display` 中英文案，非中英界面回退英文标题/说明与英文允许标签、拒绝等固定操作按客户端语言包本地化；共享卡工厂缺失时经 `renderFactorySlot` 的 `fallback` 渲染最小卡片。见 [DSR-035](docs/decisions/DSR-035-确认卡外观与模型可见确认记录.md)。
-- **人工确认放行后向模型注入结构化确认记录**：经 `tools/post-execute` 的 `additionalContexts` 附一条 `dsh-guardrails` notice（`rule`/`scope`/`channel`/`policy`/`reusable=no`）；规则直接放行与下游 block 不注入，拒绝侧不变。
-
-## 0.6.0
-
-- **新增配置项 `alwaysAsk`**（默认 `true`，可热改）：会话审批策略为 `never` 或审批 seam 缺失时，插件经官方问答通道弹出一次通用单问题问答确认；设为 `false` 时退回自动拒绝。
-- **确认通道回退与两个新拒绝码**：通道优先级为「审批 seam 存在且有效策略 `ask` → 官方审批」「策略为 `never` 或审批 seam 缺失，且 `alwaysAsk` 开启 → 问答通道」「其余拒绝；审批 seam 存在但无应答方直接 `APPROVAL_UNAVAILABLE`，不回退问答」；新增 `APPROVAL_POLICY_NEVER`（策略为 `never` 且没有交互应答方接受该确认）与 `APPROVAL_DELEGATED`（委派子代理会话无法询问用户）。见 [DSR-034](docs/decisions/DSR-034-插件自有确认通道与never策略回退.md)。
-- **误归因修正**：`APPROVAL_REJECTED` 现在只在真的有人拒绝时出现；策略拒绝与「无法询问用户」不再被表述为用户拒绝。
-
-## 0.5.1
-
-- **完整 Git 仓库的删除改为审批（ask）**：删除 `.git` 主体、其子目录（`objects`/`refs`）、bare 仓库目录，或包含 `.git` 目录的目录树时，产出**确认**（`data.delete.bulk`/`data.delete.dynamic`，范围说明「complete Git repository metadata (.git) … would be destroyed」），不再 `catastrophic.git-metadata` 绝对拒绝。Git worktree / Linked Worktree（`.git` 是文件指针）不触发该审批，按普通文件计数删除。销毁历史的 Git 子命令（`filter-branch`/`git reset --hard` 等）仍绝对拒绝。见 [DSR-033](docs/decisions/DSR-033-完整Git仓库删除改为审批.md)。
-
-## 0.5.0
-
-- **过度防御修正（用户反馈驱动）**：`git restore --staged <paths>` 只还原索引，恢复为放行；删除含 `.git` 的目录（如清理临时仓库）从 `execution.check-failed` 拒绝改为**确认**，范围注明「`.git` 元数据将一并销毁」；以 `.git` 或其内容本身为目标的删除仍按 `catastrophic.git-metadata` 绝对拒绝。`scp`/`sftp -i` 身份文件不再触发凭据读确认（正常认证用途）。
-- **隧道与传输（灾难防御）**：`nc`/`ncat`/`netcat`/`socat` 的 `-e`/`--exec`/`--sh-exec`/`--lua-exec` 与 `socat EXEC:/SYSTEM:` 是执行通道（确认；`socat` 还要求另一端是网络地址，纯本地放行）；`ssh -R`/`-D` 反向转发与 SOCKS 确认，`ssh -o ProxyCommand=<value>` 的值按本地命令文本分析，`-L`/`-J` 放行；`sftp -b` 批处理确认。
+- **剩余形态补齐**：`ssh host <<EOF` 与 `wsl … bash <<EOF` 的 heredoc 正文按远端 shell 脚本分析；`ssh host powershell|pwsh` 与 `ssh host cmd /c` 按对应方言分析载荷；`sgdisk` 的 `-d`/`-n`/`-t`/`-A`/`-c`/`-Z`/`-o`（`-P` 为预览）与 `parted resizepart` 进入设备变更判定；`tar -C` 按目录重定位 `--remove-files` 成员，`7z a -sdel`/`zip -m` 与 `tar --remove-files` 同档；`unshare` 作为透明包装解包；`git rebase|merge|cherry-pick|revert|am --abort` 仅在只读探测证明有进行中状态时确认（无进行中状态放行，探测失败不升级为检查故障）；PowerShell 管道中无显式路径的删除按相邻上游命令范围确认；`docker run|exec` 的载荷仅在宿主绑定挂载、`--device` 或 `--privileged` 时按容器域分析。见 [DSR-031](docs/decisions/DSR-031-剩余未做项补齐与外传管道边界.md)。
+- **删除面与传输面扩展**：云 / 数据库 / 容器 / IaC 的删除与不可逆资源变更按 provider 薄表补齐；新增备份与密钥源删除（`restic`/`borg`/`rclone`/`velero`/`gh`/`vault kv metadata`/`doppler`/`infisical`）；`scp`/`rsync` 上行方向对字面本地源产出读取事实；可恢复的软删除（`vault kv delete`、`restic forget` 不带 `--prune`）按缺口放行。
+- **外传面（只做可证边界）**：`curl`/`wget` 访问云元数据端点（8 个 IMDS/ECS/EKS/`metadata.goog` 地址）产出 `unverified-effect` 候选；本地文件上传产出 `read-content` 事实，由既有凭据规则判定；通用出网、通用上传与隧道仍不拦截。
+- **修复**：`rsync --delete` 的远端目的地（`host:path`）不再当作宿主相对路径产出删除子树，改为 `unknown` + `knownScope` 的远端范围确认。
+- **隧道与传输（灾难防御）**：`nc`/`ncat`/`netcat`/`socat` 的 `-e`/`--exec`/`--sh-exec`/`--lua-exec` 与 `socat EXEC:/SYSTEM:` 是执行通道（确认；`socat` 还要求另一端是网络地址，纯本地放行）；`ssh -R`/`-D` 反向转发与 SOCKS 确认，`ssh -o ProxyCommand=<value>` 的值按本地命令文本分析，`-L`/`-J` 放行；`sftp -b` 批处理确认。见 [DSR-032](docs/decisions/DSR-032-过度防御修正与隧道控制流长尾的灾难防御.md)。
 - **归档与分区**：`zip -d`、`tar --delete`、`7z d` 是归档内删除（确认）；`parted` 无写子命令但带设备时是交互式设备写入入口（确认，设备路径可证时进入设备身份判定），只读子命令含缩写 `p/h/q/u` 放行。
 - **`cmd.exe` 控制流**：`for`/`if`/`%VAR%`/`!VAR!`/`^`/`(`/`)`/`start`/`call` 且**命令位**出现删除族时按范围确认；`echo`/`rem` 的参数是数据、不误报；`/k` 与 `/c` 同路分析正文。
 - **云与数据仓库长尾**：补齐 `aws`（`eks`/`glue batch-delete-*`/`athena`/`redshift`/`kinesis`/`cloudtrail`/`logs`/`s3api delete-object(s)`/`s3 sync --delete`/`ecr batch-delete-image`）、`gcloud`（`storage rm`/`objects delete`/`firestore`/`artifacts`/`iam roles`/`dns managed-zones`/`bigtable`/`projects delete`）、`az`（`keyvault purge`/`account subscription cancel`/`management-group delete`/`acr repository`/`ad app|sp`/`storage blob delete-batch`）、`kubectl apply --force`、`docker compose down -v`、`redis-cli shutdown nosave`、`bq`/`pulumi`/`mc`/`databricks fs rm`/`supabase storage rm`、SQL DDL 对象扩展（`warehouse`/`user`/`role` 等）。
-- **不变**：不新增规则号；普通只读用法与既有回归（`git status`/`checkout -b`/`find` 无 `-delete`/`rsync` 无 `--delete`/`kubectl get`/`aws s3 ls`/`docker ps`/`ssh host ls`/`nc -l`/`parted -l`/`cmd /c dir` 等）保持放行且零候选。见 [DSR-032](docs/decisions/DSR-032-过度防御修正与隧道控制流长尾的灾难防御.md)。
+- **Git 引用删除边界**：`git tag -d`/`--delete` 放行（引用删除≠历史销毁）；`git push -d`/`--delete refs/tags/*` 放行；当仅针对 `refs/tags/*` 时 `--force`/`-f`/`--force-with-lease` 不影响放行、`--mirror` 仍为灾难；裸名、`refs/heads/*` 仍按灾难或确认处理。
 
-## 0.4.0
+### 审批通道与确认卡
 
-- **剩余形态补齐（默认放行不变）**：`ssh host <<EOF` 与 `wsl … bash <<EOF` 的 heredoc 正文按远端 shell 脚本分析；`ssh host powershell|pwsh` 与 `ssh host cmd /c` 按对应方言分析载荷；`sgdisk` 的 `-d`/`-n`/`-t`/`-A`/`-c`/`-Z`/`-o`（`-P` 为预览）与 `parted resizepart` 进入设备变更判定；`tar -C` 按目录重定位 `--remove-files` 成员，`7z a -sdel`/`zip -m` 与 `tar --remove-files` 同档；`unshare` 作为透明包装解包；`git rebase|merge|cherry-pick|revert|am --abort` 仅在只读探测证明有进行中状态时确认（无进行中状态放行，探测失败不升级为检查故障）；PowerShell 管道中无显式路径的删除按相邻上游命令范围确认；`docker run|exec` 的载荷仅在宿主绑定挂载、`--device` 或 `--privileged` 时按容器域分析。见 [DSR-031](docs/decisions/DSR-031-剩余未做项补齐与外传管道边界.md)。
-- **删除面与传输面扩展**：云 / 数据库 / 容器 / IaC 的删除与不可逆资源变更按 provider 薄表补齐；新增备份与密钥源删除（`restic`/`borg`/`rclone`/`velero`/`gh`/`vault kv metadata`/`doppler`/`infisical`）；`scp`/`rsync` 上行方向对字面本地源产出读取事实。可恢复的软删除（`vault kv delete`、`restic forget` 不带 `--prune`）按缺口放行。
-- **外传面（只做可证边界）**：`curl`/`wget` 访问云元数据端点（8 个 IMDS/ECS/EKS/`metadata.goog` 地址）产出 `unverified-effect` 候选；本地文件上传产出 `read-content` 事实，由既有凭据规则判定。通用出网、通用上传与隧道（`nc`/`socat`/`ssh -R`）仍不拦截。
-- **修复（D2）**：`rsync --delete` 的远端目的地（`host:path`）不再当作宿主相对路径产出删除子树，改为 `unknown` + `knownScope` 的远端范围确认。
-- **反过度防御门禁**：新增覆盖的反向样本与扩展后的普通用法回归（`ssh host ls`、`wsl ls`、`unshare --map-root-user id`、`curl https://example.com`、`scp host:/a /b`、`docker run --rm alpine echo hi`、`kubectl get pvc`、`helm list`、`restic snapshots`、`7z a` 无 `-sdel`、`sgdisk -P`、`parted -l` 等）全部要求放行且零候选。
+- **新增配置项 `alwaysAsk`**（默认 `true`，可热改）：会话审批策略为 `never` 或审批 seam 缺失时，插件经官方问答通道弹出一次确认；设为 `false` 时退回自动拒绝。
+- **确认通道回退与归因码**：审批 seam 存在且有效策略 `ask` → 官方审批；策略为 `never` 或审批 seam 缺失且 `alwaysAsk` 开启 → 问答通道；其余拒绝，审批 seam 存在但无应答方直接 `APPROVAL_UNAVAILABLE`、不回退问答。新增 `APPROVAL_POLICY_NEVER`（策略/开关禁止）与 `APPROVAL_DELEGATED`（委派子会话）；`APPROVAL_REJECTED` 仅表示真实拒绝。见 [DSR-034](docs/decisions/DSR-034-插件自有确认通道与never策略回退.md)。
+- **确认卡改为标准审批卡外观并按中英切换**：Web 端复用平台共享审批卡工厂（标题、说明、「拒绝」「允许一次」），问题请求带 `intent.display` 中英文案，非中英界面回退英文标题/说明与英文允许标签、拒绝等固定操作按客户端语言包本地化；共享卡工厂缺失时经 `renderFactorySlot` 的 `fallback` 渲染最小卡片。见 [DSR-035](docs/decisions/DSR-035-确认卡外观与模型可见确认记录.md)。
+- **确认卡说明单段人话摘要**：共享卡说明区不渲染换行/Markdown，说明为分号分隔的单段摘要（目标/涉及目录/另将销毁/其他标记），长列表截断为「等共 N 项」；`data.git.worktree`/`data.move.source` 用专用句式；`notes` 必须渲染，未知标记标注「原文」；中文卡不混未标注英文。
+- **通知**：经确认应答方（可能是用户）放行后，向模型下一步注入 `additionalContexts` notice（`rule`/`confirmed_by=answerer`/`channel=approval-card` 或 `channel=question-card`/`scope`/`this_call_only`），仅接受且非错误时注入，规则直接放行不注入。
+
+### 输出面与文案
+
+- **拒绝/故障文案准确性**：`execution.check-failed` 的 `Trigger` 使用真实 stage/gap 码、不再输出 `not captured` 空行；`APPROVAL_POLICY_NEVER` 只表示策略/开关禁止，无通道改用 `APPROVAL_UNAVAILABLE`；所有拒绝统一声明「未执行任何操作」；`APPROVAL_TIMEOUT` 按规则类别给下一步；所有 `deny` 的 `Next` 带 `Nothing was executed.`。见 [DSR-036](docs/decisions/DSR-036-输出面契约与文案分层.md)。
+- **拒绝块字段**：`Why`/`Trigger`/`Effect`/`Scope`/`Next` 五个字段；空或 `not captured` 的 `Trigger`、`Scope` 行省略；已知 stage 用 `STAGE_META` 专用 Effect/Next。
+- **用户可见文案说人话**：确认卡摘要去掉内部字段名与标记 token（`non-exempt`、`entries`/`directories`/`roots` 等），未知内部标记仅在审计原文 `reason` 保留。
+- **配置问题写日志告警**：`configIssues` 去重后写 `logger.warn`，消除静默降级。
+
+### 遮罩与安全
+
+- **遮罩标记与 withhold**：标记带类别 `[REDACTED:<kind>]`（`kind ∈ pem/bearer/jwt/provider`）；仅当值是纯字符串且输出 schema 无约束时原位替换，其它类型或受约束 schema 含可遮罩内容时整体 withhold（安全优先，避免 `invalid output` 回显原文）。
+- **错误结果 withhold**：`result.error.message`/`result.error.info`/`result.meta` 命中或 `unknown` → 整条 withhold，模型/PTC 只见固定说明。
+- **block.info 替换**：命中时替换为 `{name:'Guardrails', code:'REDACTED'}`，保留 block 渲染与错误身份。
+- **meta 类 withhold**：`result.meta` 命中或 `unknown` → withhold（`PostToolDecision` 无 meta 字段）；`presentationMeta` 只投影一次并同样按 clean/`unknown` 判定，避免重复调用副作用。
+- **content 分支扫描**：`decision.content` 分支同时扫描 `value`/`result.value`/`meta`，命中即 withhold。
+- **additionalContexts**：`decision` 侧任一条 `scan !== 'clean'`（含 text 块含凭据）即整条丢弃该 context；`result` 侧非 text 块（image/file）深扫 clean 即放行，命中/`unknown` → 整条结果 withhold。
+- **非 text 字段与块**：`reasoning.text`、`tool-call.arguments`、contexts 的 `source.summary`、块的 `name`/`attachment.name` 参与遮罩；未知块类型整块深扫，命中/`unknown` → withhold。
+- **containsMaskable 三态**：`hit|clean|unknown`；越 depth 32 / 数组键 65536 / 字符串 8MB，或 `Map`/`Set`/`Buffer`/`Date`/类实例 → `unknown` → 按不安全处理并 withhold；clean 的超大但未越界对象/数组正常放行（与 EX-04 一致）。
+- **PTC durable log 专用遮罩**：对 `tools/ptc-dispatch-log` 中每个 JSON 字符串值遮罩（`id`/`payload`/`arguments`/自定义字段，不依赖字段白名单）；已知块类型且 clean 原样；未知块类型/非 JSON/循环/超上限 → 整块占位；`next()` 非数组或抛错 → 单条固定占位，避免 PTC runtime 失败回退写入原文。
 
 ## 0.3.0
 

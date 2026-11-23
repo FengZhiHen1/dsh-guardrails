@@ -716,8 +716,9 @@ test('a patch-parse fault carries the real gap code in its trigger', async () =>
   const decision = await preExecuteOf(state)(execution({ name: 'apply_patch', args: { input: '*** Begin Patch' } }), async () => ({ kind: 'allow' }))
   assert.equal(decision.kind, 'deny')
   assert.match(decision.reason, /GUARD_PATCH_PARSE_FAILED/)
-  assert.match(decision.reason, /Trigger: analysis fault/)
+  assert.match(decision.reason, /Trigger: check failure: GUARD_PATCH_PARSE_FAILED/)
   assert.match(decision.reason, /codes: GUARD_PATCH_PARSE_FAILED/)
+  assert.doesNotMatch(decision.reason, /crash, protocol damage/)
 })
 
 test('confirm with an unscoped decision is refused without asking the user', async () => {
@@ -1257,12 +1258,12 @@ test('roots that repeat directories are not shown twice', async () => {
 })
 
 test('the delete preview is human: no jargon, redundant Git flag omitted', async () => {
-  const scope = 'non-exempt entries: 1; entries: C:\\guardrails\\a.txt; directories: C:\\guardrails\\guardrails-live-0.6.1; roots: C:\\guardrails\\guardrails-live-0.6.1; unobserved: git metadata (.git) at C:\\guardrails\\.git would also be destroyed; git-metadata-inside-tree'
+  const scope = 'non-exempt entries: 1; entries: C:\\guardrails\\a.txt; directories: C:\\guardrails\\guardrails-live-fixture; roots: C:\\guardrails\\guardrails-live-fixture; unobserved: git metadata (.git) at C:\\guardrails\\.git would also be destroyed; git-metadata-inside-tree'
   const display = await questionDisplayFor(scope)
   assert.equal(display.detail.zh,
-    '需要你确认（仅本次）：将删除 1 个条目（规则 data.delete.bulk）。目标：C:\\guardrails\\a.txt；涉及目录：C:\\guardrails\\guardrails-live-0.6.1；另将销毁：.git 元数据（C:\\guardrails\\.git）。批准只对本次调用有效。')
+    '需要你确认（仅本次）：将删除 1 个条目（规则 data.delete.bulk）。目标：C:\\guardrails\\a.txt；涉及目录：C:\\guardrails\\guardrails-live-fixture；另将销毁：.git 元数据（C:\\guardrails\\.git）。批准只对本次调用有效。')
   assert.equal(display.detail.en,
-    'Confirmation needed (this call only): it will delete 1 entry (rule data.delete.bulk). Targets: C:\\guardrails\\a.txt; directories: C:\\guardrails\\guardrails-live-0.6.1; also destroys: Git metadata (C:\\guardrails\\.git). The approval applies to this call only.')
+    'Confirmation needed (this call only): it will delete 1 entry (rule data.delete.bulk). Targets: C:\\guardrails\\a.txt; directories: C:\\guardrails\\guardrails-live-fixture; also destroys: Git metadata (C:\\guardrails\\.git). The approval applies to this call only.')
   assert.doesNotMatch(display.detail.zh, /非豁免/)
   assert.doesNotMatch(display.detail.zh, /git-metadata-inside-tree/, 'the redundant flag is omitted')
 })
@@ -1322,6 +1323,15 @@ test('the renderList ellipsis is not counted as an item; the real count is used'
   assert.ok(!display.detail.en.includes('…'), display.detail.en)
 })
 
+test('the delete card lists the non-enumerable part instead of dropping it (H2)', async () => {
+  const display = await questionDisplayFor('entries: a; unknown: unresolved-target; unobserved: pattern * under C:\\ws')
+  assert.ok(display.detail.zh.includes('另含无法枚举的部分'), display.detail.zh)
+  assert.ok(display.detail.zh.includes('pattern * under'), display.detail.zh)
+  assert.ok(display.detail.zh.includes('原文：unresolved-target'), display.detail.zh)
+  assert.ok(display.detail.en.includes('Not enumerable:'), display.detail.en)
+  assert.ok(display.detail.en.includes('pattern * under'), display.detail.en)
+})
+
 test('Windows drive paths stay in the list and are never read as keys (H1)', async () => {
   const deleteCard = await questionDisplayFor('non-exempt entries: 3; entries: C:\\ws\\a.txt; C:\\ws\\b.txt; C:\\ws\\c.txt')
   assert.ok(deleteCard.detail.zh.includes('将删除 3 个条目'), deleteCard.detail.zh)
@@ -1367,7 +1377,7 @@ test('the Git metadata flag is shown in human words when no destruction note exi
   assert.doesNotMatch(display.detail.zh, /另将销毁/, 'no destruction note to claim')
 })
 
-test('an unknown internal flag stays out of the user-visible summary but stays in reason', async () => {
+test('an unknown unobserved token is shown as original wording and stays in the reason (H2)', async () => {
   const scope = 'non-exempt entries: 1; entries: /a; unobserved: custom-flag-x'
   const log = []
   const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { approval: approvalService(['allowed-once'], log) } })
@@ -1380,8 +1390,9 @@ test('an unknown internal flag stays out of the user-visible summary but stays i
   assert.equal(decision.kind, 'allow')
   const request = log[0]
   assert.ok(request.displayReason, 'the card gets a localized summary')
-  assert.ok(!request.displayReason.zh.includes('custom-flag-x'))
-  assert.ok(!request.displayReason.en.includes('custom-flag-x'))
+  // H2: unenumerable content is disclosed, unknown tokens marked as original wording.
+  assert.ok(request.displayReason.zh.includes('另含无法枚举的部分'), request.displayReason.zh)
+  assert.ok(request.displayReason.zh.includes('原文：custom-flag-x'), request.displayReason.zh)
   assert.doesNotMatch(request.displayReason.zh, /其他标记/)
   assert.ok(request.reason.includes('custom-flag-x'), 'the audit reason keeps the raw scope')
 })

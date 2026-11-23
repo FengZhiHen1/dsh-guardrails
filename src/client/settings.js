@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({
     }
     const dictionaries = {
       zh: {
-        summary: '限制灾难性操作，审批敏感文件访问，并遮罩可识别凭据。',
+        summary: '拦截灾难性操作，对敏感文件与高风险执行请求单次确认，并遮罩可识别凭据。',
         files: '自定义敏感文件', filesShort: '每行一个完整文件路径。', filesHelpLabel: '自定义敏感文件说明',
         filesHint: '读取、修改、删除或移动这些文件需要单次批准。仅填写文件路径，不支持目录规则、通配符或相对路径（仅查看元数据不触发）。',
         empty: '尚未添加自定义文件。',
@@ -37,11 +37,11 @@ window.__ModuleLoader__.load({
         pathError: '请填写最多 1024 个绝对文件路径；不支持通配符，每个路径最长 32768 个字符。必须是绝对路径（不支持相对路径）。',
         timeoutError: '请输入大于 0 且不超过 3600 的秒数，精度最多为毫秒。',
         scope: '保护范围', scopeHelpLabel: '保护范围说明',
-        scopeBody: '灾难性操作会被拒绝。删除超过 20 个未豁免条目时，插件会列出范围并请求一次确认。受保护文件的内容操作也需要限时确认。插件按实际操作及目标判定，Shell 命令、程序与文件工具共用同一套规则。此外，无法准确枚举的删除、移动来源、Git 清理/恢复/工作树移除，以及无法静态解析的执行，也会请求一次确认。',
-        limits: '能力与边界', limitsBody: '检查覆盖已接入的 DSH 工具。分析缺口会留下诊断，并结合该调用的其他证据判定。文件系统可能在检查后变化。插件遮罩可识别的凭据文本，结构化结果、错误与元数据的覆盖取决于宿主接口。',
+        scopeBody: '灾难性操作会被拒绝。删除超过 20 个受管目标时，插件会列出范围并请求一次确认。受保护文件的内容操作也需要限时确认。插件按实际操作及目标判定，Shell 命令、程序与文件工具共用同一套规则。此外，无法准确枚举的删除、移动来源、Git 清理/恢复/工作树移除，以及无法静态解析的执行，也会请求一次确认。',
+        limits: '能力与边界', limitsBody: '检查覆盖已接入的 DSH 工具。分析缺口会留下诊断，并结合该调用的其他证据判定。文件系统可能在检查后变化。插件遮罩可识别的凭据文本，结构化结果、错误与元数据的覆盖取决于宿主接口。配置中的无效规则项会被忽略，并写入一条日志告警。',
       },
       en: {
-        summary: 'Block recognized catastrophic operations, approve sensitive-file access and mask recognizable credentials.',
+        summary: 'Block catastrophic operations, request one-time confirmation for sensitive files and high-risk executions, and mask recognizable credentials.',
         files: 'Custom sensitive files', filesShort: 'One complete file path per line.', filesHelpLabel: 'About custom sensitive files',
         filesHint: 'Reading, changing, deleting or moving these files requires one-time approval. Directory rules, wildcards and relative paths are unsupported. (metadata-only inspection does not prompt)',
         empty: 'No custom files added.',
@@ -58,8 +58,8 @@ window.__ModuleLoader__.load({
         pathError: 'Enter up to 1024 absolute file paths without wildcards, each at most 32768 characters. Paths must be absolute; relative paths are not supported.',
         timeoutError: 'Enter seconds greater than 0 and at most 3600, with at most millisecond precision.',
         scope: 'Protection scope', scopeHelpLabel: 'About protection scope',
-        scopeBody: 'Guardrails refuses catastrophic operations. When deletion affects more than 20 non-exempt entries, Guardrails lists the scope and requests one-time approval. Content operations on protected files also require bounded approval. Shell commands, programs and file tools use the same rules for equivalent operations and targets. Deletions that cannot be enumerated, move sources, Git clean/restore, worktree removal, and executions that cannot be statically resolved also request one-time approval.',
-        limits: 'Capabilities and limits', limitsBody: 'Checks cover supported DSH tools. Coverage gaps are recorded and evaluated alongside other evidence for the call. Files can change after inspection. Guardrails masks recognizable credentials in text. Coverage of structured results, errors and metadata depends on the host interface.',
+        scopeBody: 'Guardrails refuses catastrophic operations. When deletion affects more than 20 managed targets, Guardrails lists the scope and requests one-time approval. Content operations on protected files also require bounded approval. Shell commands, programs and file tools use the same rules for equivalent operations and targets. Deletions that cannot be enumerated, move sources, Git clean/restore, worktree removal, and executions that cannot be statically resolved also request one-time approval.',
+        limits: 'Capabilities and limits', limitsBody: 'Checks cover supported DSH tools. Coverage gaps are recorded and evaluated alongside other evidence for the call. Files can change after inspection. Guardrails masks recognizable credentials in text. Coverage of structured results, errors and metadata depends on the host interface. Invalid per-rule configuration is ignored and logged as a warning.',
       },
     }
     const helpContent = {

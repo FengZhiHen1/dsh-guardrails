@@ -330,6 +330,7 @@ function deleteClauses(segments) {
   const targets = []
   const dirs = []
   const rawFlags = []
+  const unenumerable = []
   const notes = []
   for (const segment of segments) {
     if (!segment.key) {
@@ -354,16 +355,26 @@ function deleteClauses(segments) {
       case 'unobserved':
       case 'unknown':
         for (const item of splitList(segment.value)) {
+          // The git flag is folded into "also destroys Git metadata", never listed here.
+          if (item === 'git-metadata-inside-tree') {
+            rawFlags.push(item)
+            continue
+          }
           const path = gitDestroyPath(item)
-          if (path && !gitPath) gitPath = path
-          else rawFlags.push(unobservedZh(item))
+          if (path) {
+            if (!gitPath) gitPath = path
+          } else {
+            unenumerable.push(unobservedZh(item))
+          }
         }
         break
       case 'notes':
         notes.push(...splitNotes(segment.value))
         break
       default:
-        rawFlags.push(`${segment.label || segment.key}: ${segment.value}`)
+        // Unknown keyed segment: keep only its value; the card marks token-like
+        // values as "original wording" rather than leaking the internal key label.
+        unenumerable.push(segment.value)
     }
   }
   // Known flag: `git-metadata-inside-tree` is redundant when the .git destruction
@@ -375,11 +386,18 @@ function deleteClauses(segments) {
       includesGitMetadata = true
     }
   }
-  return { countRaw, gitPath, includesGitMetadata, targets, dirs, notes }
+  return { countRaw, gitPath, includesGitMetadata, targets, dirs, unenumerable, notes }
+}
+
+/** One non-enumerable part for Chinese: token-like values get an "原文" marker. */
+function unenumerableEntryZh(item) {
+  const text = String(item ?? '').trim()
+  if (!text) return ''
+  return /[\s*]/.test(text) ? text : `原文：${text}`
 }
 
 function renderDeleteZh(segments, ruleIds, limits) {
-  const { countRaw, gitPath, includesGitMetadata, targets, dirs, notes } = deleteClauses(segments)
+  const { countRaw, gitPath, includesGitMetadata, targets, dirs, unenumerable, notes } = deleteClauses(segments)
   const head = `${deleteHeadZh(countRaw)}（规则 ${ruleIds.join(',')}）`
   const clauses = []
   const shownTargets = formatZhList(targets, limits.targets, numericCount(countRaw))
@@ -388,6 +406,8 @@ function renderDeleteZh(segments, ruleIds, limits) {
   if (shownDirs) clauses.push(`涉及目录：${shownDirs}`)
   if (gitPath) clauses.push(`另将销毁：.git 元数据（${gitPath}）`)
   if (includesGitMetadata) clauses.push('范围内含 Git 元数据')
+  const unenumerableText = formatZhList(unenumerable.map(unenumerableEntryZh), 2)
+  if (unenumerableText) clauses.push(`另含无法枚举的部分：${unenumerableText}`)
   const noteText = renderNotesZh(notes)
   if (noteText) clauses.push(noteText)
   const tail = clauses.length > 0 ? `${head}。${clauses.join('；')}` : head
@@ -395,7 +415,7 @@ function renderDeleteZh(segments, ruleIds, limits) {
 }
 
 function renderDeleteEn(segments, ruleIds, limits) {
-  const { countRaw, gitPath, includesGitMetadata, targets, dirs, notes } = deleteClauses(segments)
+  const { countRaw, gitPath, includesGitMetadata, targets, dirs, unenumerable, notes } = deleteClauses(segments)
   const head = `it will delete ${countEn(countRaw)} ${entryWordEn(countRaw)} (rule ${ruleIds.join(',')})`
   const clauses = []
   const shownTargets = formatEnList(targets, limits.targets, numericCount(countRaw))
@@ -404,6 +424,8 @@ function renderDeleteEn(segments, ruleIds, limits) {
   if (shownDirs) clauses.push(`directories: ${shownDirs}`)
   if (gitPath) clauses.push(`also destroys: Git metadata (${gitPath})`)
   if (includesGitMetadata) clauses.push('also includes Git metadata')
+  const unenumerableText = formatEnList(unenumerable.map(String), 2)
+  if (unenumerableText) clauses.push(`Not enumerable: ${unenumerableText}`)
   const noteText = renderNotesEn(notes)
   if (noteText) clauses.push(noteText)
   const tail = clauses.length > 0 ? `${head}. ${clauses.join('; ')}` : head

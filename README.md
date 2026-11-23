@@ -1,8 +1,8 @@
 # dsh-guardrails
 
-dsh-guardrails 为 DeepSeek Harness 的受管工具提供数据破坏防护、敏感文件确认和凭据遮罩。
+dsh-guardrails 拦截灾难性操作、对敏感文件与高风险执行请求单次确认、遮罩可识别凭据。
 
-- 已识别的灾难性操作直接拒绝。删除超过 20 个未豁免文件或链接时，列出范围并请求一次确认。
+- 已识别的灾难性操作直接拒绝；无法静态解析的高风险执行会请求确认。删除超过 20 个受管目标、目标无法枚举、或移动来源时，列出范围并请求一次确认。
 - 对敏感文件的内容操作请求限时确认。受管结果中可识别的凭据在受支持的文本出口完整遮罩，标记为 `[REDACTED:<类别>]`。
 - Shell、程序和文件工具提交统一的操作事实。可以交付有效结果的覆盖缺口随本次调用记录，必检调用缺少可信结果时拒绝派发。
 
@@ -17,15 +17,15 @@ dsh-guardrails 为 DeepSeek Harness 的受管工具提供数据破坏防护、�
 | `sensitiveFiles` | `[]` | 需要保护的精确绝对文件路径 |
 | `builtinSensitiveAsk` | `true` | 内置敏感文件名单的内容操作确认 |
 | `askTimeoutMs` | `120000` | 确认等待上限（毫秒）；`0` 使用有界默认值 |
-| `alwaysAsk` | `true` | 会话审批策略为 `never` 或审批 seam 缺失时，改经问答通道弹一次确认 |
+| `alwaysAsk` | `true` | 会话审批策略为 `never` 或审批 seam 缺失时，改经问答通道弹一次确认；无客户端应答方的无人值守会话仍拒绝 |
 
 ## 确认通道与失效路径
 
 - 通道优先级：审批 seam 存在且有效策略为 `ask` 时走官方审批；策略为 `never` 或审批 seam 缺失时，在 `alwaysAsk` 开启且问答服务可用时改走问答通道；审批 seam 存在但返回 `unavailable`（无应答方）时直接拒绝（`APPROVAL_UNAVAILABLE`），不再回退问答。
 - 无客户端应答方时（headless、CI、未连接该会话）仍拒绝，fail-closed。
 - 委派子代理会话无法使用问答通道（宿主把子会话审批固定为 `never`），直接拒绝。
-- 拒绝文案区分归因：`APPROVAL_REJECTED` 表示真的有人拒绝；`APPROVAL_POLICY_NEVER` 表示策略/开关禁止（`alwaysAsk` 关闭）；`APPROVAL_UNAVAILABLE` 表示没有交互应答方接受该确认；`APPROVAL_DELEGATED` 表示发生在委派子代理会话。后三者不得表述为「用户拒绝」。
-- Web 端把确认展示为标准审批卡（标题、说明、「拒绝」「允许一次」）：中英界面按 `intent.display` 显示本地化标题/说明/允许标签；非中英界面回退英文标题/说明与英文允许标签，拒绝等固定操作按客户端语言包本地化。`ask` 与 `never` 两条通道都使用同一套本地化单段人话摘要（不展示内部字段名/标记 token），长列表按数量截断。拒绝与确认文案按受众分层：agent 英文技术、用户中英单段。非 Web 客户端降级为最小卡片。人工确认放行后，插件向模型的下一步注入一条一次性确认记录（`rule`/`confirmed_by`/`channel`/`scope`/`this_call_only`）。
+- 拒绝文案区分归因：`APPROVAL_REJECTED` 表示真的有人拒绝；`APPROVAL_POLICY_NEVER` 表示策略/开关禁止（`alwaysAsk` 关闭）；`APPROVAL_UNAVAILABLE` 表示当前环境没有可用确认通道或应答方（无 UI、seam 缺失、无人应答）；`APPROVAL_DELEGATED` 表示发生在委派子代理会话。后三者不得表述为「用户拒绝」。
+- Web 端把确认展示为标准审批卡（标题、说明、「拒绝」「允许一次」）：中英界面按 `intent.display` 显示本地化标题/说明/允许标签；非中英界面回退英文标题/说明与英文允许标签，拒绝等固定操作按客户端语言包本地化。`ask` 与 `never` 两条通道都使用同一套本地化单段人话摘要（不展示内部字段名/标记 token），长列表按数量截断。拒绝与确认文案按受众分层：agent 英文技术、用户中英单段。非 Web 客户端降级为最小卡片。经确认应答方（可能是用户）放行后，插件向模型的下一步注入一条一次性确认记录（`rule`/`confirmed_by=answerer`/`channel=approval-card` 或 `channel=question-card`/`scope`/`this_call_only`）。
 - 问答通道、`APPROVAL_POLICY_NEVER` 与 `APPROVAL_UNAVAILABLE` 路径都不产生 `approval/asked`、`approval/decided` 审计事件。批准只放行当前调用，不落盘。
 
 ## 覆盖边界

@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
 const source = await readFile(new URL('../src/client/settings.js', import.meta.url), 'utf8')
+const localeZh = JSON.parse(await readFile(new URL('../locale/zh.json', import.meta.url), 'utf8'))
+const localeEn = JSON.parse(await readFile(new URL('../locale/en.json', import.meta.url), 'utf8'))
 let plugin
 vm.runInNewContext(source, { window: { __ModuleLoader__: { load(entry) {
   plugin = entry.factory(name => {
@@ -83,6 +85,22 @@ test('settings explains subagent refusals and non-enumerable approvals in both l
     '(metadata-only inspection does not prompt)',
   ]
   for (const text of copy) assert.ok(source.includes(text), text)
+})
+
+test('settings summary matches the package display description in both languages', () => {
+  assert.ok(localeZh.meta.description.includes('拦截'), localeZh.meta.description)
+  assert.ok(localeZh.meta.description.includes('高风险执行'), localeZh.meta.description)
+  assert.ok(localeEn.meta.description.includes('Block catastrophic operations'), localeEn.meta.description)
+  assert.ok(localeEn.meta.description.includes('high-risk executions'), localeEn.meta.description)
+  assert.ok(source.includes(`summary: '${localeZh.meta.description}'`), 'zh summary equals locale/zh.json description')
+  assert.ok(source.includes(`summary: '${localeEn.meta.description}'`), 'en summary equals locale/en.json description')
+})
+
+test('settings uses managed-target wording and notes ignored invalid rules', () => {
+  assert.ok(source.includes('删除超过 20 个受管目标'))
+  assert.ok(source.includes('more than 20 managed targets'))
+  assert.ok(source.includes('配置中的无效规则项会被忽略，并写入一条日志告警。'))
+  assert.ok(source.includes('Invalid per-rule configuration is ignored and logged as a warning.'))
 })
 
 test('settings owns bilingual dictionary and row slot resources for unload', () => {

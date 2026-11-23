@@ -765,6 +765,18 @@ test('renderDecision: deny block drops an empty scope line instead of "not captu
   assert.doesNotMatch(text, /^Scope:/m)
 })
 
+test('a fault names the real gap code instead of a crash/protocol guess (N4/R8)', () => {
+  const named = decide({ ...CLEAN, analysisStatus: 'fault', gaps: [{ code: 'GUARD_PATCH_PARSE_FAILED' }] }, {})
+  const namedText = renderDecision(named)
+  assert.match(namedText, /Trigger: check failure: GUARD_PATCH_PARSE_FAILED/)
+  assert.doesNotMatch(namedText, /crash, protocol damage/)
+  assert.doesNotMatch(namedText, /deny without an allow fallback/)
+
+  const fallback = decide({ ...CLEAN, analysisStatus: 'fault', gaps: [{ kind: 'no-analyzer' }] }, {})
+  assert.match(fallback.trigger, /analysis fault \(crash, protocol damage, or deadline miss\)/)
+  assert.match(renderDecision(fallback), /crash, protocol damage/)
+})
+
 test('renderDecision: check-failed carries the real gap code in Trigger and omits an empty Scope', () => {
   const decision = decide({
     ...CLEAN,
