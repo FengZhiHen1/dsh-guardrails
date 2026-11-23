@@ -792,6 +792,24 @@ test('renderDecision: check-failed carries the real gap code in Trigger and omit
   assert.doesNotMatch(text, /^Scope:/m)
 })
 
+test('catastrophic.git-history offers concrete tag/branch alternatives', () => {
+  const decision = decide({
+    ...CLEAN,
+    operations: [{ action: 'git-history-destroy', target: { kind: 'unknown', reason: 'x', knownScope: [] }, preview: false }],
+  }, {})
+  const text = renderDecision(decision)
+  assert.match(text, /git tag -d <name>/)
+  assert.match(text, /refs\/tags\//)
+  assert.match(text, /Deleting a branch is also refused here; do not attempt it\./)
+  assert.doesNotMatch(text, /refs\/heads\//)
+})
+
+test('credential.file.mutate offers a manual alternative', () => {
+  const decision = decide({ ...CLEAN, protectedHits: [{ path: '/a/.env', action: 'delete' }] }, {})
+  assert.equal(decision.kind, 'confirm')
+  assert.match(renderDecision(decision), /or ask the user to make the change manually\./)
+})
+
 test('every deny block declares "Nothing was executed" exactly once', () => {
   const catastrophic = decide({ ...CLEAN, identities: [{ ruleId: 'catastrophic.device', path: '\\\\.\\PHYSICALDRIVE0', action: 'delete' }] }, {})
   const catText = renderDecision(catastrophic)

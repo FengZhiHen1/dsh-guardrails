@@ -693,6 +693,22 @@ test('invalid shell input is a bounded fault at the gate boundary', async () => 
   // The rendered block now names the real stage code in its Trigger line.
   assert.match(decision.reason, /Trigger: check failure: GUARD_INVALID_SHELL_INPUT/)
   assert.match(decision.reason, /codes: GUARD_INVALID_SHELL_INPUT/)
+  // STAGE_META gives an actionable alternative for this stage.
+  assert.match(decision.reason, /Effect:  The tool argument carrying command text was missing or not a string/)
+  assert.match(decision.reason, /Next:    Nothing was executed\. Pass the command as one string for the shell tool/)
+})
+
+test('a relative working directory fault explains the absolute-path alternative', async () => {
+  const { ctx, state } = fakeCtx({ definitions: ALL_OFFICIAL, services: { workingDirectory: { get: () => undefined } } })
+  const { renderDecision } = await import('../src/core/decision.js')
+  const deps = fakeDeps()
+  deps.renderDecision = renderDecision
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'x', workdir: 'sub' }, agent: {} }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /GUARD_WORKDIR_UNRESOLVED/)
+  assert.match(decision.reason, /Effect:  The relative working directory has no resolvable base/)
+  assert.match(decision.reason, /Next:    Nothing was executed\. Use an absolute working directory/)
 })
 
 test('a patch-parse fault carries the real gap code in its trigger', async () => {
@@ -799,13 +815,47 @@ test('ask timeout for other targets points at a manual or later run', async () =
   })
   const deps = fakeDeps({
     policy: { askTimeoutMs: 20 },
+    verdict: { kind: 'confirm', ruleId: 'data.git.worktree', scope: { knownScope: ['/wt'] } },
+  })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'git worktree remove /wt' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed\./)
+  assert.match(decision.reason, /when the user can respond/)
+})
+
+test('ask timeout for credential targets suggests a redacted excerpt or injection', async () => {
+  const { ctx, state } = fakeCtx({
+    definitions: ALL_OFFICIAL,
+    services: { approval: approvalService([() => new Promise(() => {})]) },
+  })
+  const deps = fakeDeps({
+    policy: { askTimeoutMs: 20 },
     verdict: { kind: 'confirm', ruleId: 'credential.file.read', scope: { files: ['secrets.env'] } },
   })
   installGate(ctx, deps)
   const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'cat secrets.env' } }), async () => ({ kind: 'allow' }))
   assert.equal(decision.kind, 'deny')
   assert.match(decision.reason, /APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed\./)
-  assert.match(decision.reason, /when the user can respond/)
+  assert.match(decision.reason, /paste a redacted excerpt, or use credential injection\/environment variables/)
+  assert.doesNotMatch(decision.reason, /make the change manually/)
+  assert.doesNotMatch(decision.reason, /when the user can respond/)
+})
+
+test('ask timeout for credential.file.mutate asks the user to make the change manually', async () => {
+  const { ctx, state } = fakeCtx({
+    definitions: ALL_OFFICIAL,
+    services: { approval: approvalService([() => new Promise(() => {})]) },
+  })
+  const deps = fakeDeps({
+    policy: { askTimeoutMs: 20 },
+    verdict: { kind: 'confirm', ruleId: 'credential.file.mutate', scope: { files: ['secrets.env'] } },
+  })
+  installGate(ctx, deps)
+  const decision = await preExecuteOf(state)(execution({ name: 'bash', args: { command: 'rm secrets.env' } }), async () => ({ kind: 'allow' }))
+  assert.equal(decision.kind, 'deny')
+  assert.match(decision.reason, /Ask the user to make the change manually; agent tools must not modify credential files\./)
+  assert.doesNotMatch(decision.reason, /paste a redacted excerpt/)
 })
 
 test('caller cancellation during analysis denies and never grants', async () => {

@@ -256,8 +256,13 @@ export function installRedaction(ctx) {
         if (unsafe(result.error?.message) || unsafe(result.error?.info) || unsafe(result.meta)) {
           return withheldDecision(WITHHELD_ERROR)
         }
+        // Defense in depth: a failed result must never carry a credential-bearing
+        // value. The current runtime rejects such a replacement, but an upstream
+        // hook or a future runtime must not be able to leak it.
+        if (Object.hasOwn(result, 'value') && unsafe(result.value)) return withheldDecision(WITHHELD_ERROR)
+        if (Object.hasOwn(decision, 'value') && unsafe(decision.value)) return withheldDecision(WITHHELD_ERROR)
         if (Object.hasOwn(decision, 'value')) {
-          // Unreachable: the runtime rejects replacing the value of a failed result.
+          // A clean replacement is left to the runtime, which currently rejects it.
           return decision
         }
         const source = Object.hasOwn(decision, 'content') ? decision.content : result.content

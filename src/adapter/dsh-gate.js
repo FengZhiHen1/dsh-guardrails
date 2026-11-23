@@ -254,6 +254,8 @@ export function installGate(ctx, deps) {
    * text states plainly that nothing was executed. */
   const APPROVAL_DENIALS = {
     timeoutTargets: 'APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed. Re-issue the call with fewer, literal targets if the operation is still needed.',
+    timeoutCredentialRead: 'APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed. Ask the user to open the file and paste a redacted excerpt, or use credential injection/environment variables instead.',
+    timeoutCredentialMutate: 'APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed. Ask the user to make the change manually; agent tools must not modify credential files.',
     timeoutOther: 'APPROVAL_TIMEOUT: No confirmation arrived within the wait; nothing was executed. Re-run it when the user can respond, or handle it manually.',
     rejected: 'APPROVAL_REJECTED: The user rejected this confirmation; nothing was executed. Do not retry the same call.',
     cancelled: 'APPROVAL_CANCELLED: The call was cancelled before any decision; nothing was executed.',
@@ -264,11 +266,19 @@ export function installGate(ctx, deps) {
     delegated: 'APPROVAL_DELEGATED: This operation runs in a delegated subagent session, which cannot ask the user; nothing was executed. Re-run it from the parent session.',
   }
 
-  /** Timeout copy depends on the confirmed target family. */
+  /** Timeout copy depends on the confirmed target family (three-way, credentials split read/mutate). */
   function timeoutReasonFor(ruleIds) {
     const ids = Array.isArray(ruleIds) ? ruleIds.map(String) : []
-    const removable = ids.some((id) => id.startsWith('data.delete.') || id.startsWith('data.move.'))
-    return removable ? APPROVAL_DENIALS.timeoutTargets : APPROVAL_DENIALS.timeoutOther
+    if (ids.some((id) => id.startsWith('data.delete.') || id.startsWith('data.move.'))) {
+      return APPROVAL_DENIALS.timeoutTargets
+    }
+    const credentials = ids.filter((id) => id.startsWith('credential.'))
+    if (credentials.length > 0) {
+      return credentials.includes('credential.file.mutate')
+        ? APPROVAL_DENIALS.timeoutCredentialMutate
+        : APPROVAL_DENIALS.timeoutCredentialRead
+    }
+    return APPROVAL_DENIALS.timeoutOther
   }
 
   /** Sentinel distinguishing "the wait was cancelled" from a channel result. */

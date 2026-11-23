@@ -2,7 +2,17 @@
 
 本文件记录面向用户的可见变更：每个版本列出新增、变更、修复与移除的行为。内部验证过程、测试日志与环境取证不入此处。版本号序列按时间保留；`3.x` 为版本线重置前的历史（均未发布）。
 
-未发布改动统一记在 Unreleased；只有通过稳定门禁、真正发布的版本才有版本段。
+未发布改动统一记在 Unreleased；只有通过稳定门禁、真正发布的版本才有版本段。下个稳定版为 0.5.0（不跳号）。
+
+## Unreleased
+
+### 输出面与文案
+
+- **保守拒绝补替代路径**：`catastrophic.git-history`/`git push --delete` 指向 `git tag -d`/`refs/tags/*`；`GUARD_INVALID_SHELL_INPUT` 改单字符串输入或文件原文；`GUARD_WORKDIR_UNRESOLVED` 改绝对路径；`APPROVAL_TIMEOUT`（credential）改用户粘贴脱敏片段或凭据注入；`credential.file.mutate` 请用户手工修改；`APPROVAL_POLICY_NEVER`/`UNAVAILABLE`/`DELEGATED` 启用提示/换会话/回父会话；`data.delete.dynamic` 改字面可枚举路径。
+
+### 遮罩与安全
+
+- **错误结果 value 防御性 withhold**：运行时通常会拒绝替换失败结果的 value；插件仍做防御性 withhold（纵深防御），并有 hook 级测试。
 
 ## 0.4.0
 

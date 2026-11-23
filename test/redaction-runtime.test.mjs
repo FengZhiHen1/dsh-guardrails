@@ -223,12 +223,15 @@ test('real ToolRuntime withholds content replacements over unsafe values and san
   assert.ok(!JSON.stringify(contexts).includes(secret))
 })
 
-test('real ToolRuntime rejects replacing the value of a failed result', { skip: !runtime && 'Install runtime dependencies or set DSH_RUNTIME_PATH' }, async t => {
+test('real ToolRuntime ends with no value when a hook replaces a failed result value', { skip: !runtime && 'Install runtime dependencies or set DSH_RUNTIME_PATH' }, async t => {
   const ctx = await setup(t)
-  // Another hook tries the branch this plugin must never rely on.
+  // Another hook tries to attach a replacement value. Either this hook's
+  // defense-in-depth or the runtime's own rejection must leave no value behind.
   ctx.on('tools/post-execute', async (exec, _result, next) => {
     const decision = await next()
-    return exec.name === 'failure_value' ? { ...decision, value: 'rejected' } : decision
+    if (exec.name === 'failure_value') return { ...decision, value: 'rejected' }
+    if (exec.name === 'failure_secret_value') return { ...decision, value: secret }
+    return decision
   })
   register(ctx, 'failure_value', null, { type: 'null' }, { execute: async () => { throw new Error('boom') } })
   const result = await execute(ctx, 'failure_value')
@@ -236,6 +239,12 @@ test('real ToolRuntime rejects replacing the value of a failed result', { skip: 
   assert.match(result.error.message, /cannot replace the value of a failed result/)
   assert.ok(!Object.hasOwn(result, 'value'))
   assert.ok(!JSON.stringify(result).includes(secret))
+  register(ctx, 'failure_secret_value', null, { type: 'null' }, { execute: async () => { throw new Error('boom') } })
+  const defended = await execute(ctx, 'failure_secret_value')
+  assert.equal(defended.isError, true)
+  assert.match(defended.content[0].text, /This error result was withheld/)
+  assert.ok(!Object.hasOwn(defended, 'value'))
+  assert.ok(!JSON.stringify(defended).includes(secret))
 })
 
 test('real ToolRuntime withholds unsafe tool-supplied contexts', { skip: !runtime && 'Install runtime dependencies or set DSH_RUNTIME_PATH' }, async t => {

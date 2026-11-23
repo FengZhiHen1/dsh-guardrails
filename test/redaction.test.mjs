@@ -430,13 +430,31 @@ test('PTC dispatch log deep-masks every string and withholds unprovable blocks',
   assert.deepEqual(await log({}, async () => { throw new Error(token) }), [withheld])
 })
 
-test('a failed result cannot carry a replacement value: the runtime rejects it, so the branch is unreachable', async () => {
+test('a failed result carrying a credential-bearing value is withheld by defense in depth', async () => {
   const { ctx, events } = harness()
   installRedaction(ctx)
   const post = events.get('tools/post-execute')
-  const result = { isError: true, value: token, content: [{ type: 'text', text: token }] }
-  const decision = await post({ name: 'failure', arguments: {} }, result, async () => ({ kind: 'accept', value: token }))
-  // The real pipeline throws instead of accepting this decision (see the runtime test).
-  assert.equal(decision.value, token)
+  for (const value of [{ token }, token]) {
+    const result = { isError: true, value, content: [{ type: 'text', text: token }] }
+    const decision = await post({ name: 'failure', arguments: {} }, result, async () => ({ kind: 'accept' }))
+    assert.equal(decision.kind, 'block')
+    assert.match(decision.feedback[0].text, /withheld/)
+    assert.ok(!JSON.stringify(decision).includes(token))
+  }
+  // An upstream hook injecting a replacement value on a failure is covered too.
+  const injected = await post({ name: 'failure', arguments: {} }, { isError: true, content: [] }, async () => ({ kind: 'accept', value: token }))
+  assert.equal(injected.kind, 'block')
+  assert.ok(!JSON.stringify(injected).includes(token))
+})
+
+test('a failed result with a clean value keeps its usual error handling', async () => {
+  const { ctx, events } = harness()
+  installRedaction(ctx)
+  const post = events.get('tools/post-execute')
+  const clean = { isError: true, value: { label: 'ok' }, content: [{ type: 'text', text: 'visible' }] }
+  const decision = await post({ name: 'failure', arguments: {} }, clean, async () => ({ kind: 'accept' }))
+  assert.equal(decision.kind, 'accept')
   assert.ok(!Object.hasOwn(decision, 'content'))
+  const masked = await post({ name: 'failure', arguments: {} }, { isError: true, value: { label: 'ok' }, content: [{ type: 'text', text: token }] }, async () => ({ kind: 'accept' }))
+  assert.equal(masked.content[0].text, '[REDACTED:provider]')
 })

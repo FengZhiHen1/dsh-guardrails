@@ -157,7 +157,7 @@ const RULE_META = {
   },
   'catastrophic.git-history': {
     effect: 'Stops Git history destruction.',
-    next: 'Avoid history-destroying Git subcommands; operate on explicit paths instead.',
+    next: 'Do not rewrite or destroy Git history. To remove a tag: `git tag -d <name>` locally, or `git push origin --delete refs/tags/<name>` remotely. Deleting a branch is also refused here; do not attempt it.',
   },
   'data.delete.ordinary': {
     effect: 'Verified the non-exempt deletion set is enumerable and within the 20-entry allow threshold.',
@@ -193,7 +193,7 @@ const RULE_META = {
   },
   'credential.file.mutate': {
     effect: 'Requires a one-time, time-limited confirmation before a protected file is written, cleared, deleted or moved.',
-    next: 'Do not modify credential files through agent tools; approval applies only to this call.',
+    next: 'Do not modify credential files through agent tools; approval applies only to this call, or ask the user to make the change manually.',
   },
   'credential.inline': {
     effect: 'Stops an inline credential literal from spreading into command arguments and persisted tool input.',
@@ -237,6 +237,14 @@ const STAGE_META = {
   ANALYSIS_UNAVAILABLE: {
     effect: 'The safety analysis could not read this call (unsupported or unparsable command or target).',
     next: 'Nothing was executed. Retry with a literal command; report it if it persists.',
+  },
+  GUARD_INVALID_SHELL_INPUT: {
+    effect: 'The tool argument carrying command text was missing or not a string, so the call was not dispatched.',
+    next: 'Pass the command as one string for the shell tool; if it comes from a file, read it first and pass the literal text.',
+  },
+  GUARD_WORKDIR_UNRESOLVED: {
+    effect: 'The relative working directory has no resolvable base, so the call was not dispatched.',
+    next: 'Use an absolute working directory (or an absolute path in the command).',
   },
   GUARD_PATCH_PARSE_FAILED: {
     effect: 'The patch or target could not be parsed, so the call was not dispatched.',
